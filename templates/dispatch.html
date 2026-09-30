@@ -1,0 +1,765 @@
+{% extends "base.html" %}{% block body %}
+<div id="flash" class="flashbar hidden">New pending order
+  <button class="btn tiny" onclick="clearFlash()">Got it</button></div>
+<div class="head">
+  <h1>Dispatch board</h1>
+  <div><a class="btn small primary" href="/dispatch/new-order">Create order</a>
+       <a class="btn small" href="/dispatch/restaurants">Restaurant hours</a>
+       <a class="btn small" href="/dispatch/schedule">Driver schedule</a>
+    <a class="btn small" href="/dispatch/hours">Closed days</a>
+  <a class="btn small" href="/dispatch/map">Driver map</a>
+  <a class="btn small" href="/dispatch/account">Dispatchers</a>
+       <a class="btn small" href="/dispatch/settings">Fees</a>
+       <a class="btn small" href="/dispatch/logout">Sign out</a></div>
+</div>
+<div class="row"><span class="muted small" id="soundNote"></span>
+  <button class="btn tiny" id="soundBtn" onclick="toggleSound()">Sound</button>
+  <button class="btn tiny hidden" id="notifBtn">Turn on pop-up alerts</button><span class="muted small" id="notifNote"></span></div>
+<div class="tabbar">
+  <button class="tab on" id="tabBoard" onclick="page('board')">Order board</button>
+  <button class="tab" id="tabComms" onclick="page('comms')">Driver chat and mass text
+    <span class="pill red hidden" id="chatBadge"></span></button>
+</div>
+<div id="chatAlert" class="chatalert hidden" onclick="page('comms')"></div>
+
+<div id="pageComms" class="hidden">
+  <div class="cols">
+    <section class="panel"><h2>Driver chat</h2>
+      <div class="row"><select id="chatDriver" onchange="loadChat()"></select>
+        <span class="muted small" id="chatWho"></span></div>
+      <div id="chat" class="chat tall"></div>
+      <div class="row"><input id="chatBox" placeholder="Message the driver"
+        onkeydown="if(event.key==='Enter')send()"><button class="btn" onclick="send()">Send</button></div>
+      <div id="chatRoster" class="muted small"></div>
+    </section>
+    <aside class="panel"><h2>Mass text</h2>
+      <div class="masstext">
+        <select id="castTo">
+          <option value="active">On shift drivers</option>
+          <option value="scheduled">Scheduled group</option>
+          <option value="unavailable">Unavailable group</option>
+          <option value="all">Everyone</option>
+        </select>
+        <textarea id="castBody" rows="3" placeholder="Heavy volume tonight, scheduled drivers in by 6."></textarea>
+        <button class="btn tiny primary" onclick="sendCast()">Send to group</button>
+        <div id="castLog" class="muted small"></div>
+      </div>
+      <h2 class="mt">Recent group texts</h2>
+      <div id="castHist" class="muted small"></div>
+    </aside>
+  </div>
+</div>
+
+<div id="pageBoard">
+<div id="callAlerts" class="hidden"></div>
+<div class="row" style="margin:6px 0">
+  <input id="find" placeholder="Find an order: our number, their number, name or phone"
+         oninput="board(true)" style="max-width:420px">
+  <span class="muted small" id="findNote"></span>
+</div>
+<div class="cols3">
+  <section><h2>Restaurants</h2><div id="rests"></div>
+    <h2>Blocked customers</h2>
+    <div class="row"><input id="blockPhone" placeholder="Phone to block or unblock"
+         style="max-width:160px"><button class="btn tiny" onclick="toggleBlock()">Block</button></div>
+    <div id="blocked" class="muted small"></div>
+  </section>
+  <section class="wide">
+    <div class="row between"><h2>Pending <span class="muted" id="pendCount"></span></h2><label class="autoswitch"><input type="checkbox" id="autoSw" onchange="setAuto()"><span id="autoLbl">Auto dispatch</span></label>
+      <a class="btn tiny" href="/dispatch/manage">Restaurants and drivers</a></div>
+    <p class="muted small">Waiting on the kitchen or on a free driver. Drag a card onto a driver on the right.</p>
+    <div class="pendrow">
+      <div id="pending" class="dropzone queuezone" ondragover="allowDrop(event)"
+           ondragleave="dragLeave(event)" ondrop="dropOnQueue(event)"></div>
+      <aside class="driverrail">
+        <h2>Drivers</h2>
+        <div class="tabs" id="rosterTabs">
+          <button class="tab on" data-roster="active" onclick="setRoster('active')">On shift</button>
+          <button class="tab" data-roster="scheduled" onclick="setRoster('scheduled')">Scheduled</button>
+          <button class="tab" data-roster="unavailable" onclick="setRoster('unavailable')">Unavailable</button>
+        </div>
+        <div id="drivers"></div>
+        <button class="btn small" onclick="page('comms')">Open driver chat
+          <span class="pill red hidden" id="railBadge"></span></button>
+      </aside>
+    </div>
+    <h2 class="mt">Active runs <span class="muted" id="activeCount"></span></h2>
+    <p class="muted small">Already on a driver: assigned, picked up, or on the way.</p>
+    <div id="orders"></div>
+    <div class="tabs"><button class="tab on" id="tabLive" onclick="tab('live')">Live orders</button>
+      <button class="tab" id="tabDone" onclick="tab('done')">Completed orders</button></div>
+    <div id="completed" class="hidden"></div></section>
+</div>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+let DRAGGED = null;
+let SEEN_PENDING = null;
+let LAST = null;
+let REDO = [];
+
+let CHAT_SEEN = null;
+let PAGE = 'board';
+function page(which){
+  PAGE = (which === 'comms') ? 'comms' : 'board';
+  const show = function(id, on){
+    const el = document.getElementById(id);
+    if (el) el.classList.toggle('hidden', !on);
+  };
+  show('pageBoard', PAGE === 'board');
+  show('pageComms', PAGE === 'comms');
+  const tb = document.getElementById('tabBoard');
+  const tc = document.getElementById('tabComms');
+  if (tb) tb.classList.toggle('on', PAGE === 'board');
+  if (tc) tc.classList.toggle('on', PAGE === 'comms');
+  if (PAGE === 'comms'){
+    if (tc) tc.classList.remove('alerting');
+    const a = document.getElementById('chatAlert');
+    if (a) a.classList.add('hidden');
+    const badge = document.getElementById('chatBadge');
+    if (badge) badge.classList.add('hidden');
+    const rb = document.getElementById('railBadge');
+    if (rb) rb.classList.add('hidden');
+    document.title = 'Dispatch board';
+    loadChat();
+  }
+}
+function openChatWith(did){
+  page('comms');
+  const sel = document.getElementById('chatDriver');
+  if (sel) { sel.value = String(did); loadChat(); }
+  const a = document.getElementById('chatAlert');
+  if (a) a.classList.add('hidden');
+}
+function chatNotify(res){
+  const n = res.chat_unread || 0;
+  const m = res.chat_latest;
+  // the tab itself carries the count and goes red until the thread is opened
+  [['chatBadge', n ? (n + ' unread') : ''], ['railBadge', n ? String(n) : '']].forEach(function(p){
+    const el = document.getElementById(p[0]);
+    if (!el) return;
+    el.textContent = p[1];
+    el.classList.toggle('hidden', n === 0);
+  });
+  const tabBtn = document.getElementById('tabComms');
+  if (tabBtn) tabBtn.classList.toggle('alerting', n > 0 && PAGE !== 'comms');
+  const alert = document.getElementById('chatAlert');
+  if (!m){
+    CHAT_SEEN = null;
+    if (alert) alert.classList.add('hidden');
+    document.title = 'Dispatch board';
+    return;
+  }
+  if (alert && PAGE !== 'comms'){
+    alert.innerHTML = '<strong>' + m.driver + '</strong> at ' + m.at + ': ' +
+      m.body.replace(/</g,'&lt;') +
+      ' <button class="btn tiny" onclick="openChatWith(' + m.driver_id + ')">Open chat</button>';
+    alert.classList.remove('hidden');
+  }
+  if (CHAT_SEEN !== m.id){
+    const first = CHAT_SEEN === null;
+    CHAT_SEEN = m.id;
+    if (!first && window.ffSound && ffSound.play) ffSound.play('ping');
+    if (!first) document.title = '(' + n + ') Dispatch board';
+  }
+  if (n === 0) document.title = 'Dispatch board';
+}
+function clearFlash(){
+  document.getElementById('flash').classList.add('hidden');
+  document.body.classList.remove('flashing');
+  if (window.ffSound && ffSound.stopLoop) ffSound.stopLoop();
+}
+function flashPending(n){
+  const f = document.getElementById('flash');
+  f.textContent = n + ' pending order' + (n===1?'':'s') + ' waiting on the kitchen ';
+  const b2 = document.createElement('button');
+  b2.className = 'btn tiny'; b2.textContent = 'Got it'; b2.onclick = clearFlash;
+  f.appendChild(b2);
+  f.classList.remove('hidden');
+  document.body.classList.add('flashing');
+  if (window.ffSound && ffSound.startLoop) ffSound.startLoop(5000);
+}
+function dragOrder(ev, oid){
+  DRAGGED = oid;
+  ev.dataTransfer.setData('text/plain', String(oid));
+  ev.dataTransfer.effectAllowed = 'move';
+}
+function dragEnd(){ DRAGGED = null;
+  document.querySelectorAll('.dropzone').forEach(e=>e.classList.remove('over')); }
+function allowDrop(ev){ ev.preventDefault(); ev.dataTransfer.dropEffect='move';
+  const z = ev.currentTarget.closest('.dropzone'); if (z) z.classList.add('over'); }
+function dragLeave(ev){ const z = ev.currentTarget.closest('.dropzone');
+  if (z) z.classList.remove('over'); }
+async function dropOnDriver(ev, did){
+  ev.preventDefault();
+  const oid = DRAGGED || parseInt(ev.dataTransfer.getData('text/plain'), 10);
+  dragEnd();
+  if(!oid) return;
+  const res = await jpost('/api/dispatch/assign', {order_id: oid, driver_id: did});
+  if(!res.ok){ alert(res.error || 'Could not move that order.'); }
+  board();
+}
+// dragging a stop off a driver and onto the pending column sends it back to the queue
+async function dropOnQueue(ev){
+  ev.preventDefault();
+  const oid = DRAGGED || parseInt(ev.dataTransfer.getData('text/plain'), 10);
+  dragEnd();
+  if(!oid) return;
+  const res = await jpost('/api/dispatch/assign', {order_id: oid, driver_id: null});
+  if(!res.ok){ alert(res.error || 'Could not unassign that order.'); }
+  board();
+}
+async function toggleBlock(){
+  const phone = document.getElementById('blockPhone').value;
+  if(!phone) return;
+  const res = await jpost('/api/dispatch/block', {phone: phone});
+  if(res.ok){ document.getElementById('blockPhone').value=''; loadBlocked(); }
+  else alert(res.error || 'Could not update that number.');
+}
+async function loadBlocked(){
+  const res = await jget('/api/dispatch/blocked');
+  if(!res.ok) return;
+  document.getElementById('blocked').innerHTML = res.blocked.length
+    ? res.blocked.map(b2=>'<div class="row"><span>'+b2.phone+'</span>'+
+        '<button class="btn tiny" onclick="unblock(\''+b2.phone+'\')">Unblock</button></div>').join('')
+    : 'No blocked numbers.';
+}
+async function unblock(p){ await jpost('/api/dispatch/block', {phone:p}); loadBlocked(); }
+async function editOrder(oid){
+  const res = await jget('/api/dispatch/board');
+  let o = null;
+  ['pending','queued','running','completed','live','done'].forEach(k=>{
+    (res[k]||[]).forEach(x=>{ if(x.id===oid) o = x; });
+  });
+  if(!o){ alert('Order not found.'); return; }
+  const items = o.items.map(i=>{
+    const q = prompt('Qty for '+i.name+' ('+money(i.price_cents)+' each'+
+      (i.fee_cents?', fee '+money(i.fee_cents):'')+'). 0 removes it.', i.qty);
+    if(q===null) return i;
+    return Object.assign({}, i, {qty: parseInt(q,10) || 0});
+  });
+  while(confirm('Add a custom item to '+o.code+'?')){
+    const name = prompt('Custom item name');
+    if(!name) break;
+    const price = prompt('Price in dollars for '+name, '0');
+    if(price===null) break;
+    const cfee = prompt('Fee charged on top of that item, in dollars (0 for none)', '0');
+    if(cfee===null) break;
+    const qty = parseInt(prompt('How many?', '1')||'1', 10) || 1;
+    const note = prompt('Note for the kitchen (optional)', '') || '';
+    items.push({menu_item_id:null, custom:true, name:name, qty:qty,
+      price_cents: Math.round(parseFloat(price||'0')*100),
+      fee_cents: Math.round(parseFloat(cfee||'0')*100), note:note});
+  }
+  const fee = prompt('Delivery fee in dollars', (o.fee||'$0').replace('$',''));
+  if(fee===null) return;
+  const tip = prompt('Tip in dollars', (o.tip||'$0').replace('$',''));
+  if(tip===null) return;
+  const ref = prompt('Their order number (blank for none)', o.ref||'');
+  if(ref===null) return;
+  const r2 = await jpost('/api/order/edit', {order_id: oid, items: items, ref: ref,
+      fee_cents: Math.round(parseFloat(fee||'0')*100),
+      tip_cents: Math.round(parseFloat(tip||'0')*100)});
+  if(r2 && r2.dupe){ alert('Heads up: '+ref+' is already on order '+r2.dupe+' today.'); }
+  if(r2.ok){
+    if(r2.item_fee && r2.item_fee !== '$0.00') alert('Custom item fees: '+r2.item_fee+
+      '. New total '+r2.total+'.');
+    board(true);
+  } else alert(r2.error || 'Edit failed.');
+}
+let DRIVERS = [];
+let ROSTER = 'active';
+let ROSTER_PICKED = false;
+function setRoster(which){
+  ROSTER = which;
+  ROSTER_PICKED = true;
+  document.querySelectorAll('#rosterTabs .tab').forEach(t=>
+    t.classList.toggle('on', t.dataset.roster === which));
+  renderDrivers(DRIVERS);
+}
+function availLine(d){
+  if(!d.availability || !d.availability.length) return 'no availability set';
+  return d.availability.map(a=>a.day+' '+a.start+'-'+a.end).join(', ');
+}
+function chatNote(d){
+  return (d.unread ? ' <span class="pill red" title="unread messages">'
+                     + d.unread + ' new</span>' : '');
+}
+function renderDrivers(list){
+  const all = (list||[]).slice();
+  const counts = {active: all.filter(d=>d.status!=='offline').length,
+                  scheduled: all.filter(d=>d.roster==='scheduled').length,
+                  unavailable: all.filter(d=>d.roster==='unavailable').length};
+  // With auto dispatch off nobody is online yet, so On shift is empty on load.
+  // Drop to the Scheduled list rather than showing an empty rail, until a tab
+  // is picked by hand.
+  if (!ROSTER_PICKED && ROSTER === 'active' && !counts.active && counts.scheduled){
+    ROSTER = 'scheduled';
+    document.querySelectorAll('#rosterTabs .tab').forEach(t=>
+      t.classList.toggle('on', t.dataset.roster === 'scheduled'));
+  }
+  const shown = all.filter(d => ROSTER === 'active' ? d.status !== 'offline' : d.roster === ROSTER);
+  document.querySelectorAll('#rosterTabs .tab').forEach(t=>{
+    const base = {active:'On shift', scheduled:'Scheduled',
+                  unavailable:'Unavailable'}[t.dataset.roster];
+    t.textContent = base + ' (' + (counts[t.dataset.roster]||0) + ')';
+  });
+  document.getElementById('drivers').innerHTML = shown.map(d=>{
+    const req = d.pending_request ? '<div class="pill amber">Requests: '+d.pending_request+'</div>' : '';
+    const msg = d.unread ? '<button class="pill red" title="unread driver messages" '+
+      'onclick="openChatWith('+d.id+')">'+d.unread+' new message'+(d.unread===1?'':'s')+
+      '</button>' : '';
+    const ord = ['1st up','2nd up','3rd up'];
+    const turn = d.up_next ? '<span class="pill '+(d.up_next===1?'green':'blue')+'">'+
+      (ord[d.up_next-1] || d.up_next+'th up')+'</span>' :
+      (d.status==='online' ? '<span class="pill grey">on a run</span>' : '');
+    const run = (d.on_orders||[]).length
+      ? '<div class="runlist" ondragover="allowDrop(event)">'+d.on_orders.map(x=>
+          '<div class="runitem" draggable="true" ondragstart="dragOrder(event,'+x.id+')" '+
+          'ondragend="dragEnd()" data-oid="'+x.code+'">#'+x.stop+' '+x.code+
+          ' <span class="pill blue">'+x.stage+'</span> <span class="muted small">'+
+          x.restaurant+' &rarr; '+x.customer+'</span></div>').join('')+'</div>'
+      : '<div class="muted small">no active run</div>';
+    const shift = '<div><button class="btn tiny'+(d.status==='online'?' on':'')+
+      '" onclick="setStatus('+d.id+',\'online\')">Online</button>'+
+      '<button class="btn tiny'+(d.status==='break'?' on':'')+
+      '" onclick="setStatus('+d.id+',\'break\')">Break</button>'+
+      '<button class="btn tiny'+(d.status==='offline'?' on':'')+
+      '" onclick="setStatus('+d.id+',\'offline\')">Off</button>'+
+      '<a class="btn tiny" href="/dispatch/map">Locate</a></div>';
+    const loc = d.location
+      ? '<div class="muted small">Last seen '+
+        (d.location.minutes_ago===null||d.location.minutes_ago<1 ? 'just now'
+          : d.location.minutes_ago+' min ago')+
+        (d.location.stale ? ' (stale)' : '')+
+        ' <a href="'+d.location.map_url+'" target="_blank">map</a></div>'
+      : '<div class="muted small">no location yet</div>';
+    const group = '<div class="grouprow"><span class="muted small">Group</span>'+
+      ['scheduled','unavailable'].map(g=>
+        '<button class="btn tiny'+(d.roster===g?' on':'')+'" onclick="setGroup('+d.id+',\''+g+'\')">'+
+        {scheduled:'Scheduled', unavailable:'Unavailable'}[g]+'</button>').join('')+
+      (d.status==='offline'
+        ? '<button class="btn tiny go" onclick="setStatus('+d.id+',\'online\')">Move to active</button>'
+        : '')+'</div>';
+    return '<div class="driver dropzone" ondragover="allowDrop(event)" ondragleave="dragLeave(event)" '+
+      'ondrop="dropOnDriver(event,'+d.id+')"><div><strong>'+d.name+'</strong> <span class="pill '+
+      (d.status==='online'?'green':d.status==='break'?'amber':'grey')+'">'+
+      (d.status_label || d.status)+'</span> '+turn+
+      ' <span class="pill '+(d.roster==='unavailable'?
+        (d.status!=='offline'?'amber':'red'):'grey')+'">'+
+      (d.roster_label || d.roster)+'</span>'+
+      '<div class="muted small">'+d.phone+' &middot; '+d.load+' order'+(d.load===1?'':'s')+' stacked</div>'+
+      '<div class="muted small">Available: '+availLine(d)+'</div>'+req+msg+'</div>'+
+      shift+group+run+'</div>';
+  }).join('') || '<p class="muted small">Nobody in this group yet.</p>';
+}
+async function noteOrder(id){
+  const cur = (DRIVERS, findOrder(id) || {}).dispatch_note || '';
+  const note = prompt('Note on this order (drivers and the kitchen both see it)', cur);
+  if(note === null) return;
+  const res = await jpost('/api/order/note', {order_id:id, note:note});
+  if(!res.ok) alert('Could not save that note.');
+  board(true);
+}
+function newFromOrder(id){
+  window.location = '/dispatch/new-order?from=' + id;
+}
+let LIVE_ORDERS = [];
+function findOrder(id){ return LIVE_ORDERS.find(o=>o.id===id); }
+async function setGroup(id, roster){
+  const res = await jpost('/api/dispatch/driver-roster', {driver_id:id, roster:roster});
+  if(!res.ok){ alert(res.error || 'Could not move that driver.'); }
+  board(true);
+}
+async function sendCast(){
+  const body = document.getElementById('castBody').value.trim();
+  if(!body) return;
+  const audience = document.getElementById('castTo').value;
+  const res = await jpost('/api/dispatch/broadcast', {audience:audience, body:body});
+  if(!res.ok){ alert(res.error || 'Could not send that.'); return; }
+  document.getElementById('castBody').value = '';
+  document.getElementById('castLog').textContent =
+    'Sent to ' + res.sent_to + ' driver' + (res.sent_to===1?'':'s') +
+    (res.names.length ? ': ' + res.names.join(', ') : '');
+  loadChat(); loadCasts();
+}
+
+async function loadCasts(){
+  const el = document.getElementById('castHist'); if(!el) return;
+  const res = await jget('/api/dispatch/broadcasts');
+  el.innerHTML = (res.broadcasts||[]).map(b=>
+    '<div class="msg dispatch"><span class="muted small">'+b.at+' to '+b.audience+'</span><div>'+
+    b.body.replace(/</g,'&lt;')+'</div></div>').join('') || 'No group texts yet.';
+}
+function editing(){
+  // only a field actually being typed in holds a refresh back. A dropdown commits
+  // on change, so it never blocks, and a held focus can stall the board 12s at most.
+  const a = document.activeElement;
+  if (!a) return false;
+  const typing = a.tagName === 'TEXTAREA' ||
+    (a.tagName === 'INPUT' && ['text','number','tel','search','email','date','time']
+      .indexOf((a.type || 'text').toLowerCase()) >= 0);
+  return typing && (Date.now() - LAST_DRAW) < 12000;
+}
+let LAST_DRAW = 0;
+let ALERT_SEEN = 0;
+function drawAlerts(list){
+  const box = document.getElementById('callAlerts');
+  if (!list.length){ box.classList.add('hidden'); box.innerHTML = ''; return; }
+  box.classList.remove('hidden');
+  box.innerHTML = list.map(a =>
+    '<div class="callalert"><div><strong>' +
+    (a.who === 'driver' ? 'Driver ' : 'Kitchen ') + a.name + '</strong> ' + a.at +
+    (a.order ? ' about ' + a.order : '') +
+    '<div class="muted small">' + (a.note || 'wants dispatch') + '</div></div>' +
+    '<div class="row gap">' +
+    (a.tel ? '<a class="btn tiny primary" href="tel:' + a.tel + '">Call back ' + a.phone + '</a>' : '') +
+    '<button class="btn tiny" onclick="clearAlert(' + a.id + ')">Done</button></div></div>').join('');
+  const top = list[0].id;
+  if (top > ALERT_SEEN){
+    ALERT_SEEN = top;
+    try { ffSound.play('ping'); } catch(e){}
+    try { ffNotify.show((list[0].who === 'driver' ? 'Driver' : 'Kitchen') + ' needs dispatch',
+          list[0].name + ': ' + (list[0].note || 'wants a call'), 'callalert'); } catch(e){}
+  }
+}
+async function clearAlert(id){
+  const res = await jpost('/api/dispatch/alert-clear', {id: id});
+  if (res && res.ok) drawAlerts(res.alerts || []);
+}
+async function board(force){
+  if (editing() && !force) return;
+  LAST_DRAW = Date.now();
+  const res = await jget('/api/dispatch/board');
+  if(!res.ok){ window.location='/dispatch/login'; return; }
+  DRIVERS = res.drivers;
+  BOARD_TOKENS = res.tokens || [];
+  applyFind(res);
+  LIVE_ORDERS = (res.orders||[]).concat(res.completed||[]);
+  LIVE_ORDERS.forEach(o => { TOKENS_LAST[o.id] = o.token || ''; });
+  res.drivers.sort((a,b2)=>(a.up_next||99)-(b2.up_next||99) || a.name.localeCompare(b2.name));
+  renderDrivers(res.drivers);
+  chatNotify(res);
+  drawAlerts(res.alerts || []);
+  document.getElementById('rests').innerHTML = (res.restaurants||[]).map(r=>
+    '<div class="driver"><div><strong>'+r.name+'</strong> <span class="pill '+
+    (r.paused?'red':r.open?'green':'grey')+'">'+
+    (r.paused?'paused':r.open_24?'open 24h':r.open?'open':'closed')+'</span>'+
+    '<div class="muted small">'+r.hours+'</div></div>'+
+    '<div><button class="btn tiny" onclick="pauseRest('+r.id+')">'+
+    (r.paused?'Resume':'Pause')+'</button>'+
+    '<button class="btn tiny" onclick="open24('+r.id+')">'+
+    (r.open_24?'Set hours':'24h')+'</button>'+
+    '<a class="btn tiny" href="/dispatch/restaurants">Hours</a>'+
+    '<a class="btn tiny" href="/dispatch/menu/'+r.id+'">Menu</a></div></div>').join('');
+  const sel = document.getElementById('chatDriver');
+  if (sel.options.length !== res.drivers.length)
+    sel.innerHTML = res.drivers.map(d=>'<option value="'+d.id+'">'+d.name+'</option>').join('');
+  const opts = '<option value="">Unassigned</option>' +
+    res.drivers.filter(d=>d.status==='online').map(d=>'<option value="'+d.id+'">'+d.name+'</option>').join('');
+  const sw = document.getElementById('autoSw');
+  if(sw && document.activeElement !== sw){
+    sw.checked = !!res.auto;
+    document.getElementById('autoLbl').textContent =
+      res.auto ? 'Auto dispatch on' : 'Auto dispatch off, assign by hand';
+  }
+  LAST = res;
+  const unconfirmed = res.orders.filter(o=>o.kitchen_status==='pending');
+  if (SEEN_PENDING !== null && unconfirmed.length > SEEN_PENDING) flashPending(unconfirmed.length);
+  if (!unconfirmed.length) clearFlash();
+  SEEN_PENDING = unconfirmed.length;
+
+  const pending = res.orders.filter(o=>!o.driver_id);
+  const active  = res.orders.filter(o=>o.driver_id);
+  document.getElementById('pendCount').textContent =
+    pending.length ? '(' + pending.length + ')' : '';
+  document.getElementById('activeCount').textContent =
+    active.length ? '(' + active.length + ' on ' + new Set(active.map(o=>o.driver_id)).size + ' driver(s))' : '';
+  document.getElementById('pending').innerHTML = pending.map(o=>orderCard(o,opts,res.drivers)).join('') ||
+    '<p class="muted">Nothing pending.</p>';
+  document.getElementById('orders').innerHTML = active.map(o=>orderCard(o,opts)).join('') ||
+    '<p class="muted">No orders on drivers right now.</p>';
+  res.orders.forEach(o=>{ const s=document.getElementById('as'+o.id); if(s) s.value = o.driver_id||''; });
+  document.getElementById('completed').innerHTML = (res.completed||[]).map(o=>
+    '<div class="order"><div class="order-head"><strong>'+o.code+'</strong> '+refPill(o)+tokenPill(o)+'<span class="pill '+
+    (o.dispatch_status==='delivered'?'green':'grey')+'">'+o.dispatch_status+'</span> '+
+    '<span class="muted small">'+(o.delivered_time || (o.delivered_at||'').replace('T',' '))+'</span></div>'+
+    '<div class="muted small">'+o.restaurant+' &rarr; '+o.customer+' &middot; '+o.address+
+    ' &middot; '+milesLabel(o)+' &middot; fee '+o.fee+' &middot; total '+o.total+
+    (o.driver?' &middot; driver '+o.driver:'')+'</div>'+
+    '<div class="order-actions">'+
+      (!o.driver_id ? '<select class="sendsel" id="sd'+o.id+'">'+
+        '<option value="">Next up</option>'+ (drivers||[]).filter(d=>d.status==='online')
+          .map(d=>'<option value="'+d.id+'">'+d.name+'</option>').join('') + '</select>'+
+        '<button class="btn tiny primary" onclick="sendToDriver('+o.id+')">Send to driver</button>' : '')+
+    '<a class="btn tiny primary" href="/dispatch/new-order?from='+o.id+'&redo=1">New order from this</a>'+
+    '<button class="btn tiny" onclick="reopen('+o.id+',\''+o.code+'\',false)">Reopen to queue</button>'+
+    (o.driver ? '<button class="btn tiny" onclick="reopen('+o.id+',\''+o.code+'\',true)">Reopen to '+
+      o.driver+'</button>' : '')+
+    (o.issue ? '<div class="muted small">Redo reason on file: '+o.issue+
+      (o.issue_note?' - '+o.issue_note:'')+'</div>' : '')+'</div></div>').join('') ||
+    '<p class="muted">Nothing completed yet.</p>';
+}
+function milesLabel(o){ return (o.miles===null||o.miles===undefined) ? 'distance TBC' : o.miles+' mi'; }
+async function approveAddress(id, addr){
+  const a = prompt('Confirm or correct the delivery address for this order:', addr);
+  if(a===null) return;
+  const res = await jpost('/api/order/approve-address', {order_id:id, address:a});
+  if(!res.ok){ alert(res.error||'Could not approve that address.'); return; }
+  alert(res.verified
+    ? ('Approved: '+res.address+'\n'+res.miles+' mi, delivery '+res.fee+', new total '+res.total+
+       '\nThe order is now with the kitchen.')
+    : ('Approved as typed: '+res.address+'\nWe still could not place it on the map, so the fee stayed at '+
+       res.fee+'. Use Edit items / fee / tip to change it.\nThe order is now with the kitchen.'));
+  board(true);
+}
+function payPill(o){
+  let s = '';
+  if(o.payment_status === 'paid') s = '<span class="pill green">paid'+
+      (o.pay_method?' '+o.pay_method.replace('card_','card ').replace('_',' '):'')+'</span>';
+  else if(o.payment_status === 'part_refunded') s = '<span class="pill amber">refunded '+o.refunded+'</span>';
+  else if(o.payment_status === 'refunded') s = '<span class="pill grey">fully refunded</span>';
+  else if(o.cards_on) s = '<span class="pill red">unpaid</span>';
+  if(o.tip_sig) s += ' <span class="pill green">tip signed</span>';
+  return s ? ' '+s : '';
+}
+function payButtons(o){
+  let h = '';
+  if(o.cards_on && !o.paid){
+    h += '<button class="btn tiny primary" onclick="payLink('+o.id+')">Text card link</button>'+
+         '<button class="btn tiny" onclick="keyed('+o.id+')">Paid (keyed in Stripe)</button>';
+  }
+  if(o.paid && (o.refunded_cents||0) < 100000){
+    h += '<button class="btn tiny" onclick="refund('+o.id+',\''+o.total+'\')">Refund</button>';
+  }
+  if(o.tip_sig){
+    h += '<a class="btn tiny" target="_blank" href="'+o.tip_sig+'">Signature</a>';
+  }
+  return h;
+}
+async function payLink(id){
+  const res = await jpost('/api/order/pay-link', {order_id:id});
+  if(!res.ok){ alert(res.error); return; }
+  try{ await navigator.clipboard.writeText(res.url); }catch(e){}
+  if(confirm('Card link copied.\n\nOK to open your texting app with the message ready.')){
+    window.location = res.sms;
+  }
+  board(true);
+}
+async function keyed(id){
+  const ref = prompt('Charge id from the Stripe virtual terminal (optional, pi_...):', '');
+  if(ref === null) return;
+  const res = await jpost('/api/order/mark-paid', {order_id:id, ref:ref});
+  if(!res.ok){ alert(res.error || 'That did not save.'); return; }
+  board(true);
+}
+async function refund(id, total){
+  const amt = prompt('Refund how much on this order? Total charged '+total+
+                     '.\nEnter dollars, or leave blank to refund all of it.', '');
+  if(amt === null) return;
+  const note = prompt('Why? (kept on the order)', '') || '';
+  const body = {order_id:id, note:note};
+  if(amt.trim() !== '') body.cents = Math.round(parseFloat(amt)*100);
+  const res = await jpost('/api/order/refund', body);
+  if(!res.ok){ alert(res.error); return; }
+  alert('Refunded. '+res.refunded+' back to the customer, '+res.left+' still charged.');
+  board(true);
+}
+function trailLine(o){
+  const tl = o.timeline || [];
+  if (!tl.length) return '';
+  const short = tl.map(x=>x.label+' '+x.time).join(' &middot; ');
+  return '<div class="trailline" title="click to copy for your notes" '+
+    'onclick="copyTrail(\''+o.code+'\')"><b>Times:</b> '+short+'</div>';
+}
+function copyTrail(code){
+  const o = (LIVE_ORDERS||[]).find(x=>x.code===code);
+  if (!o) return;
+  const txt = code+' '+o.restaurant+' to '+o.customer+'\n'+
+    (o.timeline||[]).map(x=>x.time+'  '+x.label).join('\n');
+  if (navigator.clipboard) navigator.clipboard.writeText(txt);
+}
+function applyFind(res){
+  // Search matches our code, their number, the customer or the phone.
+  const box = document.getElementById('find');
+  const q = (box ? box.value : '').trim().toLowerCase();
+  const note = document.getElementById('findNote');
+  if(!q){ if(note) note.textContent=''; return; }
+  const hit = o => [o.code, o.ref, o.customer, o.phone].filter(Boolean)
+    .some(v => String(v).toLowerCase().includes(q));
+  let n = 0;
+  ['pending','queued','running','completed','live','done','orders'].forEach(k=>{
+    if(Array.isArray(res[k])){ res[k] = res[k].filter(hit); n += res[k].length; }
+  });
+  (res.drivers||[]).forEach(d=>{ if(Array.isArray(d.orders)) d.orders = d.orders.filter(hit); });
+  if(note) note.textContent = n ? n+' matching' : 'nothing matches that';
+}
+let BOARD_TOKENS = [];
+let TOKENS_LAST = {};
+function refPill(o){
+  // Their number: what the shop or the call-in slip calls this order.
+  return o.ref ? '<span class="pill grey" title="Their number">#'+esc(o.ref)+'</span> ' : '';
+}
+function tokenPill(o){
+  // Dispatch tag: how the order came in. Drivers see the same word on the stop.
+  return o.token ? '<span class="pill blue" title="Tag">'+esc(o.token)+'</span> ' : '';
+}
+function setToken(oid){
+  const cur = (TOKENS_LAST[oid] || '');
+  const list = (BOARD_TOKENS.length ? BOARD_TOKENS.join(', ') : 'Online, App, Phone call');
+  const v = prompt('Tag for this order ('+list+'). Blank clears it.', cur);
+  if(v===null) return;
+  jpost('/api/order/edit', {order_id: oid, token: v}).then(()=>board(true));
+}
+function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function orderCard(o, opts, drivers){
+  const timer = (o.timer_seconds!==null && o.kitchen_status==='preparing')
+    ? '<span class="pill amber">'+Math.max(0,Math.ceil(o.timer_seconds/60))+' min</span>' : '';
+  const q = o.queue_position ? '<span class="pill blue">Queue #'+o.queue_position+'</span>' : '';
+  const hold = o.hold_reason ? '<span class="pill grey">'+o.hold_reason+'</span>' : '';
+  return '<div class="order'+(o.kitchen_status==='pending'?' pendingflash':'')+'" draggable="true" ondragstart="dragOrder(event,'+o.id+')" '+
+    'ondragend="dragEnd()"><div class="order-head"><span class="grip">&#8942;&#8942;</span><strong>'+o.code+'</strong> '+
+    refPill(o)+tokenPill(o)+
+    '<span class="pill '+(o.kitchen_status==='ready'?'green':o.kitchen_status==='preparing'?'amber':'grey')+'">'
+    +o.kitchen_status+'</span> <span class="pill blue">'+o.dispatch_status+'</span> '+timer+' '+q+' '+hold+
+    ' <span class="pill grey">'+(o.source_label||'Online')+'</span>'+
+    payPill(o)+
+    (o.placed_by!=='customer' ? ' <span class="pill grey">by '+o.placed_by+'</span>' : '')+'</div>'+
+    '<div class="muted small">'+o.restaurant+' &rarr; '+o.customer+' &middot; '+o.address+
+    ' &middot; '+milesLabel(o)+' &middot; fee '+o.fee+' &middot; total '+o.total+'</div>'+
+    (o.needs_address_approval ? '<div class="issuebar">Address not verified &middot; pending dispatch '+
+      'approval. The kitchen has not seen this order yet.</div>' : '')+
+    '<div class="muted small">'+o.items.map(i=>i.qty+'x '+i.name+
+      (i.fee_cents?' (+'+money(i.fee_cents)+' fee)':'')).join(', ')+
+      (o.item_fee && o.item_fee!=='$0.00' ? ' &middot; custom fees '+o.item_fee : '')+'</div>'+
+    (o.issue ? '<div class="issuebar">Redo'+(o.cloned_from?' of '+o.cloned_from:'')+': '+o.issue+
+      (o.issue_note?' - '+o.issue_note:'')+'</div>' : '')+
+    (o.dispatch_note ? '<div class="notebar">Note: '+o.dispatch_note+'</div>' : '')+
+    trailLine(o)+
+    '<div class="order-actions">'+
+      payButtons(o)+
+      (o.needs_address_approval ? '<button class="btn tiny primary" onclick="approveAddress('+o.id+
+        ',\''+o.address.replace(/'/g,"\\'")+'\')">Approve address</button>' : '')+
+      '<button class="btn tiny" onclick="nudge('+o.id+',-5)">-5</button>'+
+      '<input class="mins" id="m'+o.id+'" type="number" value="'+(o.prep_minutes||15)+
+      '" min="1" max="180" onchange="setTimer('+o.id+')">'+
+      '<button class="btn tiny" onclick="nudge('+o.id+',5)">+5</button>'+
+      '<button class="btn tiny" onclick="setTimer('+o.id+')">Set timer</button>'+
+      '<button class="btn tiny" onclick="kitchen('+o.id+',\'ready\')">Mark ready</button>'+
+      '<button class="btn tiny" onclick="editOrder('+o.id+')">Edit items / fee / tip</button>'+
+      '<button class="btn tiny" onclick="setToken('+o.id+')">'+(o.token?'Tag: '+esc(o.token):'Add tag')+'</button>'+
+      '<button class="btn tiny" onclick="noteOrder('+o.id+')">'+(o.dispatch_note?'Edit note':'Add note')+'</button>'+
+      '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>'+
+      '<select id="as'+o.id+'" onchange="assign('+o.id+',this.value)">'+opts+'</select>'+
+      '<button class="btn tiny" onclick="dstat('+o.id+',\'received\')">Received</button>'+
+      '<button class="btn tiny" onclick="dstat('+o.id+',\'at_restaurant\')">At rest</button>'+
+      '<button class="btn tiny" onclick="dstat('+o.id+',\'enroute\')">Enroute</button>'+
+      '<button class="btn tiny" onclick="complete('+o.id+',\''+o.code+'\')">Complete</button>'+
+      '<button class="btn tiny" onclick="hold('+o.id+')">Hold</button>'+
+      '<a class="btn tiny" target="_blank" href="'+o.customer_nav+'">Nav</a>'+
+    '</div></div>';
+}
+async function kitchen(id, st){
+  const mins = document.getElementById('m'+id).value;
+  await jpost('/api/order/status', {order_id:id, kitchen_status:st, prep_minutes:mins});
+  board(true);
+}
+async function setTimer(id){
+  await jpost('/api/order/timer', {order_id:id, minutes:document.getElementById('m'+id).value});
+  document.activeElement.blur();
+  board(true);
+}
+async function nudge(id, delta){
+  await jpost('/api/order/timer', {order_id:id, delta:delta});
+  board(true);
+}
+async function dstat(id, st){ await jpost('/api/order/status', {order_id:id, dispatch_status:st}); board(true); }
+async function complete(id, code){
+  if(!confirm('Marking '+code+' complete closes the order and moves it to completed orders. '+
+              'The driver slot frees up for the next stop. Continue?')) return;
+  await jpost('/api/order/status', {order_id:id, dispatch_status:'delivered'});
+  board(true); tab('live');
+}
+async function assign(id, did){ await jpost('/api/dispatch/assign', {order_id:id, driver_id:did||null}); board(true); }
+async function setAuto(){
+  const on = document.getElementById('autoSw').checked;
+  const res = await jpost('/api/dispatch/auto', {auto:on});
+  if(res.ok){ document.getElementById('autoLbl').textContent =
+    res.auto ? 'Auto dispatch on' : 'Auto dispatch off, assign by hand'; board(true); }
+}
+async function sendToDriver(id){
+  const sel = document.getElementById('sd'+id);
+  const did = sel && sel.value ? +sel.value : null;
+  const res = await jpost('/api/order/send-to-driver', {order_id:id, driver_id:did});
+  if(!res.ok){ alert(res.error || 'Could not send that order.'); return; }
+  if(res.queued) alert(res.error);
+  board(true);
+}
+async function hold(id){
+  const res = await jpost('/api/order/hold', {order_id:id, reason:'held by dispatch'});
+  if(!res.ok){ alert(res.error || 'Could not hold that order.'); return; }
+  board(true);
+}
+async function open24(id){ await jpost('/api/restaurant/open24', {restaurant_id:id}); board(true); }
+async function pauseRest(id){ await jpost('/api/dispatch/pause-restaurant', {restaurant_id:id}); board(true); }
+async function setStatus(id, st){ await jpost('/api/dispatch/driver-status', {driver_id:id, status:st}); board(true); }
+async function reopen(id, code, keep){
+  if(!confirm('Reopen '+code+'? It goes back on the live board'+
+              (keep?' with the same driver.':' and into the queue for assignment.'))) return;
+  await jpost('/api/order/reopen', {order_id:id, keep_driver:keep});
+  tab('live'); board(true);
+}
+async function loadChat(){
+  const sel = document.getElementById('chatDriver');
+  const id = sel.value; if(!id) return;
+  const who = document.getElementById('chatWho');
+  if (who) who.textContent = sel.options[sel.selectedIndex] ?
+    'talking to ' + sel.options[sel.selectedIndex].text : '';
+  if (LAST && LAST.drivers){
+    const waiting = LAST.drivers.filter(d=>d.unread);
+    const el = document.getElementById('chatRoster');
+    if (el) el.innerHTML = waiting.length
+      ? 'Waiting on a reply: ' + waiting.map(d=>'<button class="btn tiny" onclick="openChatWith('+
+          d.id+')">'+d.name+' ('+d.unread+')</button>').join(' ')
+      : 'No unread driver messages.';
+  }
+  const res = await jget('/api/chat/'+id);
+  document.getElementById('chat').innerHTML = res.messages.map(m=>
+    '<div class="msg '+m.sender+'"><span class="muted small">'+m.at+' '+m.sender+'</span><div>'+m.body+'</div></div>'
+  ).join('');
+  const c = document.getElementById('chat'); c.scrollTop = c.scrollHeight;
+}
+async function send(){
+  const id = document.getElementById('chatDriver').value;
+  const box = document.getElementById('chatBox');
+  if(!box.value.trim()) return;
+  await jpost('/api/chat/'+id, {sender:'dispatch', body:box.value});
+  box.value=''; loadChat(); loadBlocked();
+}
+function tab(which){
+  const live = which==='live';
+  document.getElementById('orders').classList.toggle('hidden', !live);
+  document.getElementById('completed').classList.toggle('hidden', live);
+  document.getElementById('tabLive').classList.toggle('on', live);
+  document.getElementById('tabDone').classList.toggle('on', !live);
+}
+function soundLabel(){
+  var on = true;
+  try { on = window.ffSound ? ffSound.enabled() : localStorage.getItem('ff_sound') !== 'off'; } catch(e){}
+  var b = document.getElementById('soundBtn');
+  var n = document.getElementById('soundNote');
+  if (b) b.textContent = on ? 'Sound on' : 'Sound off';
+  if (n) n.textContent = on ? '' : 'alerts are silent';
+}
+function toggleSound(){
+  try { if (window.ffSound) ffSound.toggle(); } catch(e){}
+  soundLabel();
+}
+function safeRun(fn){ try { fn(); } catch(e){ console.error('board boot', e); } }
+setInterval(board, 4000); setInterval(loadChat, 4000);
+safeRun(soundLabel);
+safeRun(function(){ board(true); });
+safeRun(loadCasts);
+setTimeout(function(){ safeRun(loadChat); }, 400);
+safeRun(function(){ ffNotify.button('notifBtn','notifNote'); });
+</script>{% endblock %}

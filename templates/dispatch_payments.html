@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+{% block body %}
+<h2>Card payments</h2>
+<p class="muted">Tiger Town To Go is card only. Customers pay on Stripe's own page, so no card
+number ever reaches this app or its database. Nothing charges until you switch it on below.</p>
+
+<div class="card">
+  <div class="row">
+    <div>Status
+      <span class="pill {{ 'green' if on else 'grey' }}">{{ 'live' if on else 'off' }}</span>
+    </div>
+  </div>
+  <label>Publishable key (pk_live_… or pk_test_…)</label>
+  <input id="pk" value="{{ pk }}" placeholder="pk_test_...">
+  <label>Secret key (sk_live_… or sk_test_…) {% if sk_set %}<span class="muted small">saved, leave blank to keep</span>{% endif %}</label>
+  <input id="sk" type="password" placeholder="{{ 'unchanged' if sk_set else 'sk_test_...' }}">
+  <label>Webhook signing secret (whsec_…) {% if wh_set %}<span class="muted small">saved, leave blank to keep</span>{% endif %}</label>
+  <input id="wh" type="password" placeholder="{{ 'unchanged' if wh_set else 'whsec_...' }}">
+  <div class="row">
+    <label class="row" style="gap:6px"><input type="checkbox" id="on" {{ 'checked' if enabled else '' }}> Take card payments</label>
+    <button class="btn go" onclick="save()">Save</button>
+  </div>
+  <div id="out" class="small muted"></div>
+</div>
+
+<div class="card">
+  <h3>Setting it up</h3>
+  <ol class="small">
+    <li>Make a Stripe account, then open Developers, API keys, and copy both keys above.</li>
+    <li>In Stripe, open Developers, Webhooks, add an endpoint pointed at
+        <code>{{ hook }}</code> and subscribe it to <code>checkout.session.completed</code>.
+        Copy the signing secret it gives you into the box above.</li>
+    <li>Test with the test keys first: card 4242 4242 4242 4242, any future date, any CVC.</li>
+  </ol>
+  <h3>How each order gets paid</h3>
+  <ul class="small">
+    <li><b>Website order.</b> The customer pays on Stripe before the order reaches you.
+        Nothing shows on the board or in the kitchen until the payment lands.</li>
+    <li><b>Call-in.</b> Place the order, then either text the customer a card link from the
+        order card, or key their card into Stripe's virtual terminal and hit Paid.</li>
+    <li><b>Tip at the door.</b> If the customer left no tip online, the driver's phone asks
+        for one and takes a signature, and the tip charges to the same card.</li>
+    <li><b>Refunds.</b> Open any paid order on the board and use Refund, all of it or part.</li>
+  </ul>
+</div>
+<script>
+async function save(){
+  const body = {pk: document.getElementById('pk').value,
+                sk: document.getElementById('sk').value,
+                wh: document.getElementById('wh').value,
+                enabled: document.getElementById('on').checked};
+  const r = await fetch('/api/dispatch/payments', {method:'POST',
+      headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+  const res = await r.json();
+  const out = document.getElementById('out');
+  if(!res.ok){ out.textContent = res.error || 'That did not save.'; return; }
+  out.textContent = res.live ? ('Card payments are live'+(res.account?' on '+res.account:'')+'.')
+                             : 'Saved. Card payments are off.';
+  setTimeout(function(){ window.location.reload(); }, 1200);
+}
+</script>
+{% endblock %}

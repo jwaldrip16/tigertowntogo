@@ -1,0 +1,21 @@
+{% extends "base.html" %}{% block body %}
+<div class="head"><h1>Delivery fees</h1><a class="btn small" href="/dispatch">Back to board</a></div>
+{% if saved %}<p class="good">Settings saved.</p>{% endif %}
+<form class="panel narrow" method="post">
+  <label>Base fee in cents (first miles)</label>
+  <input name="base_fee_cents" value="{{ s['base_fee_cents'] }}">
+  <label>Miles covered by the base fee</label>
+  <input name="base_miles" value="{{ s['base_miles'] }}">
+  <label>Cents per additional mile</label>
+  <input name="per_mile_cents" value="{{ s['per_mile_cents'] }}">
+  <label>Tax rate in basis points (900 = 9%)</label>
+  <input name="tax_rate_bp" value="{{ s['tax_rate_bp'] }}">
+  <label>Auto assign to drivers (1 on, 0 off)</label>
+  <input name="auto_assign" value="{{ s['auto_assign'] }}">
+  <label>Order tags, comma separated</label>
+  <input name="order_tokens" value="{{ s['order_tokens'] }}">
+  <div class="muted small">The short label dispatch puts on an order and the driver sees on the
+    stop, e.g. Online, App, Phone call, Third party.</div>
+  <button class="btn primary">Save</button>
+</form>
+{% endblock %}

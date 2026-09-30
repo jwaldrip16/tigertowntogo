@@ -1,0 +1,208 @@
+{% extends "base.html" %}
+{% block head %}
+<link rel="manifest" href="/static/manifest-kitchen.json">
+<meta name="theme-color" content="#7c2d12">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<link rel="apple-touch-icon" href="/static/icons/kitchen-192.png">
+<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/static/sw.js").catch(function(){});}</script>
+{% endblock %}
+{% block body %}
+<div id="flash" class="flashbar hidden">New order</div>
+<div class="head"><h1>{{ r['name'] }}</h1>
+  <div><span class="pill {{ 'green' if open else 'grey' }}" id="openpill">{{ 'Open' if open else 'Closed' }}</span>
+  <button class="btn small" onclick="toggle()">Pause / resume orders</button>
+  <button class="btn small" id="h24" onclick="open24()">Open 24 hours</button>
+  <a class="btn small" href="/restaurant/account">Account</a>
+  <a class="btn small" href="/restaurant/logout">Sign out</a></div></div>
+<p class="muted" id="hourline">{{ hours }}</p>
+<div class="row"><span class="muted small" id="soundNote"></span>
+  <button class="btn tiny" id="soundBtn" onclick="toggleSound()">Sound</button>
+  <button class="btn tiny hidden" id="notifBtn">Turn on pop-up alerts</button>
+  <span class="muted small" id="notifNote"></span></div>
+<section class="panel callbar">
+  <div class="row between">
+    <div><strong>Need dispatch?</strong>
+      <div class="muted small">Ask here and they will call the kitchen. On a phone: {{ dispatch_phone }}</div></div>
+    <button class="btn primary" onclick="askCall()">Ask dispatch to call me</button>
+  </div>
+  <div class="row gap">
+    <input id="callCode" placeholder="Order number, if it is about one">
+    <input id="callNote" placeholder="What is it about? (optional)">
+    <button class="btn small" onclick="askCall('urgent')">Urgent</button>
+  </div>
+  <div class="muted small" id="callSaid"></div>
+</section>
+<div id="newalert" class="newalert hidden">New order in. Accept it and start the timer to stop the
+  alert. <button class="btn tiny" onclick="ffSound.stopLoop()">Silence</button></div>
+<div class="tabs">
+  <button class="tab on" id="tabActive" onclick="showTab('active')">Active <span id="cntActive"></span></button>
+  <button class="tab" id="tabDone" onclick="showTab('done')">Completed <span id="cntDone"></span></button>
+</div>
+<div id="orders"></div>
+<div id="ordersDone" class="hidden"></div>
+{% endblock %}
+{% block scripts %}<script>
+async function askCall(level){
+  const code = document.getElementById('callCode').value.trim();
+  const note = document.getElementById('callNote').value.trim();
+  let msg = note || 'please call the kitchen';
+  if (level === 'urgent') msg = 'URGENT: ' + msg;
+  const res = await jpost('/api/restaurant/call-dispatch', {code: code, note: msg, urgent: level === 'urgent'});
+  if (res && res.ok){
+    document.getElementById('callNote').value = '';
+    said(level === 'urgent' ? 'Sent as urgent. Dispatch is being alerted now.'
+                            : 'Dispatch has it. They will call the kitchen back.');
+  } else { said('That did not go through. Try again in a moment.'); }
+}
+function said(t){
+  const el = document.getElementById('callSaid');
+  el.textContent = t; setTimeout(() => { el.textContent = ''; }, 9000);
+}
+
+function flashTicket(n){
+  const f = document.getElementById('flash');
+  if(!f) return;
+  f.textContent = n + ' new order' + (n===1?'':'s') + ' waiting to be confirmed';
+  f.classList.remove('hidden');
+  document.body.classList.add('flashing');
+}
+function clearTicketFlash(){
+  const f = document.getElementById('flash');
+  if(f) f.classList.add('hidden');
+  document.body.classList.remove('flashing');
+}
+let seen = null;
+function toggleSound(){
+  const on = ffSound.toggle();
+  document.getElementById('soundBtn').textContent = on ? 'Sound on' : 'Sound off';
+}
+function soundNote(){
+  document.getElementById('soundBtn').textContent = ffSound.enabled() ? 'Sound on' : 'Sound off';
+  document.getElementById('soundNote').textContent = ffSound.armed() ? '' :
+    'Tap anywhere once so the browser lets the new order alert play.';
+}
+function editing(){
+  const a = document.activeElement;
+  return a && a.tagName === 'INPUT';
+}
+async function load(force){
+  if (editing() && !force) return;
+  const res = await jget('/api/restaurant/orders');
+  if(!res.ok){ window.location='/restaurant/login'; return; }
+  document.getElementById('openpill').textContent =
+    res.open_24 ? 'Open 24 hours' : (res.open ? 'Open' : 'Closed');
+  document.getElementById('hourline').textContent = res.hours;
+  document.getElementById('h24').textContent = res.open_24 ? 'Back to set hours' : 'Open 24 hours';
+  try { newTicketAlert(res.orders); } catch(e) { console.log('alert skipped', e); }
+  const pend = res.orders.filter(o=>o.kitchen_status==='pending').length;
+  if (pend) flashTicket(pend); else clearTicketFlash();
+  soundNote();
+  // Active until the driver is en route. Undo that (back to received or at the
+  // restaurant) and the order lands back in Active on the next refresh.
+  const gone = o => ['enroute','delivered','cancelled'].includes(o.dispatch_status);
+  const active = res.orders.filter(o=>!gone(o));
+  const done = res.orders.filter(gone).reverse();
+  document.getElementById('cntActive').textContent = active.length ? '('+active.length+')' : '';
+  document.getElementById('cntDone').textContent = done.length ? '('+done.length+')' : '';
+  document.getElementById('ordersDone').innerHTML = done.length ? done.map(o=>
+    '<div class="panel slim"><div class="row between"><div><strong>'+o.code+'</strong> '+
+    (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+o.customer+
+    '<div class="muted small">'+o.lines.join(', ')+'</div></div>'+
+    '<div class="right muted small">'+({enroute:'Driver en route',delivered:'Delivered',
+      cancelled:'Cancelled'}[o.dispatch_status]||'')+
+    (o.ready_time ? '<div>Ready '+o.ready_time+'</div>' : '')+'</div></div></div>').join('')
+    : '<p class="muted">Nothing here yet today.</p>';
+  document.getElementById('orders').innerHTML = active.length ? active.map(o=>{
+    const t = (o.timer_seconds!==null && o.kitchen_status==='preparing')
+      ? '<span class="pill amber">'+Math.max(0,Math.ceil(o.timer_seconds/60))+' min left</span>' : '';
+    return '<div class="order"><div class="order-head"><strong>'+o.code+'</strong> '+
+      (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+
+      '<span class="pill '+(o.kitchen_status==='ready'?'green':o.kitchen_status==='preparing'?'amber':'red')+
+      '">'+o.kitchen_status+'</span> '+t+
+      (o.driver?' <span class="pill blue">driver '+o.driver+'</span>':
+       o.queue_position?' <span class="pill grey">queue #'+o.queue_position+'</span>':'')+'</div>'+
+      '<div class="detail">'+
+      '<div class="detail-row"><span class="lbl">Customer</span><span><strong>'+o.customer+'</strong>'+
+        '<br><a href="tel:'+o.phone+'">'+o.phone+'</a><br>'+o.address+
+        (o.note?('<br><em>'+o.note+'</em>'):'')+'</span></div>'+
+      (o.issue ? '<div class="detail-row"><span class="lbl">Remake</span>'+
+      '<span class="issuebar">'+o.issue+(o.issue_note?' - '+o.issue_note:'')+
+      (o.cloned_from?' (first order '+o.cloned_from+')':'')+'</span></div>' : '')+
+    (o.dispatch_note ? '<div class="detail-row"><span class="lbl">Dispatch note</span>'+
+        '<span class="notebar">'+o.dispatch_note+'</span></div>' : '')+
+      '<div class="detail-row"><span class="lbl">Order ('+(o.item_count||o.items.length)+' items)</span>'+
+        '<span><ul class="lines">'+
+        (o.lines||o.items.map(i=>i.qty+' x '+i.name)).map(l=>'<li>'+l+'</li>').join('')+
+        '</ul></span></div>'+
+      '<div class="detail-row"><span class="lbl">Times</span><span>'+
+        (o.timeline||[]).map(x=>x.time+' '+x.label).join('<br>')+'</span></div>'+
+      '<div class="detail-row"><span class="lbl">Ticket</span><span>Subtotal '+o.subtotal+
+        ' &middot; fee '+o.fee+' &middot; tax '+o.tax+' &middot; tip '+o.tip+
+        '<br>Total '+o.total+' &middot; placed '+(o.placed_by||'customer')+
+        ' &middot; '+(o.miles||0)+' mi out</span></div>'+
+      '<div class="detail-row"><span class="lbl">Driver</span><span>'+
+        (o.driver ? (o.driver+' , stop '+(o.stack_seq||1))
+                  : 'assigned once you confirm this ticket')+'</span></div>'+
+      '</div>'+
+      '<div class="order-actions">'+
+      '<button class="btn tiny" onclick="nudge('+o.id+',-5)">-5</button>'+
+      '<input class="mins" id="m'+o.id+'" type="number" value="'+
+      (o.prep_minutes||res.prep_default)+'" min="1" max="180" onchange="setTimer('+o.id+')"> min'+
+      '<button class="btn tiny" onclick="nudge('+o.id+',5)">+5</button>'+
+      '<button class="btn tiny" onclick="setTimer('+o.id+')">Set timer</button>'+
+      (o.kitchen_status==='pending'
+        ? '<button class="btn tiny" onclick="start('+o.id+')">Accept and start</button>' : '')+
+      '<button class="btn tiny" onclick="ready('+o.id+')">Mark ready</button></div></div>';
+  }).join('') : '<p class="muted">No open orders.</p>';
+  showTab(TAB);
+}
+let TAB = 'active';
+function showTab(which){
+  TAB = which;
+  document.getElementById('orders').classList.toggle('hidden', which !== 'active');
+  document.getElementById('ordersDone').classList.toggle('hidden', which !== 'done');
+  document.getElementById('tabActive').classList.toggle('on', which === 'active');
+  document.getElementById('tabDone').classList.toggle('on', which === 'done');
+}
+let NOTIFIED = null;
+function newTicketAlert(orders){
+  const waiting = orders.filter(o=>o.kitchen_status === 'pending');
+  const banner = document.getElementById('newalert');
+  if (waiting.length){
+    if (banner) banner.classList.remove('hidden');
+    const top = waiting[waiting.length-1];
+    if (top && top.code !== NOTIFIED){
+      NOTIFIED = top.code;
+      try { ffNotify.show('New order ' + top.code,
+            'For ' + (top.customer || 'a customer') + '. Confirm it and start the timer.', 'ticket'); } catch(e){}
+    }
+    ffSound.startLoop(5000);
+  } else {
+    if (banner) banner.classList.add('hidden');
+    ffSound.stopLoop();
+  }
+}
+async function start(id){
+  ffSound.stopLoop();
+  await jpost('/api/order/status', {order_id:id, kitchen_status:'preparing',
+              prep_minutes:document.getElementById('m'+id).value});
+  load(true);
+}
+async function setTimer(id){
+  ffSound.stopLoop();
+  const v = document.getElementById('m'+id).value;
+  await jpost('/api/order/timer', {order_id:id, minutes:v});
+  document.activeElement.blur();
+  load(true);
+}
+async function nudge(id, delta){
+  await jpost('/api/order/timer', {order_id:id, delta:delta});
+  load(true);
+}
+async function ready(id){ await jpost('/api/order/status', {order_id:id, kitchen_status:'ready'}); load(true); }
+async function open24(){ await jpost('/api/restaurant/open24', {}); load(true); }
+async function toggle(){ await jpost('/api/restaurant/toggle', {}); load(true); }
+load(true); setInterval(load, 4000);
+try { ffNotify.button('notifBtn','notifNote'); } catch(e){}
+</script>{% endblock %}

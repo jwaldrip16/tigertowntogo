@@ -1,0 +1,171 @@
+{% extends "base.html" %}{% block body %}
+<div class="head">
+  <h1>Restaurants and drivers</h1>
+  <div class="row">
+    <a class="btn" href="/dispatch">Back to board</a>
+    <a class="btn" href="/dispatch/restaurants">Hours</a>
+  </div>
+</div>
+
+<div class="cols">
+  <section>
+    <h2>Restaurants</h2>
+    <div class="card pad">
+      <h3>Add a restaurant</h3>
+      <input id="rName" placeholder="Name, e.g. Popeyes Chicken">
+      <input id="rAddr" placeholder="Street address, city, state, zip">
+      <div class="row">
+        <input id="rPhone" placeholder="Phone">
+        <input id="rPin" placeholder="Login PIN (default 1111)">
+        <input id="rPrep" type="number" placeholder="Prep min" value="15">
+      </div>
+      <button class="btn primary" onclick="addRest()">Add restaurant</button>
+      <p class="muted" id="rMsg"></p>
+    </div>
+    <div id="rests"></div>
+  </section>
+
+  <section>
+    <h2>Drivers</h2>
+    <div class="card pad">
+      <h3>Add a driver</h3>
+      <div class="row">
+        <input id="dName" placeholder="Name">
+        <input id="dPhone" placeholder="Phone, 10 digits">
+        <input id="dPin" placeholder="Password / PIN">
+      </div>
+      <button class="btn primary" onclick="addDriver()">Add driver</button>
+      <p class="muted" id="dMsg"></p>
+    </div>
+    <div id="drivers"></div>
+  </section>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+async function jpost(u, b){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},
+  body: JSON.stringify(b)}); return r.json(); }
+async function jget(u){ const r = await fetch(u); return r.json(); }
+function dollars(v){ return Math.round(parseFloat(String(v).replace(/[^0-9.\-]/g,'')||0)*100); }
+
+async function load(){
+  const res = await jget('/api/dispatch/catalog');
+  if(!res.ok){ window.location='/dispatch/login'; return; }
+  document.getElementById('rests').innerHTML = res.restaurants.map(r=>{
+    const items = r.items.map(it=>{
+      const groups = (it.groups||[]).map(g=>
+        '<div class="layer"><strong>'+g.name+'</strong> <span class="muted">pick '+g.min+
+        (g.max>g.min?(' to '+g.max):'')+'</span> '+
+        '<button class="btn tiny" onclick="delGroup('+g.id+')">Remove layer</button>'+
+        '<div>'+ (g.options.map(o=>
+          '<span class="optchip">'+o.name+(o.delta_cents?(' +'+o.delta):'')+
+          ' <a href="#" onclick="delOption('+o.id+');return false;">x</a></span>').join('') || '<span class="muted">no choices yet</span>') +
+        '</div>'+
+        '<div class="row"><input id="on'+g.id+'" placeholder="Choice, e.g. Red beans and rice">'+
+        '<input id="op'+g.id+'" placeholder="+$0.00" style="max-width:90px">'+
+        '<button class="btn tiny" onclick="addOption('+g.id+')">Add choice</button></div></div>').join('');
+      return '<div class="menuitem"><div class="row between"><div><strong>'+it.name+'</strong> '+it.price+
+        (it.active?'':' <span class="pill grey">off</span>')+
+        '<div class="muted">'+(it.description||'')+'</div></div>'+
+        '<div class="row"><button class="btn tiny" onclick="toggleItem('+it.id+')">'+
+        (it.active?'Hide':'Show')+'</button>'+
+        '<button class="btn tiny" onclick="delItem('+it.id+')">Delete</button></div></div>'+
+        groups +
+        '<div class="row"><input id="gn'+it.id+'" placeholder="Sub layer, e.g. Pick your side">'+
+        '<input id="gmin'+it.id+'" type="number" value="1" style="max-width:70px" title="min picks">'+
+        '<input id="gmax'+it.id+'" type="number" value="1" style="max-width:70px" title="max picks">'+
+        '<button class="btn tiny" onclick="addGroup('+it.id+')">Add sub layer</button></div></div>';
+    }).join('');
+    return '<div class="card pad"><div class="row between"><div><h3>'+r.name+'</h3>'+
+      '<div class="muted">'+r.address+'  |  login '+r.slug+'</div></div>'+
+      '<div class="row"><a class="btn tiny" href="/dispatch/menu/'+r.id+'">Quick menu</a>'+
+      '<button class="btn tiny" onclick="editLogin('+r.id+",'"+r.slug+"'"+')">Edit login</button>'+
+      '<button class="btn tiny danger" onclick="delRest('+r.id+",'"+r.name.replace(/'/g,"")+"'"+')">Delete</button></div></div>'+
+      items +
+      '<div class="row"><input id="in'+r.id+'" placeholder="Item, e.g. 3 pc Combo">'+
+      '<input id="ip'+r.id+'" placeholder="$0.00" style="max-width:90px">'+
+      '<input id="id'+r.id+'" placeholder="Description">'+
+      '<button class="btn tiny" onclick="addItem('+r.id+')">Add item</button></div></div>';
+  }).join('');
+
+  document.getElementById('drivers').innerHTML = res.drivers.map(d=>
+    '<div class="card pad"><div class="row between"><div><strong>'+d.name+'</strong> '+
+    '<span class="pill '+(d.status==='online'?'green':(d.status==='break'?'amber':'grey'))+'">'+d.status+'</span>'+
+    '<div class="muted">'+d.active_orders+' live order(s)</div></div>'+
+    '<button class="btn tiny danger" onclick="delDriver('+d.id+",'"+d.name.replace(/'/g,"")+"'"+')">Delete</button></div>'+
+    '<div class="row"><input id="dn'+d.id+'" value="'+d.name+'">'+
+    '<input id="dp'+d.id+'" value="'+d.phone+'" placeholder="Phone">'+
+    '<input id="dk'+d.id+'" value="'+d.pin+'" placeholder="Password / PIN">'+
+    '<button class="btn tiny" onclick="saveDriver('+d.id+')">Save</button></div></div>').join('');
+}
+
+async function addRest(){
+  const res = await jpost('/api/dispatch/restaurant', {op:'create',
+    name:document.getElementById('rName').value, address:document.getElementById('rAddr').value,
+    phone:document.getElementById('rPhone').value, pin:document.getElementById('rPin').value,
+    prep_default:parseInt(document.getElementById('rPrep').value||'15',10)});
+  document.getElementById('rMsg').textContent = res.ok
+    ? ('Added. Kitchen login code: '+res.slug + (res.geocoded?'':'  (address could not be verified, fees will need the address fixed)'))
+    : (res.error||'Could not add that one.');
+  if(res.ok){ document.getElementById('rName').value=''; document.getElementById('rAddr').value=''; load(); }
+}
+async function editLogin(id, slug){
+  const code = prompt('Store code the restaurant signs in with', slug);
+  if(code === null) return;
+  const pin = prompt('New PIN (blank keeps the current one)', '');
+  if(pin === null) return;
+  const body = {op:'update', restaurant_id:id, slug:code};
+  if(pin.trim()) body.pin = pin.trim();
+  const res = await jpost('/api/dispatch/restaurant', body);
+  if(!res.ok){ alert(res.error || 'Could not save that login.'); return; }
+  load();
+}
+async function delRest(id, name){
+  if(!confirm('Delete '+name+' and its whole menu?')) return;
+  const res = await jpost('/api/dispatch/restaurant', {op:'delete', restaurant_id:id});
+  if(!res.ok) alert(res.error); load();
+}
+async function addItem(rid){
+  await jpost('/api/dispatch/menu-item', {op:'create', restaurant_id:rid,
+    name:document.getElementById('in'+rid).value,
+    description:document.getElementById('id'+rid).value,
+    price_cents: dollars(document.getElementById('ip'+rid).value)});
+  load();
+}
+async function delItem(id){ if(confirm('Delete this item?')){ await jpost('/api/dispatch/menu-item',{op:'delete',item_id:id}); load(); } }
+async function toggleItem(id){ await jpost('/api/dispatch/menu-item',{op:'toggle',item_id:id}); load(); }
+async function addGroup(itemId){
+  await jpost('/api/dispatch/option-group', {op:'create', item_id:itemId,
+    name:document.getElementById('gn'+itemId).value,
+    min_select:parseInt(document.getElementById('gmin'+itemId).value||'1',10),
+    max_select:parseInt(document.getElementById('gmax'+itemId).value||'1',10)});
+  load();
+}
+async function delGroup(gid){ await jpost('/api/dispatch/option-group',{op:'delete',group_id:gid}); load(); }
+async function addOption(gid){
+  await jpost('/api/dispatch/option', {op:'create', group_id:gid,
+    name:document.getElementById('on'+gid).value,
+    price_delta_cents: dollars(document.getElementById('op'+gid).value)});
+  load();
+}
+async function delOption(oid){ await jpost('/api/dispatch/option',{op:'delete',option_id:oid}); load(); }
+
+async function addDriver(){
+  const res = await jpost('/api/dispatch/driver', {op:'create',
+    name:document.getElementById('dName').value, phone:document.getElementById('dPhone').value,
+    pin:document.getElementById('dPin').value});
+  document.getElementById('dMsg').textContent = res.ok ? 'Driver added.' : (res.error||'Could not add.');
+  if(res.ok){ ['dName','dPhone','dPin'].forEach(i=>document.getElementById(i).value=''); load(); }
+}
+async function saveDriver(id){
+  const res = await jpost('/api/dispatch/driver', {op:'update', driver_id:id,
+    name:document.getElementById('dn'+id).value, phone:document.getElementById('dp'+id).value,
+    pin:document.getElementById('dk'+id).value});
+  if(!res.ok) alert(res.error); load();
+}
+async function delDriver(id, name){
+  if(!confirm('Delete driver '+name+'?')) return;
+  const res = await jpost('/api/dispatch/driver', {op:'delete', driver_id:id});
+  if(!res.ok) alert(res.error); load();
+}
+load();
+</script>{% endblock %}

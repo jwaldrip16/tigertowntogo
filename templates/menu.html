@@ -1,0 +1,195 @@
+{% extends "base.html" %}{% block body %}
+<a class="back" href="/">All restaurants</a>
+<h1>{{ r['name'] }}</h1>
+<p class="muted">{{ r['address'] }} &middot; {{ hours }} &middot;
+  <span class="pill {{ 'green' if open else 'grey' }}">{{ 'Open' if open else 'Closed' }}</span></p>
+
+<div class="cols">
+  <section>
+    <h2>Menu</h2>
+    <div id="menu"></div>
+  </section>
+
+  <aside class="panel">
+    <h2>Your order</h2>
+    <div id="cart"><p class="muted">Nothing added yet.</p></div>
+    <h3>Delivery details</h3>
+    <input id="name" placeholder="Your name">
+    <input id="phone" placeholder="Mobile number">
+    <textarea id="address" rows="2" placeholder="Street, city, state, ZIP"></textarea>
+    <input id="note" placeholder="Gate code, apartment, door instructions">
+    <button class="btn" onclick="validate()">Validate address and price delivery</button>
+    <div id="quote" class="quote"></div>
+    <h3>Tip your driver</h3>
+    <div class="row" id="tipRow">
+      <button class="btn tiny" onclick="setTip(0.15)">15%</button>
+      <button class="btn tiny" onclick="setTip(0.18)">18%</button>
+      <button class="btn tiny" onclick="setTip(0.20)">20%</button>
+      <button class="btn tiny" onclick="setTip(0.25)">25%</button>
+      <button class="btn tiny" onclick="setTip(0)">No tip</button>
+      <input id="tipCustom" type="number" min="0" step="0.50" placeholder="$ custom"
+             oninput="customTip()" style="max-width:120px">
+    </div>
+    <div class="totals" id="totals"></div>
+    <button class="btn primary" id="place" disabled onclick="placeOrder()">Place order</button>
+    <p class="muted small">Delivery fee: {{ base_fee }} for the first {{ base_miles }} miles,
+      then {{ per_mile }} per additional mile from {{ r['name'] }}.</p>
+  </aside>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+const RID = {{ r['id'] }};
+let cart = [], geo = null, feeCents = 0, miles = 0, tipCents = 0, tipPct = null;
+let MENU = [];
+function itemCard(it){
+  const layers = (it.groups||[]).map(g=>
+      '<div class="layer"><div class="lbl">'+g.name+
+      ' <span class="muted small">'+(g.max>1 ? ('pick up to '+g.max) : 'pick 1')+
+      (g.min>0?', required':'')+'</span></div>'+
+      g.options.map(o=>
+        '<label class="opt"><input type="'+(g.max>1?'checkbox':'radio')+
+        '" name="g'+g.id+'" value="'+o.id+'" data-group="'+g.id+'"> '+o.name+
+        (o.delta_cents?(' <span class="muted">+'+o.delta+'</span>'):'')+'</label>').join('')+
+      '</div>').join('');
+  return '<div class="menuitem" id="mi'+it.id+'"><div class="row between">'+
+      '<div><strong>'+it.name+'</strong><div class="muted small">'+(it.description||'')+'</div></div>'+
+      '<div class="right"><span>'+it.price+'</span> '+
+      '<button class="btn small" onclick="addFromMenu('+it.id+')">Add</button></div></div>'+
+      layers+'</div>';
+}
+async function drawMenu(){
+  const res = await jget('/api/menu/' + RID);
+  MENU = res.items || [];
+  const el = document.getElementById('menu');
+  if (!MENU.length){ el.innerHTML = '<p class="muted">No items on this menu yet.</p>'; return; }
+  // sections keep the order the restaurant set; anything unsectioned sits under Menu
+  const order = [], groups = {};
+  MENU.forEach(it=>{
+    const sec = (it.section||'').trim() || 'Menu';
+    if (!groups[sec]){ groups[sec] = []; order.push(sec); }
+    groups[sec].push(it);
+  });
+  const slug = s => 'sec-' + s.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+  const jump = order.length > 1
+    ? '<nav class="secnav">' + order.map(s=>
+        '<a href="#'+slug(s)+'" onclick="jumpSection(event,\''+slug(s)+'\')">'+s+'</a>').join('') +
+      '</nav>'
+    : '';
+  el.innerHTML = jump + order.map(s=>
+    '<h3 class="sechead" id="'+slug(s)+'">'+s+'</h3>' +
+    groups[s].map(itemCard).join('')).join('');
+}
+function jumpSection(ev, id){
+  ev.preventDefault();
+  const t = document.getElementById(id);
+  if (t) t.scrollIntoView({behavior:'smooth', block:'start'});
+}
+function addFromMenu(itemId){
+  const it = MENU.find(x=>x.id===itemId);
+  const wrap = document.getElementById('mi'+itemId);
+  const picks = [];
+  let price = it.price_cents;
+  for (const g of (it.groups||[])){
+    const chosen = [...wrap.querySelectorAll('input[data-group="'+g.id+'"]:checked')];
+    if (g.min > 0 && chosen.length < g.min){ alert('Choose your '+g.name.toLowerCase()+' first.'); return; }
+    if (g.max && chosen.length > g.max){ alert(g.name+': pick at most '+g.max+'.'); return; }
+    for (const c of chosen){
+      const o = g.options.find(x=>String(x.id)===c.value);
+      picks.push({group:g.name, name:o.name, delta_cents:o.delta_cents});
+      price += o.delta_cents;
+    }
+  }
+  cart.push({id:it.id, name:it.name, price_cents:price, qty:1, options:picks});
+  wrap.querySelectorAll('input:checked').forEach(i=>{ i.checked = false; });
+  draw();
+}
+function addItem(id,name,price){
+  const f = cart.find(c=>c.id===id);
+  if (f) f.qty++; else cart.push({id:id,name:name,price_cents:price,qty:1});
+  draw();
+}
+function bump(ix,d){
+  const f = cart[ix]; if(!f) return;
+  f.qty += d; if (f.qty<=0) cart.splice(ix,1);
+  draw();
+}
+function lineLabel(c){
+  const picks = (c.options||[]).map(o=>o.group+': '+o.name+(o.delta_cents?(' +'+money(o.delta_cents)):''));
+  return c.name + (picks.length ? ' <span class="muted small">('+picks.join(', ')+')</span>' : '');
+}
+function subtotal(){ return cart.reduce((s,c)=>s+c.price_cents*c.qty,0); }
+function draw(){
+  const el = document.getElementById('cart');
+  if(!cart.length){ el.innerHTML = '<p class="muted">Nothing added yet.</p>'; }
+  else {
+    el.innerHTML = cart.map((c,ix)=>'<div class="row"><span>'+lineLabel(c)+'</span><span>'+
+      '<button class="btn tiny" onclick="bump('+ix+',-1)">-</button> '+c.qty+
+      ' <button class="btn tiny" onclick="bump('+ix+',1)">+</button> '+money(c.price_cents*c.qty)+
+      '</span></div>').join('');
+  }
+  totals();
+}
+function setTip(pct){
+  tipPct = pct;
+  document.getElementById('tipCustom').value = '';
+  tipCents = Math.round(subtotal() * pct);
+  totals();
+}
+function customTip(){
+  const v = parseFloat(document.getElementById('tipCustom').value || '0');
+  tipPct = null;
+  tipCents = Math.max(0, Math.round(v * 100));
+  totals();
+}
+function totals(){
+  const sub = subtotal();
+  const tax = Math.round(sub*0.09);
+  if (tipPct !== null) tipCents = Math.round(sub * tipPct);
+  const t = document.getElementById('totals');
+  if(!sub){ t.innerHTML=''; return; }
+  t.innerHTML = '<div class="row"><span>Subtotal</span><span>'+money(sub)+'</span></div>'+
+    '<div class="row"><span>Delivery ('+miles+' mi)</span><span>'+money(feeCents)+'</span></div>'+
+    '<div class="row"><span>Tax</span><span>'+money(tax)+'</span></div>'+
+    '<div class="row"><span>Driver tip</span><span>'+money(tipCents)+'</span></div>'+
+    '<div class="row total"><span>Total</span><span>'+money(sub+feeCents+tax+tipCents)+'</span></div>';
+  document.getElementById('place').disabled = !(geo && cart.length);
+}
+async function validate(){
+  const addr = document.getElementById('address').value.trim();
+  const q = document.getElementById('quote');
+  if(!addr){ q.textContent='Enter an address first.'; return; }
+  q.textContent = 'Checking that address...';
+  const res = await jpost('/api/quote', {restaurant_id: RID, address: addr});
+  if(!res.ok){ geo=null; q.className='quote bad';
+    q.textContent = res.error + ' You can still place the order: dispatch will approve the address and confirm your delivery fee.';
+    totals(); return; }
+  geo = res; feeCents = res.fee_cents; miles = res.miles;
+  q.className='quote good';
+  q.innerHTML = 'Verified: '+res.formatted+'<br>'+res.miles+' miles from the restaurant, delivery '+res.fee;
+  totals();
+}
+async function placeOrder(){
+  const res = await jpost('/checkout', {
+    restaurant_id: RID, customer_name: document.getElementById('name').value,
+    customer_phone: document.getElementById('phone').value,
+    address: document.getElementById('address').value,
+    note: document.getElementById('note').value, items: cart, tip_cents: tipCents});
+  if(!res.ok){ alert(res.error); return; }
+  if(res.pay_url){
+    try{
+      const seen = JSON.parse(localStorage.getItem('ffOrders')||'[]');
+      seen.unshift(res.code); localStorage.setItem('ffOrders', JSON.stringify(seen.slice(0,20)));
+    }catch(e){}
+    window.location = res.pay_url;      // hosted card page, we never see the card
+    return;
+  }
+  try{
+    const seen = JSON.parse(localStorage.getItem('ffOrders')||'[]');
+    seen.unshift(res.code); localStorage.setItem('ffOrders', JSON.stringify(seen.slice(0,10)));
+  }catch(e){}
+  if(res.address_ok === false) alert(res.message);
+  window.location = '/track/' + res.code;
+}
+attachAddressPicker('address', ()=>validate());
+drawMenu();
+</script>{% endblock %}
