@@ -3,6 +3,31 @@ import base64, difflib, os, json, math, re, secrets, sqlite3, threading, time, d
 import dbx
 from flask import Flask, g, request, session, redirect, url_for, render_template, jsonify
 
+# ---------------------------------------------------------------- local time
+# Hosts like Railway and Render run on UTC. The whole app (order times, shop hours,
+# driver schedules, the SQLite 'localtime' stamps) runs on Central time instead.
+# Set APP_TZ to change it. If the host has no time zone files, fall back to the
+# built-in Central rule so daylight saving still switches on its own.
+POSIX_TZ = {"America/Chicago": "CST6CDT,M3.2.0,M11.1.0",
+            "America/New_York": "EST5EDT,M3.2.0,M11.1.0"}
+
+def _pick_tz():
+    env_tz = (os.environ.get("TZ") or "").strip()
+    if env_tz.upper() in ("", "UTC", "ETC/UTC", "GMT", ":/ETC/LOCALTIME"):
+        env_tz = ""
+    return (os.environ.get("APP_TZ") or env_tz or "America/Chicago").strip()
+
+def set_app_tz(name):
+    if "/" in name and not os.path.exists(os.path.join("/usr/share/zoneinfo", name)):
+        name = POSIX_TZ.get(name, name)
+    os.environ["TZ"] = name
+    if hasattr(time, "tzset"):
+        time.tzset()
+    return name
+
+APP_TZ = _pick_tz()
+set_app_tz(APP_TZ)
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(APP_DIR, "delivery.db"))
 GOOGLE_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
@@ -1308,11 +1333,20 @@ def status_label(d):
 
 
 def roster_label(d):
-    """Group tag beside the status. Working while the roster says unavailable
-    reads as an unscheduled driver, so the card shows available AND unscheduled."""
-    if d["status"] != "offline" and d["roster"] == "unavailable":
+    """Group tag beside the status. Working while not on today's schedule reads
+    as an unscheduled driver, so the card shows available AND unscheduled."""
+    grp = driver_group(d)
+    if d["status"] != "offline" and grp == "unavailable":
         return "unscheduled driver"
-    return d["roster"]
+    if grp == "unavailable" and d["roster"] == "scheduled":
+        return "not scheduled today"
+    return grp
+
+@app.get("/api/clock")
+def api_clock():
+    """Quick check that the server is on Central time."""
+    return jsonify({"ok": True, "now": now(), "tz": APP_TZ,
+                    "abbr": time.strftime("%Z"), "utc_offset": time.strftime("%z")})
 
 @app.get("/api/dispatch/board")
 def api_board():
@@ -1351,7 +1385,9 @@ def api_board():
                      "pending_request": d["pending_request"], "load": d["load"],
                      "unread": unread.get(d["id"], 0),
                      "max_stack": d["max_stack"], "up_next": rotation.get(d["id"]),
-                     "roster": d["roster"], "availability": availability_for(d["id"]), "location": loc_block(d),
+                     "roster": d["roster"], "group": driver_group(d),
+                     "today_shift": ", ".join(scheduled_today(d["id"])),
+                     "availability": availability_for(d["id"]), "location": loc_block(d),
                      "status_label": status_label(d), "roster_label": roster_label(d),
                      "on_orders": [{"id": x["id"], "code": x["code"], "stage": x["dispatch_status"],
                                     "restaurant": x["restaurant"], "customer": x["customer"],
@@ -1967,7 +2003,8 @@ def api_broadcast():
     elif audience == "active":
         rows = db().execute("SELECT * FROM drivers WHERE status='online'").fetchall()
     elif audience in ROSTERS:
-        rows = db().execute("SELECT * FROM drivers WHERE roster=?", (audience,)).fetchall()
+        rows = [r for r in db().execute("SELECT * FROM drivers").fetchall()
+                if driver_group(r) == audience]
     else:
         audience = "all"
         rows = db().execute("SELECT * FROM drivers").fetchall()
@@ -2158,6 +2195,28 @@ def off_today(driver_id, day=None):
                           AND start_date<=? AND end_date>=?""", (driver_id, day, day)).fetchone()
     return bool(row)
 
+
+
+def scheduled_today(driver_id, day=None):
+    """Today's approved shifts for this driver, like ['16:30-21:00']. Empty when
+    they have nothing on today's schedule or have approved time off today."""
+    day = day or dt.date.today()
+    if off_today(driver_id, day.isoformat()):
+        return []
+    rows = db().execute("""SELECT start_time, end_time FROM availability
+                           WHERE driver_id=? AND dow=? AND COALESCE(status,'approved')='approved'
+                           AND (week_start IS NULL OR week_start='' OR week_start=?)
+                           ORDER BY start_time""",
+                        (driver_id, day.weekday(), monday_of(day).isoformat())).fetchall()
+    return [r["start_time"] + "-" + r["end_time"] for r in rows]
+
+
+def driver_group(d):
+    """Which roster tab a driver sits in. Scheduled means an approved shift today
+    and not pulled by dispatch. Anyone not on today's schedule is Unavailable."""
+    if d["roster"] == "unavailable":
+        return "unavailable"
+    return "scheduled" if scheduled_today(d["id"]) else "unavailable"
 
 @app.post("/api/driver/availability")
 def api_driver_availability():

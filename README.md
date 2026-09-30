@@ -383,3 +383,8 @@ with the mouse, then hit Capture and only that box is read. Drag again to redo t
 * Drop several at once and they queue up, one at a time, with a count of what is left.
 
 The reading still happens on your own computer. No screenshot leaves the machine.
+
+
+## Time zone
+
+The app runs on Central time (America/Chicago) on its own, even when the host is on UTC. To use a different zone, set the `APP_TZ` variable. Check it any time at `/api/clock`.

@@ -277,9 +277,11 @@ function setRoster(which){
     t.classList.toggle('on', t.dataset.roster === which));
   renderDrivers(DRIVERS);
 }
+function grp(d){ return d.group || d.roster; }
 function availLine(d){
-  if(!d.availability || !d.availability.length) return 'no availability set';
-  return d.availability.map(a=>a.day+' '+a.start+'-'+a.end).join(', ');
+  const today = d.today_shift ? 'Today '+d.today_shift : 'Not scheduled today';
+  if(!d.availability || !d.availability.length) return today+' &middot; no availability set';
+  return today+' &middot; '+d.availability.map(a=>a.day+' '+a.start+'-'+a.end).join(', ');
 }
 function chatNote(d){
   return (d.unread ? ' <span class="pill red" title="unread messages">'
@@ -288,8 +290,8 @@ function chatNote(d){
 function renderDrivers(list){
   const all = (list||[]).slice();
   const counts = {active: all.filter(d=>d.status!=='offline').length,
-                  scheduled: all.filter(d=>d.roster==='scheduled').length,
-                  unavailable: all.filter(d=>d.roster==='unavailable').length};
+                  scheduled: all.filter(d=>grp(d)==='scheduled').length,
+                  unavailable: all.filter(d=>grp(d)==='unavailable').length};
   // With auto dispatch off nobody is online yet, so On shift is empty on load.
   // Drop to the Scheduled list rather than showing an empty rail, until a tab
   // is picked by hand.
@@ -298,7 +300,7 @@ function renderDrivers(list){
     document.querySelectorAll('#rosterTabs .tab').forEach(t=>
       t.classList.toggle('on', t.dataset.roster === 'scheduled'));
   }
-  const shown = all.filter(d => ROSTER === 'active' ? d.status !== 'offline' : d.roster === ROSTER);
+  const shown = all.filter(d => ROSTER === 'active' ? d.status !== 'offline' : grp(d) === ROSTER);
   document.querySelectorAll('#rosterTabs .tab').forEach(t=>{
     const base = {active:'On shift', scheduled:'Scheduled',
                   unavailable:'Unavailable'}[t.dataset.roster];
@@ -345,7 +347,7 @@ function renderDrivers(list){
       'ondrop="dropOnDriver(event,'+d.id+')"><div><strong>'+d.name+'</strong> <span class="pill '+
       (d.status==='online'?'green':d.status==='break'?'amber':'grey')+'">'+
       (d.status_label || d.status)+'</span> '+turn+
-      ' <span class="pill '+(d.roster==='unavailable'?
+      ' <span class="pill '+(grp(d)==='unavailable'?
         (d.status!=='offline'?'amber':'red'):'grey')+'">'+
       (d.roster_label || d.roster)+'</span>'+
       '<div class="muted small">'+d.phone+' &middot; '+d.load+' order'+(d.load===1?'':'s')+' stacked</div>'+
