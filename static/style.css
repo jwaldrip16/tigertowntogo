@@ -232,7 +232,7 @@ ul.trail .ts{display:inline-block;min-width:72px;color:#666;font-variant-numeric
 .chat.tall{height:min(58vh,520px)}
 #chatRoster{margin-top:6px}
 
-/* ---- Wisdom import */
+/* ---- receipt panels */
 .dropzone{border:2px dashed #cbd5e1;border-radius:12px;padding:28px 16px;text-align:center;
   background:#f8fafc;cursor:pointer;margin:10px 0}
 .dropzone.over{border-color:#2563eb;background:#eff6ff}

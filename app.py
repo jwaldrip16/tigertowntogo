@@ -1,5 +1,5 @@
 
-import base64, difflib, email, email.header, imaplib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
+import base64, difflib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
 import dbx
 from flask import Flask, g, request, session, redirect, url_for, render_template, jsonify
 
@@ -168,15 +168,10 @@ def init_db():
     for k, v in [("base_fee_cents", "399"), ("base_miles", "3"), ("per_mile_cents", "100"),
                  ("tax_rate_bp", "900"), ("auto_assign", "1"), ("max_stack_default", "3"),
                  ("assign_on_pending", "0"), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
-                 ("stripe_enabled", "0"), ("stripe_pk", ""), ("stripe_sk", ""),
-                 ("stripe_wh", ""), ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
+                 ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
                  ("unlimited_stack", "1"),
                  ("order_tokens", "Online,App,Phone call,Third party"),
-                 ("import_auto_create", "0"), ("import_trust_fees", "1"),
-                 ("mail_import_on", "0"), ("imap_host", "imap.gmail.com"),
-                 ("imap_port", "993"), ("imap_user", ""), ("imap_pass", ""),
-                 ("imap_folder", "INBOX"), ("imap_poll_secs", "120"),
-                 ("inbound_token", "")]:
+                 ]:
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
     con.execute("UPDATE settings SET value='0' WHERE key='assign_on_pending'")
     con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('unlimited_stack','1')")
@@ -184,16 +179,6 @@ def init_db():
     con.execute("""CREATE TABLE IF NOT EXISTS blocked_customers(
         id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT UNIQUE, name TEXT, reason TEXT,
         created_at TEXT)""")
-    con.execute("""CREATE TABLE IF NOT EXISTS imports(
-        id INTEGER PRIMARY KEY AUTOINCREMENT, source TEXT NOT NULL DEFAULT 'screenshot',
-        subject TEXT, raw_text TEXT, parsed TEXT, confidence INTEGER NOT NULL DEFAULT 0,
-        status TEXT NOT NULL DEFAULT 'review', note TEXT, order_id INTEGER,
-        uid TEXT, created_at TEXT)""")
-    con.execute("CREATE INDEX IF NOT EXISTS idx_imports_status ON imports(status, id)")
-    con.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_imports_uid ON imports(uid) WHERE uid IS NOT NULL")
-    row = con.execute("SELECT value FROM settings WHERE key='inbound_token'").fetchone()
-    if not row or not row["value"]:
-        con.execute("UPDATE settings SET value=? WHERE key='inbound_token'", (secrets.token_urlsafe(18),))
     ensure_column(con, "drivers", "online_since", "TEXT")
     ensure_column(con, "drivers", "last_assigned_at", "TEXT")
     ensure_column(con, "drivers", "last_completed_at", "TEXT")
@@ -267,9 +252,6 @@ def init_db():
     ensure_column(con, "menu_items", "sort", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "orders", "payment_status", "TEXT NOT NULL DEFAULT 'unpaid'")
     ensure_column(con, "orders", "pay_method", "TEXT")
-    ensure_column(con, "orders", "stripe_session", "TEXT")
-    ensure_column(con, "orders", "stripe_intent", "TEXT")
-    ensure_column(con, "orders", "stripe_pm", "TEXT")
     ensure_column(con, "orders", "paid_at", "TEXT")
     ensure_column(con, "orders", "pay_link", "TEXT")
     ensure_column(con, "orders", "pay_ref", "TEXT")
@@ -933,11 +915,11 @@ def clean_token(v):
 
 def token_from_source(src):
     return {"call_in": "Phone call", "dispatch_online": "Online",
-            "website": "Online", "wisdom": "Third party"}.get(src, "")
+            "website": "Online"}.get(src, "")
 
 
 def clean_ref(v):
-    """Their number: whatever the call-in slip or Wisdom ticket calls this order."""
+    """Their number: whatever the call-in slip calls this order."""
     return (v or "").strip()[:32]
 
 
@@ -988,7 +970,7 @@ def order_dict(o):
         "tip_sig": o["tip_sig"] or "",
         "tip_signed_at": o["tip_signed_at"] or "",
         "tip_declined": bool(o["tip_declined"]),
-        "cards_on": stripe_on(),
+        "cards_on": False,
         "subtotal_cents": int(o["subtotal_cents"] or 0),
         "subtotal": money(o["subtotal_cents"]), "fee": money(o["fee_cents"]),
         "tax": money(o["tax_cents"]), "tip": money(o["tip_cents"]), "total": money(o["total_cents"]),
@@ -1103,142 +1085,27 @@ def api_address_suggest():
     return jsonify({"ok": True, "suggestions": out[:6]})
 
 # ---------------------------------------------------------------- payments
-# Card only. Nothing here runs until a dispatcher pastes live keys into
-# /dispatch/payments, so the app works exactly as before with Stripe off.
+# No online card processing. An order is taken without a charge; the driver
+# collects at the door and dispatch records payment on the order.
 
 def sget(key):
     return (setting(key, cast=str) or "").strip()
-
-def stripe_on():
-    return sget("stripe_enabled") == "1" and sget("stripe_sk") != ""
-
-def stripe_lib():
-    """Imported late so the app still boots on a machine without the library."""
-    try:
-        import stripe as _s
-    except ImportError:
-        return None
-    _s.api_key = sget("stripe_sk")
-    return _s
-
 def base_url():
     return request.url_root.rstrip("/")
 
-def pay_lines(o):
-    """One Stripe line per charge, so the customer's receipt reads like the order."""
-    out = []
-    def line(name, cents):
-        if cents and cents > 0:
-            out.append({"price_data": {"currency": "usd", "unit_amount": int(cents),
-                                       "product_data": {"name": name}}, "quantity": 1})
-    line("Food (" + o["code"] + ")", o["subtotal_cents"])
-    line("Item fees", o["item_fee_cents"])
-    line("Delivery fee", o["fee_cents"])
-    line("Sales tax", o["tax_cents"])
-    line("Tip", o["tip_cents"])
-    return out
 
-def pay_session(o):
-    """Build a hosted Stripe Checkout page for one order. Returns (url, error)."""
-    st = stripe_lib()
-    if not st:
-        return None, "The stripe library is not installed on the server."
-    try:
-        sess = st.checkout.Session.create(
-            mode="payment",
-            line_items=pay_lines(o),
-            client_reference_id=o["code"],
-            metadata={"order_code": o["code"], "order_id": str(o["id"])},
-            customer_creation="always",
-            payment_intent_data={"setup_future_usage": "off_session",
-                                 "description": "Tiger Town To Go " + o["code"]},
-            success_url=base_url() + "/track/" + o["code"] + "?paid=1",
-            cancel_url=base_url() + "/track/" + o["code"] + "?paid=0")
-    except Exception as e:
-        return None, str(e)
-    db().execute("UPDATE orders SET stripe_session=?, pay_link=? WHERE id=?",
-                 (sess.id, sess.url, o["id"]))
-    db().commit()
-    return sess.url, None
-
-def mark_paid(o, intent=None, pm=None, method="card_online", ref=""):
-    """Payment landed: record it and let the order into the queue."""
+def mark_paid(o, intent=None, pm=None, method="recorded", ref=""):
+    """Payment recorded on the order, so it can go into the queue."""
     kitchen = "pending" if o["address_ok"] else "waiting"
     reason = "waiting on kitchen" if o["address_ok"] else "address needs dispatch approval"
     db().execute("""UPDATE orders SET payment_status='paid', paid_at=?, pay_method=?,
-                    stripe_intent=COALESCE(?,stripe_intent), stripe_pm=COALESCE(?,stripe_pm),
                     pay_ref=?, kitchen_status=?, dispatch_status='held', hold_reason=?
                     WHERE id=?""",
-                 (now(), method, intent, pm, ref, kitchen, reason, o["id"]))
+                 (now(), method, ref, kitchen, reason, o["id"]))
     db().commit()
-    log("payment", o["code"] + " paid by card (" + method.replace("_", " ") + ")")
+    log("payment", o["code"] + " marked paid (" + method.replace("_", " ") + ")")
     auto_assign()
 
-def charge_saved_card(o, cents, label):
-    """Charge the card already on the order, for a tip signed at the door."""
-    st = stripe_lib()
-    if not st:
-        return None, "The stripe library is not installed on the server."
-    if not o["stripe_intent"]:
-        return None, "No card on file for this order."
-    try:
-        old = st.PaymentIntent.retrieve(o["stripe_intent"])
-        pm = o["stripe_pm"] or old.payment_method
-        pi = st.PaymentIntent.create(amount=int(cents), currency="usd",
-                                     customer=old.customer, payment_method=pm,
-                                     off_session=True, confirm=True,
-                                     description=label + " " + o["code"])
-    except Exception as e:
-        return None, str(e)
-    return pi.id, None
-
-@app.post("/api/stripe/webhook")
-def api_stripe_webhook():
-    """Stripe tells us the customer actually paid. This is what releases the order."""
-    st = stripe_lib()
-    raw = request.get_data()
-    secret = sget("stripe_wh")
-    if st and secret:
-        try:
-            event = st.Webhook.construct_event(raw, request.headers.get("Stripe-Signature", ""),
-                                               secret)
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 400
-        obj = event["data"]["object"]
-        kind = event["type"]
-    else:
-        body = json.loads(raw or b"{}")
-        obj, kind = body.get("data", {}).get("object", {}), body.get("type", "")
-    if kind != "checkout.session.completed":
-        return jsonify({"ok": True, "ignored": kind})
-    code = (obj.get("metadata") or {}).get("order_code") or obj.get("client_reference_id")
-    o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
-    if not o:
-        return jsonify({"ok": False, "error": "unknown order"}), 404
-    if o["payment_status"] == "paid":
-        return jsonify({"ok": True, "already": True})
-    mark_paid(o, intent=obj.get("payment_intent"), pm=None,
-              method="card_link" if o["pay_link"] and o["placed_by"] != "customer"
-                     else "card_online")
-    return jsonify({"ok": True})
-
-@app.get("/api/pay/check/<code>")
-def api_pay_check(code):
-    """Belt and braces: the track page asks Stripe directly if the webhook is late."""
-    o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
-    if not o:
-        return jsonify({"ok": False}), 404
-    if o["payment_status"] == "paid" or not o["stripe_session"] or not stripe_on():
-        return jsonify({"ok": True, "paid": o["payment_status"] == "paid"})
-    st = stripe_lib()
-    try:
-        sess = st.checkout.Session.retrieve(o["stripe_session"])
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e)}), 400
-    if sess.get("payment_status") == "paid":
-        mark_paid(o, intent=sess.get("payment_intent"))
-        return jsonify({"ok": True, "paid": True})
-    return jsonify({"ok": True, "paid": False})
 
 @app.post("/checkout")
 def checkout():
@@ -1348,20 +1215,6 @@ def checkout():
         ("" if address_ok else " (address not verified, waiting on dispatch approval)") +
         (" (from " + from_code + (": " + issue_label if issue_label else "") + ")" if from_code else ""))
     oid = cur.lastrowid
-    # Card only: with Stripe live the order waits on payment before dispatch or
-    # the kitchen can see it. Off, everything behaves exactly as it did before.
-    if stripe_on():
-        db().execute("""UPDATE orders SET payment_status='unpaid', kitchen_status='waiting',
-                        dispatch_status='awaiting_payment',
-                        hold_reason='waiting on card payment' WHERE id=?""", (oid,))
-        db().commit()
-        o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
-        url, err = pay_session(o)
-        if not url:
-            return jsonify({"ok": False, "error": "Card payment could not start: " + err}), 502
-        return jsonify({"ok": True, "code": code, "order_id": oid, "total": money(total),
-                        "address_ok": bool(address_ok), "pay_url": url,
-                        "message": "Taking you to our secure card page to finish the order."})
     if address_ok:
         auto_assign()
     return jsonify({"ok": True, "code": code, "order_id": oid, "total": money(total),
@@ -1623,32 +1476,9 @@ def api_order_status():
     auto_assign()
     return jsonify({"ok": True})
 
-@app.post("/api/order/pay-link")
-def api_pay_link():
-    """Dispatch makes a one-time card page for a call-in order and texts the link."""
-    if not dispatcher_required():
-        return jsonify({"ok": False}), 403
-    data = request.get_json(force=True)
-    o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
-    if not o:
-        return jsonify({"ok": False}), 404
-    if o["payment_status"] == "paid":
-        return jsonify({"ok": False, "error": "That order is already paid."}), 400
-    if not stripe_on():
-        return jsonify({"ok": False,
-                        "error": "Card payments are switched off. Add your keys in Payments."}), 400
-    url, err = pay_session(o)
-    if not url:
-        return jsonify({"ok": False, "error": err}), 502
-    body = ("Your " + o["code"] + " order from Tiger Town To Go comes to " +
-            money(o["total_cents"]) + ". Pay here: " + url)
-    log("payment", "card link made for " + o["code"])
-    return jsonify({"ok": True, "url": url, "sms": "sms:" + digits(o["customer_phone"]) +
-                    "?&body=" + urllib.parse.quote(body), "text": body})
-
 @app.post("/api/order/mark-paid")
 def api_mark_paid():
-    """For a card keyed into the Stripe virtual terminal on the dispatcher's screen."""
+    """Dispatcher records that this order has been paid for."""
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     data = request.get_json(force=True)
@@ -1658,57 +1488,8 @@ def api_mark_paid():
     if o["payment_status"] == "paid":
         return jsonify({"ok": True, "already": True})
     ref = (data.get("ref") or "").strip()
-    mark_paid(o, intent=ref if ref.startswith("pi_") else None,
-              method="card_keyed", ref=ref)
+    mark_paid(o, method="recorded", ref=ref)
     return jsonify({"ok": True})
-
-@app.post("/api/order/refund")
-def api_refund():
-    """Full or partial refund, dispatcher only. Amount in dollars or cents."""
-    if not dispatcher_required():
-        return jsonify({"ok": False}), 403
-    data = request.get_json(force=True)
-    o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
-    if not o:
-        return jsonify({"ok": False}), 404
-    if o["payment_status"] != "paid" and not (o["refunded_cents"] or 0):
-        return jsonify({"ok": False, "error": "Nothing has been charged on that order yet."}), 400
-    paid = int(o["total_cents"])
-    already = int(o["refunded_cents"] or 0)
-    left = paid - already
-    if left <= 0:
-        return jsonify({"ok": False, "error": "That order is already fully refunded."}), 400
-    raw = data.get("cents")
-    cents = left if raw in (None, "", "all") else int(round(float(raw)))
-    if cents <= 0:
-        return jsonify({"ok": False, "error": "Enter an amount to refund."}), 400
-    if cents > left:
-        return jsonify({"ok": False,
-                        "error": "That is more than is left to refund (" + money(left) + ")."}), 400
-    note = (data.get("note") or "").strip()
-    rid = ""
-    if stripe_on():
-        if not o["stripe_intent"]:
-            return jsonify({"ok": False,
-                            "error": "No Stripe charge on this order, so refund it in Stripe."}), 400
-        st = stripe_lib()
-        try:
-            rf = st.Refund.create(payment_intent=o["stripe_intent"], amount=int(cents),
-                                  reason="requested_by_customer")
-            rid = rf.id
-        except Exception as e:
-            return jsonify({"ok": False, "error": str(e)}), 502
-    total_ref = already + cents
-    db().execute("""UPDATE orders SET refunded_cents=?, refund_id=?, refund_note=?,
-                    payment_status=? WHERE id=?""",
-                 (total_ref, rid, note,
-                  "refunded" if total_ref >= paid else "part_refunded", o["id"]))
-    db().commit()
-    who = dispatcher_row()
-    log("refund", (who["name"] if who else "dispatch") + " refunded " + money(cents) +
-        " on " + o["code"] + (": " + note if note else ""))
-    return jsonify({"ok": True, "refunded": money(total_ref), "left": money(paid - total_ref),
-                    "refund_id": rid})
 
 @app.post("/api/driver/tip-sign")
 def api_tip_sign():
@@ -1742,10 +1523,6 @@ def api_tip_sign():
     except Exception:
         return jsonify({"ok": False, "error": "That signature did not save."}), 400
     charge = ""
-    if stripe_on():
-        charge, err = charge_saved_card(o, cents, "Tip")
-        if not charge:
-            return jsonify({"ok": False, "error": "The card declined the tip: " + err}), 502
     db().execute("""UPDATE orders SET tip_cents=tip_cents+?, total_cents=total_cents+?,
                     tip_sig=?, tip_signed_at=?, tip_charge_id=?, tip_declined=0 WHERE id=?""",
                  (cents, cents, "/static/signatures/" + o["code"] + ".png", now(),
@@ -1923,8 +1700,7 @@ def item_fees(items):
     return sum(int(i.get("fee_cents", 0) or 0) * int(i["qty"]) for i in items)
 
 
-SOURCES = {"website": "Online", "call_in": "Call-in", "dispatch_online": "Dispatch online",
-           "wisdom": "Wisdom import"}
+SOURCES = {"website": "Online", "call_in": "Call-in", "dispatch_online": "Dispatch online"}
 
 REDO_REASONS = {
     "missing_item": "Restaurant left an item off",
@@ -3010,61 +2786,6 @@ def dispatch_settings():
     rows = db().execute("SELECT * FROM settings").fetchall()
     return render_template("dispatch_settings.html", s={r["key"]: r["value"] for r in rows}, saved=saved)
 
-@app.get("/dispatch/payments")
-def dispatch_payments():
-    if not dispatcher_required():
-        return redirect(url_for("dispatch_login"))
-    rows = db().execute("SELECT * FROM settings").fetchall()
-    s = {r["key"]: r["value"] for r in rows}
-    try:
-        import stripe  # noqa: F401
-        lib = True
-    except ImportError:
-        lib = False
-    return render_template("dispatch_payments.html", s=s, lib=lib,
-                           hook=request.url_root.rstrip("/") + "/api/stripe/webhook")
-
-
-@app.post("/api/dispatch/payments")
-def api_dispatch_payments():
-    """Save the Stripe keys. A blank key field keeps whatever is already stored, so
-    the page never shows or wipes a secret key by accident."""
-    if not dispatcher_required():
-        return jsonify({"ok": False, "error": "Dispatchers only."}), 403
-    data = request.get_json(force=True)
-    for field, key in (("pk", "stripe_pk"), ("sk", "stripe_sk"), ("wh", "stripe_wh")):
-        val = (data.get(field) or "").strip()
-        if val:
-            db().execute("UPDATE settings SET value=? WHERE key=?", (val, key))
-    if "tip_prompt" in data:
-        db().execute("UPDATE settings SET value=? WHERE key='tip_prompt'",
-                     ("1" if data.get("tip_prompt") else "0",))
-    want_on = bool(data.get("enabled"))
-    db().commit()
-    warn = ""
-    if want_on:
-        if not sget("stripe_sk"):
-            return jsonify({"ok": False, "error": "Paste your secret key before switching it on."}), 400
-        st = stripe_lib()
-        if not st:
-            return jsonify({"ok": False,
-                            "error": "The stripe library is missing. Run: pip install stripe"}), 400
-        try:
-            acct = st.Account.retrieve()
-        except Exception as e:
-            return jsonify({"ok": False, "error": "Stripe refused that key: " + str(e)[:160]}), 400
-        if not sget("stripe_wh"):
-            warn = ("Saved and switched on. Add the webhook signing secret too, or paid orders "
-                    "will only appear once the tracking page checks in.")
-        if not (acct.get("charges_enabled") if hasattr(acct, "get") else True):
-            warn = "Saved, but Stripe says this account cannot take charges yet."
-    db().execute("UPDATE settings SET value=? WHERE key='stripe_enabled'", ("1" if want_on else "0",))
-    db().commit()
-    log("payments", "Card payments switched " + ("on" if want_on else "off") + " by "
-        + (session.get("dispatcher_name") or "dispatch"))
-    return jsonify({"ok": True, "enabled": want_on, "warn": warn})
-
-
 # ---------------------------------------------------------------- chat
 
 @app.get("/api/chat/<int:driver_id>")
@@ -3609,464 +3330,6 @@ def portal_front_door():
     return None
 
 
-# ---------------------------------------------------------------- Wisdom import
-# Two ways an outside order gets into Tiger Town To Go without retyping it:
-#   1. a screenshot of the Wisdom GPS receipt, read in the dispatcher's browser
-#   2. the Wisdom order email, either fetched from a mailbox or posted to us
-# Both land in the same parser and the same review list.
-
-MONEY = r"\$?\s*(\d{1,4}(?:,\d{3})*\.\d{2})"
-
-LABELS = {
-    "restaurant": ["restaurant", "merchant", "pickup from", "pick up from", "pickup",
-                   "store", "vendor", "location"],
-    "restaurant_address": ["restaurant address", "pickup address", "merchant address",
-                           "store address"],
-    "customer": ["customer", "customer name", "deliver to", "delivery to", "recipient",
-                 "drop off", "dropoff", "ordered by", "name"],
-    "customer_phone": ["customer phone", "phone", "telephone", "mobile", "contact"],
-    "address": ["delivery address", "customer address", "dropoff address", "drop off address",
-                "deliver to address", "address"],
-    "delivery_fee": ["delivery fee", "delivery charge", "driver fee", "del fee"],
-    "service_fee": ["service fee", "service charge", "convenience fee", "svc fee"],
-    "tip": ["tip", "tips", "gratuity", "driver tip", "customer tip"],
-    "subtotal": ["subtotal", "sub total", "food total", "items total", "order total"],
-    "tax": ["tax", "sales tax"],
-    "total": ["total", "grand total", "order grand total", "amount due"],
-    "order_no": ["order", "order #", "order no", "order number", "ticket", "confirmation"],
-}
-
-def _money_cents(text):
-    m = re.search(MONEY, text or "")
-    if not m:
-        return None
-    return int(round(float(m.group(1).replace(",", "")) * 100))
-
-def _looks_like_address(line):
-    l = line.strip()
-    if len(l) < 8:
-        return False
-    if not re.match(r"^\d{1,6}\s+\S", l):
-        return False
-    return bool(re.search(r"[A-Za-z]{3}", l))
-
-def _clean_value(v):
-    v = (v or "").strip(" :-\t")
-    v = re.sub(r"\s{2,}", " ", v)
-    return v.strip()
-
-def parse_receipt(raw):
-    """Pull a Wisdom order out of OCR text or an order email. Every field is a best
-    effort: the dispatcher sees and fixes anything the parse got wrong."""
-    text = (raw or "").replace("\r", "\n")
-    text = re.sub(r"[ \t]+", " ", text)
-    lines = [l.strip() for l in text.split("\n") if l.strip()]
-    low = [l.lower() for l in lines]
-    out = {"restaurant": "", "restaurant_address": "", "customer": "", "customer_phone": "",
-           "address": "", "delivery_fee_cents": None, "service_fee_cents": None,
-           "tip_cents": None, "subtotal_cents": None, "tax_cents": None,
-           "total_cents": None, "order_no": "", "items": [], "notes": ""}
-
-    def labelled(keys, want_money=False):
-        """A label on its own line takes the rest of that line, or the next line."""
-        for i, l in enumerate(low):
-            for key in keys:
-                if not (l.startswith(key + ":") or l.startswith(key + " :") or l == key
-                        or l.startswith(key + " ")):
-                    continue
-                tail = lines[i][len(key):]
-                tail = _clean_value(tail)
-                if want_money:
-                    c = _money_cents(tail)
-                    if c is not None:
-                        return c
-                    if i + 1 < len(lines):
-                        c = _money_cents(lines[i + 1])
-                        if c is not None:
-                            return c
-                    continue
-                if tail and not tail.isdigit():
-                    return tail
-                if i + 1 < len(lines):
-                    nxt = _clean_value(lines[i + 1])
-                    if nxt and not any(nxt.lower().startswith(k) for ks in LABELS.values() for k in ks):
-                        return nxt
-        return None if want_money else ""
-
-    out["restaurant"] = labelled(LABELS["restaurant"]) or ""
-    out["restaurant_address"] = labelled(LABELS["restaurant_address"]) or ""
-    out["customer"] = labelled(LABELS["customer"]) or ""
-    out["address"] = labelled(LABELS["address"]) or ""
-    out["order_no"] = labelled(LABELS["order_no"]) or ""
-    for key, field in [("delivery_fee", "delivery_fee_cents"), ("service_fee", "service_fee_cents"),
-                       ("tip", "tip_cents"), ("subtotal", "subtotal_cents"),
-                       ("tax", "tax_cents"), ("total", "total_cents")]:
-        out[field] = labelled(LABELS[key], want_money=True)
-
-    ph = re.search(r"(\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4})", text)
-    if ph:
-        out["customer_phone"] = re.sub(r"[^\d]", "", ph.group(1))[-10:]
-    if not out["order_no"]:
-        m = re.search(r"#\s*([A-Z0-9-]{4,})", text)
-        if m:
-            out["order_no"] = m.group(1)
-    out["order_no"] = _clean_value(re.sub(r"^[#:\s]+", "", out["order_no"] or ""))
-
-    # addresses: a receipt usually prints them in blocks, the pickup address under the
-    # restaurant and the drop-off under the customer. Read the block, then fall back.
-    def _label_index(keys):
-        for i, l in enumerate(low):
-            for key in keys:
-                if l.startswith(key + ":") or l == key or l.startswith(key + " "):
-                    return i
-        return None
-
-    def _street_after(i, span=5):
-        if i is None:
-            return ""
-        for j in range(i + 1, min(i + 1 + span, len(lines))):
-            if _looks_like_address(lines[j]):
-                return lines[j]
-        return ""
-
-    exact_drop = labelled(["delivery address", "customer address", "dropoff address",
-                           "drop off address", "deliver to address"])
-    exact_pick = labelled(["restaurant address", "pickup address", "merchant address",
-                           "store address"])
-    drop_block = _street_after(_label_index(LABELS["customer"] + ["delivery address",
-                                                                 "dropoff address",
-                                                                 "drop off address"]))
-    pick_block = _street_after(_label_index(LABELS["restaurant"]))
-    out["address"] = exact_drop or drop_block or out["address"]
-    out["restaurant_address"] = exact_pick or pick_block or out["restaurant_address"]
-
-    street = [l for l in lines if _looks_like_address(l)]
-    if not out["address"] and street:
-        out["address"] = street[0]
-    if not out["restaurant_address"]:
-        for l in street:
-            if l != out["address"]:
-                out["restaurant_address"] = l
-                break
-    if out["address"] and out["address"] == out["restaurant_address"]:
-        other = [l for l in street if l != out["address"]]
-        if other:
-            out["restaurant_address"] = other[0] if exact_drop or drop_block else out["restaurant_address"]
-            if not (exact_drop or drop_block):
-                out["address"] = other[0]
-    # the delivery address often runs over two lines: street, then city/state/zip
-    for field in ("address", "restaurant_address"):
-        val = out[field]
-        if val and not re.search(r"[A-Za-z]{2}\s*\d{5}", val):
-            try:
-                i = lines.index(val)
-            except ValueError:
-                continue
-            if i + 1 < len(lines) and re.search(r"[A-Za-z]{2}\s*\d{5}", lines[i + 1]):
-                out[field] = val + ", " + _clean_value(lines[i + 1])
-
-    # order lines: "2 x Wings 18.99" or "2 Wings $18.99"
-    for l in lines:
-        m = re.match(r"^(\d{1,2})\s*[xX*]?\s+(.{2,60}?)\s+" + MONEY + r"$", l)
-        if m and not any(l.lower().startswith(k) for ks in LABELS.values() for k in ks):
-            out["items"].append({"qty": int(m.group(1)), "name": _clean_value(m.group(2)),
-                                 "price_cents": int(round(float(m.group(3).replace(",", "")) * 100))})
-
-    filled = sum(1 for k in ("restaurant", "customer", "address") if out[k])
-    filled += sum(1 for k in ("delivery_fee_cents", "service_fee_cents", "tip_cents") if out[k] is not None)
-    out["confidence"] = int(round(filled / 6.0 * 100))
-    return out
-
-def match_restaurant(parsed):
-    """Tie the receipt's restaurant to one of ours, by name first then address."""
-    rows = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
-    name = (parsed.get("restaurant") or "").lower().strip()
-    if name:
-        for r in rows:
-            if r["name"].lower() == name:
-                return r["id"], r["name"], "name"
-        best, score = None, 0.0
-        for r in rows:
-            s = difflib.SequenceMatcher(None, name, r["name"].lower()).ratio()
-            if s > score:
-                best, score = r, s
-        if best and score >= 0.62:
-            return best["id"], best["name"], "name"
-    addr = (parsed.get("restaurant_address") or "").lower()
-    if addr:
-        head = re.match(r"^\d+\s+\w+", addr)
-        for r in rows:
-            if head and head.group(0) in (r["address"] or "").lower():
-                return r["id"], r["name"], "address"
-    return None, "", ""
-
-def import_row(imp):
-    p = json.loads(imp["parsed"] or "{}")
-    rid, rname, how = (p.get("restaurant_id"), p.get("restaurant_match"), p.get("match_on"))
-    return {
-        "id": imp["id"], "source": imp["source"], "subject": imp["subject"] or "",
-        "status": imp["status"], "confidence": imp["confidence"],
-        "created_at": imp["created_at"], "at": clock(imp["created_at"]),
-        "order_id": imp["order_id"], "note": imp["note"] or "",
-        "restaurant_id": rid, "restaurant_match": rname or "", "match_on": how or "",
-        "fields": p, "raw": (imp["raw_text"] or "")[:4000],
-    }
-
-def stash_import(raw_text, source, subject="", uid=None):
-    """Parse a receipt and file it for review. Returns the imports row id."""
-    if uid:
-        old = db().execute("SELECT id FROM imports WHERE uid=?", (uid,)).fetchone()
-        if old:
-            return old["id"], False
-    p = parse_receipt(raw_text)
-    rid, rname, how = match_restaurant(p)
-    p["restaurant_id"] = rid
-    p["restaurant_match"] = rname
-    p["match_on"] = how
-    cur = db().execute("""INSERT INTO imports(source,subject,raw_text,parsed,confidence,
-                          status,uid,created_at) VALUES(?,?,?,?,?,'review',?,?)""",
-                       (source, subject, raw_text, json.dumps(p), p.get("confidence", 0),
-                        uid, now()))
-    db().commit()
-    log("import", "receipt read from " + source + (" (" + rname + ")" if rname else ""))
-    return cur.lastrowid, True
-
-@app.get("/dispatch/import")
-def dispatch_import_page():
-    if not dispatcher_required():
-        return redirect(url_for("dispatch_login"))
-    return render_template("dispatch_import.html",
-                           oneoff=oneoff_id(),
-                           token=setting("inbound_token", str) or "",
-                           mail_on=setting("mail_import_on") == 1,
-                           auto=setting("import_auto_create") == 1,
-                           trust=setting("import_trust_fees") == 1,
-                           imap_host=setting("imap_host", str) or "",
-                           imap_user=setting("imap_user", str) or "",
-                           imap_folder=setting("imap_folder", str) or "INBOX",
-                           has_pass=bool(setting("imap_pass", str)))
-
-@app.get("/api/import/list")
-def api_import_list():
-    if not dispatcher_required():
-        return jsonify({"error": "no"}), 403
-    rows = db().execute("""SELECT * FROM imports WHERE status='review'
-                           ORDER BY id DESC LIMIT 40""").fetchall()
-    done = db().execute("""SELECT * FROM imports WHERE status!='review'
-                           ORDER BY id DESC LIMIT 15""").fetchall()
-    return jsonify({"pending": [import_row(r) for r in rows],
-                    "recent": [import_row(r) for r in done],
-                    "restaurants": [{"id": r["id"], "name": r["name"]} for r in
-                                    db().execute("""SELECT id,name FROM restaurants
-                                                    WHERE slug!='oneoff' ORDER BY name""")],
-                    "mail_on": setting("mail_import_on") == 1,
-                    "auto": setting("import_auto_create") == 1})
-
-@app.post("/api/import/parse")
-def api_import_parse():
-    if not dispatcher_required():
-        return jsonify({"error": "no"}), 403
-    p = request.get_json(force=True)
-    raw = (p.get("text") or "").strip()
-    if len(raw) < 12:
-        return jsonify({"ok": False, "error": "Nothing readable in that receipt yet."}), 400
-    iid, fresh = stash_import(raw, p.get("source") or "screenshot", p.get("subject") or "")
-    row = db().execute("SELECT * FROM imports WHERE id=?", (iid,)).fetchone()
-    out = import_row(row)
-    if setting("import_auto_create") == 1 and out["restaurant_id"] and out["fields"].get("address"):
-        made = build_import_order(row, {})
-        if made.get("ok"):
-            out["auto_created"] = made
-    return jsonify({"ok": True, "import": out})
-
-def build_import_order(imp, over):
-    """Turn a reviewed import into a real order. Fees come off the receipt unless
-    dispatch has told us to price it on our own mileage instead."""
-    p = json.loads(imp["parsed"] or "{}")
-    p.update({k: v for k, v in (over or {}).items() if v not in (None, "")})
-    rid = p.get("restaurant_id")
-    r = db().execute("SELECT * FROM restaurants WHERE id=?", (rid,)).fetchone() if rid else None
-    if not r:
-        return {"ok": False, "error": "Pick which restaurant this order is for."}
-    pu_name = pu_addr = pu_phone = ""
-    pu_lat = pu_lng = None
-    if r["slug"] == "oneoff":
-        pu_name = (p.get("pickup_name") or "").strip()[:80]
-        pu_addr = (p.get("pickup_address") or "").strip()[:160]
-        pu_phone = (p.get("pickup_phone") or "").strip()[:24]
-        if not (pu_name and pu_addr):
-            return {"ok": False, "error": "Type the pickup name and address for this one."}
-        gp = geocode(pu_addr)
-        if gp["ok"]:
-            pu_addr, pu_lat, pu_lng = gp["formatted"], gp["lat"], gp["lng"]
-        r = dict(r)
-        r["name"], r["address"] = pu_name, pu_addr
-        r["phone"], r["lat"], r["lng"] = pu_phone, pu_lat, pu_lng
-    addr = (p.get("address") or "").strip()
-    if not addr:
-        return {"ok": False, "error": "This receipt has no delivery address."}
-    name = (p.get("customer") or "Wisdom customer").strip()
-    phone = "".join(ch for ch in str(p.get("customer_phone") or "") if ch.isdigit())
-
-    g1 = geocode(addr)
-    address_ok = 1 if g1["ok"] else 0
-    if address_ok and r["lat"] and r["lng"]:
-        formatted, lat, lng = g1["formatted"], g1["lat"], g1["lng"]
-        miles, our_fee = quote(r, lat, lng)
-    elif address_ok:
-        formatted, lat, lng = g1["formatted"], g1["lat"], g1["lng"]
-        miles, our_fee = 0, setting("base_fee_cents")
-    else:
-        formatted, lat, lng = addr, None, None
-        miles, our_fee = 0, setting("base_fee_cents")
-
-    items = p.get("lines") or p.get("items") or []
-    sub = p.get("subtotal_cents")
-    if items:
-        items = clean_items(items)
-        subtotal = sum(i["price_cents"] * i["qty"] for i in items)
-    else:
-        subtotal = int(sub or 0)
-        items = clean_items([{"name": "Wisdom order" + (" #" + p["order_no"] if p.get("order_no") else ""),
-                              "qty": 1, "price_cents": subtotal}])
-    trust = setting("import_trust_fees") == 1
-    fee = int(p["delivery_fee_cents"]) if (trust and p.get("delivery_fee_cents") is not None) else our_fee
-    svc = int(p.get("service_fee_cents") or 0)
-    tip = int(p.get("tip_cents") or 0)
-    tax = int(p["tax_cents"]) if p.get("tax_cents") is not None else \
-        int(round(subtotal * setting("tax_rate_bp") / 10000.0))
-    total = subtotal + fee + svc + tax + tip
-    if svc:
-        items = clean_items([dict(i) for i in items] +
-                            [{"name": "Service fee", "qty": 1, "price_cents": 0, "fee_cents": svc}])
-
-    code = "FF" + dt.datetime.now().strftime("%H%M%S") + str(secrets.randbelow(900) + 100)
-    while db().execute("SELECT 1 FROM orders WHERE code=?", (code,)).fetchone():
-        code = "FF" + dt.datetime.now().strftime("%H%M%S") + str(secrets.randbelow(900) + 100)
-    note = "Wisdom" + (" #" + str(p["order_no"]) if p.get("order_no") else "") + " import"
-    cur = db().execute("""INSERT INTO orders(code,restaurant_id,customer_name,customer_phone,address,
-        address_note,dispatch_note,lat,lng,items,subtotal_cents,fee_cents,item_fee_cents,tax_cents,
-        tip_cents,total_cents,miles,address_ok,source,ref_code,token,kitchen_status,dispatch_status,hold_reason,
-        placed_by,created_at,pickup_name,pickup_address,pickup_phone,pickup_lat,pickup_lng)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'wisdom',?,'Third party',?,'held',?,'dispatcher',?,?,?,?,?,?)""",
-        (code, r["id"], name, phone, formatted, "", note, lat, lng, json.dumps(items),
-         subtotal, fee, svc, tax, tip, total, miles, address_ok,
-         clean_ref(str(p.get("order_no") or "")),
-         "pending" if address_ok else "waiting",
-         "waiting on kitchen" if address_ok else "address needs dispatch approval", now(),
-         pu_name or None, pu_addr if pu_name else None, pu_phone if pu_name else None,
-         pu_lat if pu_name else None, pu_lng if pu_name else None))
-    db().commit()
-    oid = cur.lastrowid
-    db().execute("UPDATE imports SET status='created', order_id=? WHERE id=?", (oid, imp["id"]))
-    db().commit()
-    log("order", code + " imported from Wisdom for " + r["name"])
-    if address_ok:
-        auto_assign()
-    return {"ok": True, "order_id": oid, "code": code, "total": money(total),
-            "fee": money(fee), "our_fee": money(our_fee), "miles": miles,
-            "address_ok": bool(address_ok)}
-
-@app.post("/api/import/create")
-def api_import_create():
-    if not dispatcher_required():
-        return jsonify({"ok": False, "error": "no"}), 403
-    p = request.get_json(force=True)
-    imp = db().execute("SELECT * FROM imports WHERE id=?", (p.get("import_id"),)).fetchone()
-    if not imp:
-        return jsonify({"ok": False, "error": "That import is gone."}), 404
-    if imp["status"] == "created":
-        return jsonify({"ok": False, "error": "Already turned into an order."}), 400
-    res = build_import_order(imp, p.get("fields") or {})
-    return jsonify(res), (200 if res.get("ok") else 400)
-
-@app.post("/api/import/discard")
-def api_import_discard():
-    if not dispatcher_required():
-        return jsonify({"ok": False}), 403
-    p = request.get_json(force=True)
-    db().execute("UPDATE imports SET status='discarded', note=? WHERE id=?",
-                 ((p.get("reason") or "").strip()[:120], p.get("import_id")))
-    db().commit()
-    return jsonify({"ok": True})
-
-@app.post("/api/import/settings")
-def api_import_settings():
-    if not dispatcher_required():
-        return jsonify({"ok": False}), 403
-    p = request.get_json(force=True)
-    for key in ("mail_import_on", "import_auto_create", "import_trust_fees"):
-        if key in p:
-            db().execute("UPDATE settings SET value=? WHERE key=?",
-                         ("1" if p[key] else "0", key))
-    for key in ("imap_host", "imap_user", "imap_folder"):
-        if p.get(key) is not None:
-            db().execute("UPDATE settings SET value=? WHERE key=?", (str(p[key]).strip(), key))
-    if p.get("imap_pass"):
-        db().execute("UPDATE settings SET value=? WHERE key='imap_pass'", (str(p["imap_pass"]).strip(),))
-    if p.get("imap_port"):
-        db().execute("UPDATE settings SET value=? WHERE key='imap_port'", (str(int(p["imap_port"])),))
-    db().commit()
-    log("import", "mail import settings updated by " + (session.get("dispatcher_name") or "dispatch"))
-    return jsonify({"ok": True})
-
-def mail_fetch(limit=20):
-    """Read unseen order emails out of the mailbox and file each one for review."""
-    host = setting("imap_host", str) or ""
-    user = setting("imap_user", str) or ""
-    pw = setting("imap_pass", str) or ""
-    folder = setting("imap_folder", str) or "INBOX"
-    if not (host and user and pw):
-        return {"ok": False, "error": "Add the mailbox address and app password first."}
-    found, made = 0, 0
-    try:
-        box = imaplib.IMAP4_SSL(host, int(setting("imap_port") or 993), timeout=25)
-        box.login(user, pw)
-        box.select(folder)
-        typ, data = box.search(None, "UNSEEN")
-        ids = (data[0].split() if data and data[0] else [])[-limit:]
-        for num in ids:
-            typ, blob = box.fetch(num, "(RFC822)")
-            if not blob or not blob[0]:
-                continue
-            msg = email.message_from_bytes(blob[0][1])
-            subject = str(email.header.make_header(email.header.decode_header(msg.get("Subject", ""))))
-            body = ""
-            if msg.is_multipart():
-                for part in msg.walk():
-                    if part.get_content_type() == "text/plain":
-                        body += part.get_payload(decode=True).decode("utf-8", "ignore")
-                if not body:
-                    for part in msg.walk():
-                        if part.get_content_type() == "text/html":
-                            body += re.sub(r"<[^>]+>", "\n",
-                                           part.get_payload(decode=True).decode("utf-8", "ignore"))
-            else:
-                body = msg.get_payload(decode=True).decode("utf-8", "ignore")
-                if msg.get_content_type() == "text/html":
-                    body = re.sub(r"<[^>]+>", "\n", body)
-            uid = (msg.get("Message-ID") or "").strip() or ("mail-" + subject + now())
-            iid, fresh = stash_import(body, "email", subject, uid)
-            found += 1
-            if fresh and setting("import_auto_create") == 1:
-                row = db().execute("SELECT * FROM imports WHERE id=?", (iid,)).fetchone()
-                p = json.loads(row["parsed"] or "{}")
-                if p.get("restaurant_id") and p.get("address"):
-                    if build_import_order(row, {}).get("ok"):
-                        made += 1
-            box.store(num, "+FLAGS", "\\Seen")
-        box.logout()
-    except Exception as e:
-        return {"ok": False, "error": str(e)[:160]}
-    return {"ok": True, "read": found, "created": made}
-
-@app.post("/api/import/mail-check")
-def api_mail_check():
-    if not dispatcher_required():
-        return jsonify({"ok": False}), 403
-    res = mail_fetch()
-    return jsonify(res), (200 if res.get("ok") else 400)
-
 def dispatch_phone():
     return (setting("dispatch_phone", str) or "").strip()
 
@@ -4129,57 +3392,6 @@ def api_alert_clear():
         db().execute("UPDATE call_alerts SET cleared_at=? WHERE cleared_at IS NULL", (now(),))
     db().commit()
     return jsonify({"ok": True, "alerts": open_call_alerts()})
-
-@app.post("/api/inbound-email")
-def api_inbound_email():
-    """For a forwarding service (Mailgun, Zapier, Make) that posts the email to us.
-    Send the shared token and either a JSON body or an ordinary form post."""
-    token = setting("inbound_token", str) or ""
-    given = (request.args.get("token") or request.headers.get("X-TigerTown-Token") or
-             (request.form.get("token") if request.form else "") or "")
-    if not token or given != token:
-        return jsonify({"ok": False, "error": "bad token"}), 403
-    data = request.get_json(silent=True) or request.form or {}
-    body = (data.get("text") or data.get("body-plain") or data.get("stripped-text") or
-            data.get("body") or data.get("html") or "")
-    if "<" in body and ">" in body:
-        body = re.sub(r"<[^>]+>", "\n", body)
-    subject = data.get("subject") or ""
-    if len((body or "").strip()) < 12:
-        return jsonify({"ok": False, "error": "empty email"}), 400
-    with app.app_context():
-        iid, fresh = stash_import(body, "email", subject, data.get("Message-Id") or None)
-        out = {"ok": True, "import_id": iid}
-        if fresh and setting("import_auto_create") == 1:
-            row = db().execute("SELECT * FROM imports WHERE id=?", (iid,)).fetchone()
-            p = json.loads(row["parsed"] or "{}")
-            if p.get("restaurant_id") and p.get("address"):
-                made = build_import_order(row, {})
-                if made.get("ok"):
-                    out["order"] = made["code"]
-    return jsonify(out)
-
-def mail_poller():
-    """Background check of the order mailbox, off unless dispatch turns it on."""
-    while True:
-        try:
-            with app.app_context():
-                gap = setting("imap_poll_secs") or 120
-                if setting("mail_import_on") == 1:
-                    mail_fetch()
-        except Exception:
-            gap = 120
-        time.sleep(max(30, int(gap or 120)))
-
-
-def start_mail_poller():
-    t = threading.Thread(target=mail_poller, daemon=True, name="mail-import")
-    t.start()
-
-try:
-    start_mail_poller()
-except Exception:
-    pass
 
 
 if __name__ == "__main__":

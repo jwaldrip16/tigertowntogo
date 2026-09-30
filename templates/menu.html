@@ -175,14 +175,6 @@ async function placeOrder(){
     address: document.getElementById('address').value,
     note: document.getElementById('note').value, items: cart, tip_cents: tipCents});
   if(!res.ok){ alert(res.error); return; }
-  if(res.pay_url){
-    try{
-      const seen = JSON.parse(localStorage.getItem('ffOrders')||'[]');
-      seen.unshift(res.code); localStorage.setItem('ffOrders', JSON.stringify(seen.slice(0,20)));
-    }catch(e){}
-    window.location = res.pay_url;      // hosted card page, we never see the card
-    return;
-  }
   try{
     const seen = JSON.parse(localStorage.getItem('ffOrders')||'[]');
     seen.unshift(res.code); localStorage.setItem('ffOrders', JSON.stringify(seen.slice(0,10)));

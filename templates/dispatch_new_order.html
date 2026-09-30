@@ -58,7 +58,7 @@
       <option value="">Match how it came in</option>
       {% for t in tokens %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
     </select>
-    <div class="muted small" id="refNote">Whatever the shop or Wisdom calls this order. Ours is assigned on its own.</div>
+    <div class="muted small" id="refNote">Whatever the shop calls this order. Ours is assigned on its own.</div>
     <input id="name" placeholder="Customer name">
     <input id="phone" placeholder="Phone">
   <label>How did this order come in?</label>
@@ -205,14 +205,6 @@ async function placeOrder(){
     placed_by: 'dispatch',
     source: document.getElementById('source').value}));
   if(!res.ok){ alert(res.error); return; }
-  if(res.pay_url){
-    // card only: hand dispatch the link to text, or key the card in Stripe
-    const go = confirm('Order '+res.code+' needs a card.\n\nOK opens the card page here '+
-                       '(keyed card), Cancel copies the link to text the customer.');
-    if(go){ window.open(res.pay_url, '_blank'); }
-    else { try{ await navigator.clipboard.writeText(res.pay_url); alert('Link copied.'); }
-           catch(e){ prompt('Copy this link:', res.pay_url); } }
-  }
   window.location = '/dispatch';
 }
 let OMAP = null, OLAYER = null;

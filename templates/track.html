@@ -14,7 +14,6 @@ async function tick(){
   if(!res.ok) return;
   const o = res.order;
   if(o.cards_on && !o.paid){
-    // the card page can beat Stripe's callback to us, so ask Stripe directly for a bit
     if(PAY_TRIES < 20){ PAY_TRIES++; try{ await jget('/api/pay/check/'+CODE); }catch(e){} }
     document.getElementById('live').innerHTML =
       '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+

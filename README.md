@@ -87,7 +87,7 @@ directions, so they work on a phone as well as a desktop.
 ## Before going live
 
 Replace the plain text PINs and passwords with hashed credentials, put it behind HTTPS, add a real
-payment processor at checkout, and move the 4 second polling to websockets if you go past a few
+payment processor at checkout if you ever want one, and move the 4 second polling to websockets if you go past a few
 dozen concurrent drivers.
 
 
@@ -339,78 +339,11 @@ you deploy, so nobody has to install anything again. The service worker caches o
 orders, so a driver who loses signal still gets the app shell and live data the second they are back.
 
 
-## Card payments (Stripe)
-
-Tiger Town To Go is card only. There is no cash or card-on-delivery option anywhere in it.
-
-Card handling lives on Stripe's own hosted pages, so no card number ever touches this
-app or its database. Nothing charges until a dispatcher pastes live keys into
-Dispatch, Payments, and ticks "Take card payments". With it switched off the app runs
-exactly as it did before.
-
-Setting it up:
-
-1. Make a Stripe account, open Developers, API keys, and copy the publishable and
-   secret keys into Dispatch, Payments.
-2. In Stripe, open Developers, Webhooks, add an endpoint at
-   `https://your-domain/api/stripe/webhook` and subscribe it to
-   `checkout.session.completed`. Paste the signing secret into the same page.
-3. Test with test keys first: card 4242 4242 4242 4242, any future expiry, any CVC.
-
-How each order gets paid:
-
-- Website order: the customer pays on Stripe before the order exists for anyone else.
-  It sits in `awaiting_payment`, invisible to the board and the kitchen, until the
-  payment lands. The tracking page tells the customer it is waiting on their card and
-  asks Stripe directly if the webhook is slow.
-- Call-in: place the order in Dispatch, then either "Text card link" (a one-time card
-  page, copied and ready to text the customer) or key the card into Stripe's virtual
-  terminal and hit "Paid (keyed in Stripe)".
-- Tip at the door: if no tip came in online, the driver's phone asks for one when they
-  complete the stop, with percentage buttons and a signature box. The tip charges to
-  the same card the customer already used, the signature is saved as a PNG under
-  `static/signatures/<order code>.png`, and dispatch can open it from the order card.
-  "No tip, complete" records the decline and finishes the stop.
-- Refunds: any paid order on the dispatch board has a Refund button, all of it or part
-  of it, with a reason kept on the order. Partial refunds stack until the order is
-  fully refunded.
-
 ## Driver phone calls
 
 Each assigned stop in the driver app carries buttons to call the restaurant, call the
 customer, and text the customer, next to the two navigation buttons. They use the phone's
 own dialer, so nothing is routed through the app and no number needs typing.
-
-## Bringing Wisdom orders in
-
-Dispatch has an Import tab with two ways to get an outside order onto the board without
-retyping it. Wisdom itself has no public API, so these are the two routes that work.
-
-**Read a receipt.** Drop a screenshot of the Wisdom receipt on the page, paste one from the
-clipboard with Command-V, or pick a file. The picture is read in the browser, so nothing
-is uploaded anywhere. The restaurant name, restaurant address, customer name and phone,
-delivery address, food subtotal, tax, delivery fee, service fee and tip are pulled out and
-shown in editable fields. Fix anything the receipt got wrong, then Send to board. The
-restaurant is matched to yours by name, then by address; if nothing matches you pick it.
-Several screenshots can be dropped at once.
-
-**Order email feed.** If Wisdom emails you the order, point the Import tab at that mailbox:
-mail server, address, app password (Gmail needs an app password, not the account password)
-and folder. Tiger Town To Go checks it every couple of minutes, reads each new order email and
-files it for review. There is a Check mail now button for a manual pull. A forwarding
-service can post to us instead:
-
-    POST https://your-app.onrender.com/api/inbound-email?token=THE_TOKEN
-
-with the body as `text`, `body-plain` or `html` and the subject as `subject`. The token is
-shown on the Import tab; treat it like a password.
-
-Two switches sit next to the mailbox settings. *Create the order straight away* skips the
-review step when the restaurant and address both read cleanly, which is what makes the
-import automatic. *Use the fees printed on the receipt* keeps Wisdom's delivery fee, service
-fee and tip as written; turn it off and Tiger Town To Go prices the delivery on its own mileage
-instead. Imported orders show on the board as "Wisdom import" and carry the Wisdom order
-number in the dispatch note.
 
 ## A pickup that is not on your list
 
@@ -436,12 +369,10 @@ item fee and a kitchen note. Item fees total separately on the order as a custom
 fee, so they never get mixed up with the delivery fee.
 
 Imported receipts have the same thing: each pending receipt has an Items block with
-"Add an item", so you can type the real food lines onto a Wisdom receipt that only
 printed a total. Type nothing and the order carries one receipt line, exactly as before.
 
 ## Cropping a screenshot before it is read
 
-Drop, paste or pick a receipt screenshot and it now appears on the Import tab with the
 picture on screen instead of being read straight away. Drag a box over the order details
 with the mouse, then hit Capture and only that box is read. Drag again to redo the box.
 

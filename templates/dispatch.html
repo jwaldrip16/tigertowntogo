@@ -527,7 +527,7 @@ function payButtons(o){
   let h = '';
   if(o.cards_on && !o.paid){
     h += '<button class="btn tiny primary" onclick="payLink('+o.id+')">Text card link</button>'+
-         '<button class="btn tiny" onclick="keyed('+o.id+')">Paid (keyed in Stripe)</button>';
+         '<button class="btn tiny" onclick="keyed('+o.id+')">Mark paid</button>';
   }
   if(o.paid && (o.refunded_cents||0) < 100000){
     h += '<button class="btn tiny" onclick="refund('+o.id+',\''+o.total+'\')">Refund</button>';
@@ -547,7 +547,7 @@ async function payLink(id){
   board(true);
 }
 async function keyed(id){
-  const ref = prompt('Charge id from the Stripe virtual terminal (optional, pi_...):', '');
+  const ref = prompt('Payment note or reference (optional):', '');
   if(ref === null) return;
   const res = await jpost('/api/order/mark-paid', {order_id:id, ref:ref});
   if(!res.ok){ alert(res.error || 'That did not save.'); return; }
