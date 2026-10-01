@@ -13,8 +13,8 @@
 <div id="gate" class="panel hidden" style="text-align:center;padding:28px 16px">
   <h2 id="gateMsg"></h2>
   <p class="muted" id="gateSub"></p>
-  {% if biz_tel %}<a class="btn primary" href="tel:{{ biz_tel }}" onclick="tellDispatch()">Call dispatch</a>{% endif %}
-  <div class="muted small" id="callNote"></div>
+  <a class="btn primary calldisp" href="tel:{{ biz_tel }}" onclick="tellDispatch()">Call dispatch</a>
+  <div class="muted small callnote"></div>
 </div>
 <div class="panel" id="status"></div>
 <div class="row"><span class="muted small" id="locNote">Checking your location...</span></div>
@@ -41,10 +41,10 @@
     <div class="row between">
       <div><strong>Dispatch</strong>
         <div class="muted small" id="dispNum">{{ dispatch_phone }}</div></div>
-      <a class="btn primary" id="callDisp" href="tel:{{ dispatch_tel }}"
+      <a class="btn primary calldisp" id="callDisp" href="tel:{{ dispatch_tel }}"
          onclick="tellDispatch()">Call dispatch</a>
     </div>
-    <div class="muted small" id="callNote"></div>
+    <div class="muted small callnote"></div>
   </section>
   <section><h2>Your run</h2><div id="stack"></div></section>
 </div>
@@ -127,20 +127,39 @@
 {% endblock %}
 {% block scripts %}<script>
 let NOTIFIED = null;
-async function tellDispatch(){
-  const n = document.getElementById('callNote');
+// The tap itself dials. The ping to dispatch goes out in the background and
+// never holds up the phone call.
+let DISP_TEL = '{{ dispatch_tel }}';
+function callNote(t){
+  document.querySelectorAll('.callnote').forEach(function(n){ n.textContent = t; });
+  if (t) setTimeout(function(){ callNote(''); }, 8000);
+}
+function setDispatchTel(tel){
+  if (tel) DISP_TEL = tel;
+  document.querySelectorAll('.calldisp').forEach(function(b){
+    b.setAttribute('href', DISP_TEL ? 'tel:' + DISP_TEL : '#');
+    b.classList.toggle('disabled', !DISP_TEL);
+  });
+}
+function tellDispatch(){
+  if (!DISP_TEL){
+    callNote('No dispatch number is set. Dispatch needs to add it in Settings.');
+    return false;
+  }
   try {
     const o = (window.STACK && STACK[0] && STACK[0].id) || null;
     const body = {order_id: o};
-    if (LAST_FIX){ body.lat = LAST_FIX.latitude; body.lng = LAST_FIX.longitude; }
-    await jpost('/api/driver/call-dispatch', body);
-    FAST = true;           // keep dispatch's screen current until they hit Done
-    sendFix(true);
-    n.textContent = 'Dispatch has been pinged that you are calling.';
-  } catch (e) {
-    n.textContent = 'Calling. Dispatch may not have got the ping.';
-  }
-  setTimeout(() => { n.textContent = ''; }, 8000);
+    if (typeof LAST_FIX !== 'undefined' && LAST_FIX){ body.lat = LAST_FIX.latitude; body.lng = LAST_FIX.longitude; }
+    const blob = new Blob([JSON.stringify(body)], {type: 'application/json'});
+    if (!(navigator.sendBeacon && navigator.sendBeacon('/api/driver/call-dispatch', blob))){
+      fetch('/api/driver/call-dispatch', {method:'POST', keepalive:true,
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    }
+    if (typeof FAST !== 'undefined') FAST = true;
+    if (typeof sendFix === 'function') setTimeout(function(){ try { sendFix(true); } catch(e){} }, 0);
+    callNote('Calling dispatch. They also got an alert that you are calling.');
+  } catch (e) {}
+  return true;   // let the phone open the dialer
 }
 
 const DID = {{ driver_id }};
@@ -207,6 +226,7 @@ async function state(){
   const res = await jget('/api/driver/state');
   if(!res.ok){ window.location='/driver/login'; return; }
   const d = res.driver;
+  try { setDispatchTel(res.dispatch_tel); } catch(e) {}
   try { renderDone(res.done || []); } catch(e) { console.log('done skipped', e); }
   if (gateCheck(res, d)) return;
   try { renderStatus(d); } catch(e) { console.log('status skipped', e); }

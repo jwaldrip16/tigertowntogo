@@ -290,3 +290,5 @@ body.assignflash{animation:assignpage 1s ease-in-out infinite}
 .table{width:100%;border-collapse:collapse;font-size:14px}.table th,.table td{padding:6px 8px;border-bottom:1px solid #e5e7eb;text-align:left;vertical-align:top}.table th{background:#f1f5f9}
 
 .modalback{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:9999}.modal{max-width:420px;width:92%;display:flex;flex-direction:column;gap:8px}
+
+.btn.disabled{opacity:.5}

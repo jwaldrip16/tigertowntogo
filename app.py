@@ -200,7 +200,7 @@ def init_db():
         seed(con)
     topup_restaurants(con)
     for k, v in [("base_fee_cents", "399"), ("base_miles", "3"), ("per_mile_cents", "100"),
-                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "1"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("max_stack_default", "3"),
+                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("max_stack_default", "3"),
                  ("assign_on_pending", "0"), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
                  ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
                  ("business_name", "Fleet Delivery"),
@@ -210,6 +210,10 @@ def init_db():
                  ]:
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
     con.execute("UPDATE settings SET value='0' WHERE key='assign_on_pending'")
+    # Business now starts Closed. Existing databases are closed once, then dispatch opens it.
+    if not con.execute("SELECT 1 FROM settings WHERE key='biz_default_closed_v1'").fetchone():
+        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('business_open','0')")
+        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('biz_default_closed_v1','1')")
     con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('unlimited_stack','1')")
     con.execute("UPDATE drivers SET max_stack=999 WHERE max_stack IS NULL OR max_stack < 999")
     con.execute("""CREATE TABLE IF NOT EXISTS blocked_customers(
@@ -3680,6 +3684,7 @@ def api_driver_state():
     scheduled = d["status"] != "offline" or driver_group(d) == "scheduled"
     return jsonify({"ok": True,
                     "business_open": business_is_open(),
+                    "dispatch_tel": tel_digits(dispatch_phone()),
                     "business_name": (setting("business_name", str) or "Fleet Delivery"),
                     "scheduled": scheduled,
                     "done": [order_dict(o) for o in done],
@@ -4183,7 +4188,7 @@ def inject_portal():
         biz = {"biz_name": (setting("business_name", str) or "Fleet Delivery").strip() or "Fleet Delivery",
                "biz_address": (setting("business_address", str) or "").strip(),
                "biz_phone": ("(%s) %s-%s" % (_d[:3], _d[3:6], _d[6:])) if len(_d) == 10 else _ph,
-               "biz_tel": _d,
+               "biz_tel": tel_digits(_d),
                "tax_bp": setting("tax_rate_bp") or 0, "service_bp": setting("service_fee_bp") or 0}
     except Exception:
         biz = {"biz_name": "Fleet Delivery", "biz_address": "", "biz_phone": "", "biz_tel": "",
@@ -4256,7 +4261,11 @@ def dispatch_phone():
     return (setting("dispatch_phone", str) or "").strip()
 
 def tel_digits(p):
-    return "".join(ch for ch in (p or "") if ch.isdigit())
+    """Phone number in the form every phone dials: +1 and ten digits."""
+    d = "".join(ch for ch in (p or "") if ch.isdigit())
+    if len(d) == 11 and d.startswith("1"):
+        d = d[1:]
+    return ("+1" + d) if len(d) == 10 else d
 
 def raise_call_alert(who, name, phone, note, driver_id=None, restaurant_id=None, order_id=None):
     """Somebody hit the call button. Put it on the dispatch board so it is not missed."""
@@ -4313,9 +4322,9 @@ def api_dispatch_business():
 
 def business_is_open():
     try:
-        return str(setting("business_open", str) or "1") != "0"
+        return str(setting("business_open", str) or "0") == "1"
     except Exception:
-        return True
+        return False
 
 @app.get("/api/dispatch/alerts")
 def api_dispatch_alerts():
