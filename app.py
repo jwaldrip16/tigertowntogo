@@ -200,9 +200,11 @@ def init_db():
         seed(con)
     topup_restaurants(con)
     for k, v in [("base_fee_cents", "399"), ("base_miles", "3"), ("per_mile_cents", "100"),
-                 ("tax_rate_bp", "900"), ("auto_assign", "1"), ("max_stack_default", "3"),
+                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "1"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("max_stack_default", "3"),
                  ("assign_on_pending", "0"), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
                  ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
+                 ("business_name", "Fleet Delivery"),
+                 ("business_address", "216 S 8th St, Opelika, AL 36801"),
                  ("unlimited_stack", "1"),
                  ("order_tokens", "Online,App,Phone call,Third party"),
                  ]:
@@ -315,6 +317,15 @@ def init_db():
     ensure_column(con, "drivers", "last_lat", "REAL")
     ensure_column(con, "drivers", "last_lng", "REAL")
     ensure_column(con, "drivers", "last_loc_at", "TEXT")
+    ensure_column(con, "orders", "service_cents", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(con, "drivers", "last_addr", "TEXT")
+    ensure_column(con, "drivers", "last_addr_lat", "REAL")
+    ensure_column(con, "drivers", "last_addr_lng", "REAL")
+    con.execute("CREATE TABLE IF NOT EXISTS revgeo (k TEXT PRIMARY KEY, address TEXT, created_at TEXT)")
+    con.execute("""CREATE TABLE IF NOT EXISTS driver_log (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   driver_id INTEGER NOT NULL, lat REAL, lng REAL, address TEXT, status TEXT,
+                   event TEXT, created_at TEXT NOT NULL)""")
+    con.execute("CREATE INDEX IF NOT EXISTS ix_driver_log ON driver_log(driver_id, created_at)")
     ensure_column(con, "orders", "ref_code", "TEXT")
     ensure_column(con, "orders", "token", "TEXT")
     ensure_column(con, "restaurants", "cuisine", "TEXT")
@@ -982,6 +993,13 @@ def ref_in_use(ref, skip_id=None):
     return row["code"] if row else None
 
 
+def _safe_items(raw):
+    try:
+        v = json.loads(raw or "[]")
+        return v if isinstance(v, list) else []
+    except Exception:
+        return []
+
 def order_dict(o):
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
     d = db().execute("SELECT * FROM drivers WHERE id=?", (o["driver_id"],)).fetchone() if o["driver_id"] else None
@@ -1000,7 +1018,7 @@ def order_dict(o):
         "address": o["address"], "note": o["address_note"],
         "dispatch_note": o["dispatch_note"],
         "customer_nav": nav_url(o["address"], o["lat"], o["lng"]),
-        "items": json.loads(o["items"]),
+        "items": _safe_items(o["items"]),
         "lines": [line_label(x) for x in json.loads(o["items"])],
         "item_count": sum(int(x.get("qty", 1)) for x in json.loads(o["items"])),
         "timeline": order_timeline(o["id"]),
@@ -1030,6 +1048,8 @@ def order_dict(o):
         "subtotal_cents": int(o["subtotal_cents"] or 0),
         "subtotal": money(o["subtotal_cents"]), "fee": money(o["fee_cents"]),
         "tax": money(o["tax_cents"]), "tip": money(o["tip_cents"]), "total": money(o["total_cents"]),
+        "service_cents": int(o["service_cents"] or 0) if "service_cents" in o.keys() else 0,
+        "service": money((o["service_cents"] or 0) if "service_cents" in o.keys() else 0),
         "miles": (o["miles"] if o["address_ok"] else None), "kitchen_status": o["kitchen_status"],
         "address_ok": bool(o["address_ok"]),
         "source": o["source"], "source_label": SOURCES.get(o["source"], "Online"),
@@ -1454,8 +1474,9 @@ def checkout():
     if payload.get("fee_cents_override") not in (None, ""):
         fee = max(0, int(round(float(payload["fee_cents_override"]))))
     tax = int(round(subtotal * setting("tax_rate_bp") / 10000.0))
+    service = int(round(subtotal * setting("service_fee_bp") / 10000.0))
     tip = int(payload.get("tip_cents", 0))
-    total = subtotal + fee + ifee + tax + tip
+    total = subtotal + fee + ifee + tax + service + tip
 
     issue_key = (payload.get("issue") or "").strip()
     issue_label, issue_note, from_code = "", (payload.get("issue_note") or "").strip(), ""
@@ -1496,8 +1517,8 @@ def checkout():
         address_note,dispatch_note,lat,lng,items,subtotal_cents,fee_cents,item_fee_cents,tax_cents,
         tip_cents,total_cents,miles,issue,issue_note,cloned_from,address_ok,source,ref_code,token,
         kitchen_status,dispatch_status,hold_reason,placed_by,created_at,
-        pickup_name,pickup_address,pickup_phone,pickup_lat,pickup_lng)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        pickup_name,pickup_address,pickup_phone,pickup_lat,pickup_lng,service_cents)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (code, r["id"], payload["customer_name"], payload["customer_phone"], formatted,
          payload.get("note", ""), payload.get("dispatch_note", ""), lat, lng,
          json.dumps(items), subtotal, fee, ifee, tax, tip, total, miles,
@@ -1506,7 +1527,7 @@ def checkout():
          (clean_token(payload.get("token")) or token_from_source(src)),
          kitchen_status, dstat, hold_reason, placed_by, now(),
          pu_name or None, pu_addr if pu_name else None, pu_phone if pu_name else None,
-         pu_lat if pu_name else None, pu_lng if pu_name else None))
+         pu_lat if pu_name else None, pu_lng if pu_name else None, service))
     db().commit()
     log("order", code + " placed for " + r["name"] +
         ("" if address_ok else " (address not verified, waiting on dispatch approval)") +
@@ -1556,7 +1577,7 @@ def api_approve_address():
         miles, fee = o["miles"] or 0, o["fee_cents"]
     if p.get("fee_cents") not in (None, ""):
         fee = max(0, int(round(float(p["fee_cents"]))))
-    total = o["subtotal_cents"] + fee + o["item_fee_cents"] + o["tax_cents"] + o["tip_cents"]
+    total = o["subtotal_cents"] + fee + o["item_fee_cents"] + o["tax_cents"] + (o["service_cents"] or 0) + o["tip_cents"]
     kitchen = "pending" if o["kitchen_status"] == "waiting" else o["kitchen_status"]
     hold = "waiting on kitchen" if o["hold_reason"] == "address needs dispatch approval" else o["hold_reason"]
     db().execute("""UPDATE orders SET address=?, lat=?, lng=?, miles=?, fee_cents=?, total_cents=?,
@@ -1643,8 +1664,10 @@ def api_board():
     purge_cards()
     live = db().execute("""SELECT * FROM orders WHERE dispatch_status!='delivered'
                            AND dispatch_status!='cancelled' ORDER BY created_at ASC""").fetchall()
+    done_day = (request.args.get("done_day") or dt.date.today().isoformat())[:10]
     done = db().execute("""SELECT * FROM orders WHERE dispatch_status IN ('delivered','cancelled')
-                           ORDER BY COALESCE(delivered_at, created_at) DESC LIMIT 30""").fetchall()
+                           AND substr(COALESCE(delivered_at, created_at),1,10)=?
+                           ORDER BY COALESCE(delivered_at, created_at) DESC LIMIT 500""", (done_day,)).fetchall()
     drivers = db().execute("""SELECT d.*, (SELECT COUNT(*) FROM orders o WHERE o.driver_id=d.id
                               AND o.dispatch_status IN ('assigned','received','at_restaurant','enroute')) load
                               FROM drivers d ORDER BY d.name""").fetchall()
@@ -1663,8 +1686,11 @@ def api_board():
         "auto": bool(setting("auto_assign")),
         "tokens": token_list(),
         "alerts": open_call_alerts(),
+        "awaiting": awaiting_accept(),
+        "business_open": business_is_open(),
         "orders": [order_dict(o) for o in live],
         "completed": [order_dict(o) for o in done],
+        "done_day": done_day,
         "chat_unread": sum(unread.values()),
         "chat_latest": ({"id": newest["id"], "driver_id": newest["driver_id"],
                          "driver": newest["name"], "body": newest["body"],
@@ -1803,6 +1829,9 @@ def api_order_status():
                              (o["driver_id"], "system",
                               "Order " + o["code"] + " marked " + d + ".", now()))
     db().commit()
+    if d and o["driver_id"]:
+        who = "Driver marked" if (session.get("driver_id") == o["driver_id"] and not dispatcher_required()) else "Dispatch marked"
+        log_driver(o["driver_id"], who + " " + o["code"] + " " + STATUS_WORDS.get(("dispatch", d), d))
     auto_assign()
     return jsonify({"ok": True})
 
@@ -2015,16 +2044,17 @@ def api_order_edit():
     tip = o["tip_cents"] if data.get("tip_cents") in (None, "") else int(round(float(data["tip_cents"])))
     fee, tip = max(0, fee), max(0, tip)
     tax = int(round(subtotal * setting("tax_rate_bp") / 10000.0))
-    total = subtotal + fee + ifee + tax + tip
+    service = int(round(subtotal * setting("service_fee_bp") / 10000.0))
+    total = subtotal + fee + ifee + tax + service + tip
     db().execute("""UPDATE orders SET items=?, subtotal_cents=?, fee_cents=?, item_fee_cents=?,
-                    tax_cents=?, tip_cents=?, total_cents=? WHERE id=?""",
-                 (json.dumps(items), subtotal, fee, ifee, tax, tip, total, o["id"]))
+                    tax_cents=?, service_cents=?, tip_cents=?, total_cents=? WHERE id=?""",
+                 (json.dumps(items), subtotal, fee, ifee, tax, service, tip, total, o["id"]))
     db().commit()
     log("edit", o["code"] + " edited by dispatch")
     dupe = ref_in_use(clean_ref(data.get("ref")), o["id"]) if "ref" in data else None
     return jsonify({"ok": True, "dupe": dupe, "subtotal": money(subtotal), "fee": money(fee),
                     "item_fee": money(ifee), "tax": money(tax),
-                    "tip": money(tip), "total": money(total)})
+                    "service": money(service), "tip": money(tip), "total": money(total)})
 
 
 @app.post("/api/dispatch/block")
@@ -2242,6 +2272,117 @@ def dispatch_account():
         return redirect(url_for("dispatch_login"))
     return render_template("dispatch_account.html", me=dispatcher_row())
 
+import threading as _threading
+_REV_LOCK = _threading.Lock()
+_REV_LAST = [0.0]
+
+def _short_addr(parts):
+    """House number + street, city, state zip from an OpenStreetMap reverse lookup."""
+    a = parts or {}
+    street = " ".join(x for x in [a.get("house_number"), a.get("road") or a.get("pedestrian")
+                                  or a.get("footway") or a.get("parking")] if x)
+    city = a.get("city") or a.get("town") or a.get("village") or a.get("hamlet") or a.get("county") or ""
+    state = a.get("state") or ""
+    if state == "Alabama":
+        state = "AL"
+    tail = " ".join(x for x in [state, a.get("postcode")] if x)
+    return ", ".join(x for x in [street, city, tail] if x)
+
+def nearest_address(lat, lng):
+    """Closest street address to a GPS fix. Cached per ~10 metres so a parked
+    driver costs one lookup. Uses Google when GOOGLE_MAPS_API_KEY is set,
+    otherwise OpenStreetMap (kept to one lookup a second, which their rules ask for)."""
+    if lat is None or lng is None:
+        return None
+    k = "%.4f,%.4f" % (lat, lng)
+    row = db().execute("SELECT address FROM revgeo WHERE k=?", (k,)).fetchone()
+    if row and row["address"]:
+        return row["address"]
+    addr = None
+    try:
+        if GOOGLE_KEY:
+            url = ("https://maps.googleapis.com/maps/api/geocode/json?latlng=%f,%f&key=%s"
+                   % (lat, lng, urllib.parse.quote(GOOGLE_KEY)))
+            with urllib.request.urlopen(url, timeout=4) as resp:
+                js = json.loads(resp.read().decode("utf-8"))
+            if js.get("results"):
+                addr = js["results"][0].get("formatted_address", "").replace(", USA", "")
+        else:
+            with _REV_LOCK:
+                wait = 1.1 - (time.time() - _REV_LAST[0])
+                if wait > 0:
+                    time.sleep(wait)
+                _REV_LAST[0] = time.time()
+            url = ("https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=18&addressdetails=1"
+                   "&lat=%f&lon=%f" % (lat, lng))
+            req = urllib.request.Request(url, headers={"User-Agent": "fleetdelivery/1.0"})
+            with urllib.request.urlopen(req, timeout=4) as resp:
+                js = json.loads(resp.read().decode("utf-8"))
+            addr = _short_addr(js.get("address")) or js.get("display_name")
+    except Exception:
+        addr = None
+    if addr:
+        db().execute("INSERT OR REPLACE INTO revgeo(k,address,created_at) VALUES(?,?,?)", (k, addr, now()))
+        db().commit()
+    return addr
+
+def update_driver_addr(did, lat, lng, force=False):
+    """Refresh the driver's closest address when they have moved about 30 metres."""
+    d = db().execute("SELECT last_addr,last_addr_lat,last_addr_lng FROM drivers WHERE id=?", (did,)).fetchone()
+    if d and d["last_addr"] and not force and d["last_addr_lat"] is not None:
+        moved = miles_between(d["last_addr_lat"], d["last_addr_lng"], lat, lng) or 0
+        if moved < 0.025:
+            return d["last_addr"]
+    addr = nearest_address(lat, lng)
+    if addr:
+        db().execute("UPDATE drivers SET last_addr=?,last_addr_lat=?,last_addr_lng=? WHERE id=?",
+                     (addr, lat, lng, did))
+        db().commit()
+        return addr
+    return d["last_addr"] if d else None
+
+GPS_LOG_KEEP_DAYS = int(os.environ.get("GPS_LOG_KEEP_DAYS", "90"))
+
+def log_driver(did, event, lat=None, lng=None, address=None, status=None):
+    """One row in the driver's GPS and status history. Status and order events use the
+    last known position when the phone did not send one with the event."""
+    try:
+        d = db().execute("SELECT status,last_lat,last_lng,last_addr FROM drivers WHERE id=?", (did,)).fetchone()
+        if not d:
+            return
+        if lat is None:
+            lat, lng = d["last_lat"], d["last_lng"]
+        if address is None:
+            address = d["last_addr"]
+        db().execute("""INSERT INTO driver_log(driver_id,lat,lng,address,status,event,created_at)
+                        VALUES(?,?,?,?,?,?,?)""", (did, lat, lng, address, status or d["status"], event, now()))
+        db().commit()
+    except Exception as e:
+        print("driver log skipped:", e)
+
+def log_gps_fix(did, lat, lng, addr):
+    """GPS rows every 60 seconds, or sooner after a move of about 250 feet."""
+    last = db().execute("""SELECT lat,lng,created_at FROM driver_log WHERE driver_id=? AND event='gps'
+                           ORDER BY id DESC LIMIT 1""", (did,)).fetchone()
+    if last and last["lat"] is not None:
+        try:
+            age = (dt.datetime.now() - dt.datetime.fromisoformat(last["created_at"])).total_seconds()
+        except ValueError:
+            age = 999
+        moved = miles_between(last["lat"], last["lng"], lat, lng) or 0
+        if age < 60 and moved < 0.05:
+            return
+    log_driver(did, "gps", lat, lng, addr)
+
+def purge_driver_log():
+    cut = (dt.datetime.now() - dt.timedelta(days=GPS_LOG_KEEP_DAYS)).isoformat(timespec="seconds")
+    db().execute("DELETE FROM driver_log WHERE created_at < ?", (cut,))
+    db().commit()
+
+def driver_has_open_call(did):
+    return bool(db().execute("SELECT 1 FROM call_alerts WHERE driver_id=? AND who='driver' AND cleared_at IS NULL",
+                             (did,)).fetchone())
+
 def loc_block(d):
     """Where a driver was the last time their phone checked in.
     Only tracked while they are online or on break, never off shift."""
@@ -2255,6 +2396,7 @@ def loc_block(d):
     ll = str(round(d["last_lat"], 6)) + "," + str(round(d["last_lng"], 6))
     return {"lat": d["last_lat"], "lng": d["last_lng"], "minutes_ago": ago,
             "stale": (ago is None or ago > 10),
+            "address": (d["last_addr"] if "last_addr" in d.keys() else None),
             "map_url": "https://www.google.com/maps/search/?api=1&query=" + ll,
             "nav_url": "https://www.google.com/maps/dir/?api=1&destination=" + ll}
 
@@ -2276,7 +2418,7 @@ def api_driver_ping():
     row = db().execute("SELECT status FROM drivers WHERE id=?", (did,)).fetchone()
     if not row or row["status"] == "offline":
         # off shift is off the map: drop whatever was there and tell the app to stop
-        db().execute("UPDATE drivers SET last_lat=NULL,last_lng=NULL,last_loc_at=NULL WHERE id=?",
+        db().execute("UPDATE drivers SET last_lat=NULL,last_lng=NULL,last_loc_at=NULL,last_addr=NULL,last_addr_lat=NULL,last_addr_lng=NULL WHERE id=?",
                      (did,))
         db().commit()
         return jsonify({"ok": True, "tracking": False})
@@ -2288,7 +2430,10 @@ def api_driver_ping():
     db().execute("UPDATE drivers SET last_lat=?,last_lng=?,last_loc_at=? WHERE id=?",
                  (lat, lng, now(), did))
     db().commit()
-    return jsonify({"ok": True, "tracking": True})
+    addr = update_driver_addr(did, lat, lng)
+    log_gps_fix(did, lat, lng, addr)
+    # while the driver's call is open on the board, the phone checks in every 8 seconds
+    return jsonify({"ok": True, "tracking": True, "address": addr, "fast": driver_has_open_call(did)})
 
 @app.get("/api/dispatch/locations")
 def api_locations():
@@ -3303,6 +3448,41 @@ def dispatch_settings():
         for key in ("base_fee_cents", "base_miles", "per_mile_cents", "tax_rate_bp", "auto_assign"):
             if key in request.form:
                 db().execute("UPDATE settings SET value=? WHERE key=?", (request.form[key], key))
+        errs = []
+        for field, key, label in (("tax_pct", "tax_rate_bp", "Tax"), ("service_pct", "service_fee_bp", "Service fee")):
+            if field in request.form:
+                raw = request.form[field].replace("%", "").strip() or "0"
+                try:
+                    pct = float(raw)
+                except ValueError:
+                    pct = -1
+                if 0 <= pct <= 30:
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                                 (key, str(int(round(pct * 100)))))
+                else:
+                    errs.append(label + " needs to be a percent between 0 and 30, like 9 or 9.5.")
+        if "business_name" in request.form:
+            nm = " ".join(request.form["business_name"].split())[:60]
+            if nm:
+                db().execute("UPDATE settings SET value=? WHERE key='business_name'", (nm,))
+            else:
+                errs.append("Business name cannot be blank.")
+        if "business_address" in request.form:
+            ad = " ".join(request.form["business_address"].split())[:160]
+            db().execute("UPDATE settings SET value=? WHERE key='business_address'", (ad,))
+        if "dispatch_phone" in request.form:
+            ph = "".join(c for c in request.form["dispatch_phone"] if c.isdigit())
+            if len(ph) == 11 and ph.startswith("1"):
+                ph = ph[1:]
+            if len(ph) == 10:
+                db().execute("UPDATE settings SET value=? WHERE key='dispatch_phone'", (ph,))
+            else:
+                errs.append("Dispatch phone needs 10 digits, like 334-209-2844.")
+        if errs:
+            db().commit()
+            rows = db().execute("SELECT * FROM settings").fetchall()
+            return render_template("dispatch_settings.html", s={r["key"]: r["value"] for r in rows},
+                                   saved=False, errors=errs)
         if "order_tokens" in request.form:
             tags = ",".join(t.strip()[:24] for t in request.form["order_tokens"].split(",") if t.strip())
             db().execute("UPDATE settings SET value=? WHERE key='order_tokens'", (tags,))
@@ -3359,6 +3539,7 @@ def api_chat_send(driver_id):
 def request_status(driver_id, want):
     """A driver can only ASK. Dispatch is the one who flips the switch."""
     db().execute("UPDATE drivers SET pending_request=? WHERE id=?", (want, driver_id))
+    log_driver(driver_id, "Driver marked: requested " + want)
     db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                  (driver_id, "system",
                   "Request sent to dispatch: " + want + ". Waiting on dispatch to approve.", now()))
@@ -3368,6 +3549,7 @@ def request_status(driver_id, want):
 def set_driver_status(driver_id, status, reply):
     """Dispatch-only. Nothing in the driver app calls this directly."""
     was = db().execute("SELECT status FROM drivers WHERE id=?", (driver_id,)).fetchone()
+    log_driver(driver_id, "Dispatch set " + status + " (was " + (was["status"] if was else "?") + ")", status=status)
     db().execute("UPDATE drivers SET status=?, pending_request=NULL, last_seen=? WHERE id=?",
                  (status, now(), driver_id))
     if status == "online" and (not was or was["status"] != "online"):
@@ -3377,7 +3559,7 @@ def set_driver_status(driver_id, status, reply):
     elif status != "online":
         db().execute("UPDATE drivers SET online_since=NULL WHERE id=?", (driver_id,))
     if status == "offline":
-        db().execute("UPDATE drivers SET last_lat=NULL,last_lng=NULL,last_loc_at=NULL WHERE id=?",
+        db().execute("UPDATE drivers SET last_lat=NULL,last_lng=NULL,last_loc_at=NULL,last_addr=NULL,last_addr_lat=NULL,last_addr_lng=NULL WHERE id=?",
                      (driver_id,))
     db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                  (driver_id, "dispatch", reply, now()))
@@ -3431,7 +3613,17 @@ def api_driver_state():
     mine = db().execute("""SELECT * FROM orders WHERE driver_id=? AND dispatch_status IN
                            ('assigned','received','at_restaurant','enroute')
                            ORDER BY stack_seq ASC""", (did,)).fetchall()
+    # Completed stays on the driver's phone until dispatch presses Close at the end of the day.
+    done = db().execute("""SELECT * FROM orders WHERE driver_id=? AND dispatch_status IN ('delivered','cancelled')
+                           AND COALESCE(delivered_at, created_at) > ?
+                           ORDER BY COALESCE(delivered_at, created_at) DESC LIMIT 150""",
+                        (did, setting("driver_done_cleared_at", str) or "")).fetchall()
+    scheduled = d["status"] != "offline" or driver_group(d) == "scheduled"
     return jsonify({"ok": True,
+                    "business_open": business_is_open(),
+                    "business_name": (setting("business_name", str) or "Fleet Delivery"),
+                    "scheduled": scheduled,
+                    "done": [order_dict(o) for o in done],
                     "driver": {"name": d["name"], "status": d["status"],
                                "pending_request": d["pending_request"], "max_stack": d["max_stack"],
                                "up_next": rotation.get(d["id"]), "waiting_count": waiting,
@@ -3453,6 +3645,135 @@ def api_driver_request():
     db().commit()
     request_status(did, want)
     return jsonify({"ok": True})
+
+# ---------------------------------------------------------------- exports + GPS history
+
+def _xlsx_response(wb, filename):
+    import io
+    from flask import send_file
+    buf = io.BytesIO(); wb.save(buf); buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name=filename,
+                     mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+def _sheet(ws, headers, rows, money_cols=(), widths=None):
+    from openpyxl.styles import Font, PatternFill, Alignment
+    ws.append(headers)
+    for c in ws[1]:
+        c.font = Font(bold=True, color="FFFFFF"); c.fill = PatternFill("solid", fgColor="0F172A")
+        c.alignment = Alignment(vertical="center")
+    for r in rows:
+        ws.append(r)
+    for col in money_cols:
+        for row in ws.iter_rows(min_row=2, min_col=col, max_col=col):
+            for c in row:
+                c.number_format = '"$"#,##0.00'
+    for i, h in enumerate(headers, start=1):
+        w = (widths or {}).get(h) or max(10, min(45, max([len(str(h))] + [len(str(r[i - 1] or "")) for r in rows[:300]]) + 2))
+        ws.column_dimensions[ws.cell(1, i).column_letter].width = w
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = ws.dimensions
+
+def _day_range():
+    today = dt.date.today().isoformat()
+    f = (request.args.get("from") or today)[:10]
+    t = (request.args.get("to") or f)[:10]
+    if t < f:
+        f, t = t, f
+    return f, t
+
+@app.get("/dispatch/export/orders.xlsx")
+def export_orders():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    from openpyxl import Workbook
+    f, t = _day_range()
+    rows = db().execute("""SELECT * FROM orders WHERE substr(created_at,1,10) BETWEEN ? AND ?
+                           ORDER BY created_at ASC""", (f, t)).fetchall()
+    out = []
+    for r in rows:
+        o = order_dict(r)
+        c = lambda k: round((o.get(k) or 0) / 100.0, 2)
+        out.append([o["code"], o.get("ref") or "", (o.get("created_at") or "").replace("T", " "),
+                    (o.get("delivered_at") or "").replace("T", " "), o["dispatch_status"], o.get("kitchen_status") or "",
+                    o["restaurant"], o["customer"], o.get("phone") or "", o["address"], o.get("miles") or 0,
+                    "; ".join(o.get("lines") or []), c("subtotal_cents"),
+                    round(r["fee_cents"] / 100.0, 2), c("service_cents"),
+                    round((r["tax_cents"] if "tax_cents" in r.keys() else 0) / 100.0, 2), c("tip_cents"),
+                    round(r["total_cents"] / 100.0, 2), c("refunded_cents"),
+                    ("Cash" if o.get("cash") else (o.get("pay_method") or "Card")), o.get("payment_status") or "",
+                    o.get("driver") or "", o.get("source_label") or "", o.get("token") or "",
+                    o.get("note") or "", o.get("dispatch_note") or ""])
+    wb = Workbook(); ws = wb.active; ws.title = "Orders"
+    _sheet(ws, ["Order", "Ref", "Placed", "Delivered", "Status", "Kitchen", "Restaurant", "Customer", "Phone",
+                "Address", "Miles", "Items", "Food subtotal", "Delivery fee", "Service fee", "Tax", "Tip",
+                "Total", "Refunded", "Payment", "Payment status", "Driver", "Source", "Tag",
+                "Customer note", "Dispatch note"], out, money_cols=(13, 14, 15, 16, 17, 18, 19),
+           widths={"Items": 45, "Address": 38})
+    done = [x for x in out if x[4] == "delivered"]
+    s = wb.create_sheet("Summary")
+    _sheet(s, ["From", "To", "Orders", "Delivered", "Cancelled", "Food", "Delivery fees", "Service fees",
+               "Tax", "Tips", "Total collected"],
+           [[f, t, len(out), len(done), sum(1 for x in out if x[4] == "cancelled"),
+             round(sum(x[12] for x in done), 2), round(sum(x[13] for x in done), 2),
+             round(sum(x[14] for x in done), 2), round(sum(x[15] for x in done), 2),
+             round(sum(x[16] for x in done), 2), round(sum(x[17] - x[18] for x in done), 2)]],
+           money_cols=(6, 7, 8, 9, 10, 11))
+    by = {}
+    for x in done:
+        k = x[21] or "No driver"
+        v = by.setdefault(k, [k, 0, 0.0, 0.0, 0.0])
+        v[1] += 1; v[2] += x[13]; v[3] += x[16]; v[4] += x[17]
+    s2 = wb.create_sheet("By driver")
+    _sheet(s2, ["Driver", "Deliveries", "Delivery fees", "Tips", "Order totals"],
+           [[v[0], v[1], round(v[2], 2), round(v[3], 2), round(v[4], 2)] for v in sorted(by.values())],
+           money_cols=(3, 4, 5))
+    name = (setting("business_name", str) or "orders").replace(" ", "-")
+    return _xlsx_response(wb, "%s-orders-%s%s.xlsx" % (name, f, "" if f == t else "-to-" + t))
+
+def _gps_rows(driver_id, f, t):
+    sql = """SELECT l.*, d.name FROM driver_log l JOIN drivers d ON d.id=l.driver_id
+             WHERE substr(l.created_at,1,10) BETWEEN ? AND ?"""
+    args = [f, t]
+    if driver_id:
+        sql += " AND l.driver_id=?"; args.append(int(driver_id))
+    return db().execute(sql + " ORDER BY l.created_at ASC, l.id ASC LIMIT 20000", args).fetchall()
+
+@app.get("/dispatch/gps-log")
+def dispatch_gps_log():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    purge_driver_log()
+    f, t = _day_range()
+    did = request.args.get("driver") or ""
+    events_only = request.args.get("events") == "1"
+    rows = _gps_rows(did, f, t)
+    if events_only:
+        rows = [r for r in rows if r["event"] != "gps"]
+    drivers = db().execute("SELECT id,name FROM drivers ORDER BY name").fetchall()
+    pts = [r for r in rows if r["lat"] is not None]
+    route = ""
+    if did and len(pts) >= 2:
+        step = max(1, len(pts) // 9)
+        picks = pts[::step][:10]
+        route = ("https://www.google.com/maps/dir/" +
+                 "/".join("%.6f,%.6f" % (p["lat"], p["lng"]) for p in picks))
+    return render_template("dispatch_gps.html", rows=rows, drivers=drivers, f=f, t=t, did=did,
+                           events_only=events_only, route=route, keep_days=GPS_LOG_KEEP_DAYS)
+
+@app.get("/dispatch/export/gps.xlsx")
+def export_gps():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    from openpyxl import Workbook
+    f, t = _day_range()
+    rows = _gps_rows(request.args.get("driver") or "", f, t)
+    wb = Workbook(); ws = wb.active; ws.title = "GPS log"
+    _sheet(ws, ["Time", "Driver", "Status", "Event", "Address", "Latitude", "Longitude", "Map"],
+           [[r["created_at"].replace("T", " "), r["name"], r["status"] or "",
+             "GPS fix" if r["event"] == "gps" else r["event"], r["address"] or "", r["lat"], r["lng"],
+             ("https://www.google.com/maps?q=%.6f,%.6f" % (r["lat"], r["lng"])) if r["lat"] is not None else ""]
+            for r in rows], widths={"Event": 40, "Address": 40, "Map": 20})
+    return _xlsx_response(wb, "gps-log-%s%s.xlsx" % (f, "" if f == t else "-to-" + t))
 
 # ---------------------------------------------------------------- restaurant app
 
@@ -3491,11 +3812,16 @@ def api_rest_orders():
     # Active plus anything finished today, so the kitchen's Completed tab has a history.
     # An order leaves Active the moment the driver is en route, and comes straight back
     # if that gets undone (status put back to received or at the restaurant).
-    cutoff = (dt.datetime.now() - dt.timedelta(hours=14)).isoformat(timespec="seconds")
+    day = (request.args.get("day") or "")[:10]
+    if day:
+        done_sql, arg = "substr(COALESCE(delivered_at, created_at),1,10)=?", day
+    else:
+        # finished orders stay on the tablet until dispatch presses Close for the day
+        done_sql, arg = "COALESCE(delivered_at, created_at) > ?", (setting("driver_done_cleared_at", str) or "")
     rows = db().execute("""SELECT * FROM orders WHERE restaurant_id=? AND kitchen_status!='waiting'
                            AND dispatch_status!='awaiting_payment'
-                           AND (dispatch_status NOT IN ('delivered','cancelled') OR created_at>=?)
-                           ORDER BY created_at ASC""", (rid, cutoff)).fetchall()
+                           AND (dispatch_status NOT IN ('delivered','cancelled') OR """ + done_sql + """)
+                           ORDER BY created_at ASC""", (rid, arg)).fetchall()
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (rid,)).fetchone()
     return jsonify({"ok": True, "orders": [order_dict(o) for o in rows],
                     "open": is_open(r), "open_24": bool(r["open_24"]),
@@ -3792,7 +4118,18 @@ def current_portal():
 @app.context_processor
 def inject_portal():
     """Templates use this to show a portal's own menu and nothing else."""
-    return {"portal": current_portal(),
+    try:
+        _ph = dispatch_phone()
+        _d = "".join(c for c in _ph if c.isdigit())
+        biz = {"biz_name": (setting("business_name", str) or "Fleet Delivery").strip() or "Fleet Delivery",
+               "biz_address": (setting("business_address", str) or "").strip(),
+               "biz_phone": ("(%s) %s-%s" % (_d[:3], _d[3:6], _d[6:])) if len(_d) == 10 else _ph,
+               "biz_tel": _d,
+               "tax_bp": setting("tax_rate_bp") or 0, "service_bp": setting("service_fee_bp") or 0}
+    except Exception:
+        biz = {"biz_name": "Fleet Delivery", "biz_address": "", "biz_phone": "", "biz_tel": "",
+               "tax_bp": 900, "service_bp": 0}
+    return {**biz, "portal": current_portal(),
             "portal_name": session.get("dispatcher_name") or session.get("driver_name")
                            or session.get("restaurant_name") or ""}
 
@@ -3876,11 +4213,56 @@ def open_call_alerts():
                            WHERE a.cleared_at IS NULL ORDER BY a.id DESC LIMIT 20""").fetchall()
     out = []
     for a in rows:
-        out.append({"id": a["id"], "who": a["who"], "name": a["name"],
-                    "phone": a["phone"] or "", "tel": tel_digits(a["phone"]),
-                    "note": a["note"] or "", "order": a["code"] or "",
-                    "at": clock(a["created_at"]), "when": a["created_at"]})
+        item = {"id": a["id"], "who": a["who"], "name": a["name"],
+                "phone": a["phone"] or "", "tel": tel_digits(a["phone"]),
+                "note": a["note"] or "", "order": a["code"] or "",
+                "at": clock(a["created_at"]), "when": a["created_at"], "location": None}
+        if a["who"] == "driver" and a["driver_id"]:
+            d = db().execute("SELECT * FROM drivers WHERE id=?", (a["driver_id"],)).fetchone()
+            if d:
+                loc = loc_block(d)
+                if loc and not loc.get("address"):
+                    loc["address"] = update_driver_addr(d["id"], d["last_lat"], d["last_lng"])
+                if loc:
+                    loc["at"] = clock(d["last_loc_at"])
+                item["location"] = loc
+        out.append(item)
     return out
+
+def awaiting_accept():
+    """Orders handed to a driver who has not tapped Received yet."""
+    rows = db().execute("""SELECT o.id, o.code, o.restaurant_id, d.name dname, r.name rname FROM orders o
+                           JOIN drivers d ON d.id=o.driver_id
+                           LEFT JOIN restaurants r ON r.id=o.restaurant_id
+                           WHERE o.dispatch_status='assigned' AND o.driver_id IS NOT NULL
+                           ORDER BY o.id""").fetchall()
+    return [{"id": x["id"], "code": x["code"], "driver": x["dname"], "restaurant": x["rname"] or ""} for x in rows]
+
+@app.post("/api/dispatch/business")
+def api_dispatch_business():
+    """Open Business / Close. Closed shows drivers a closed screen instead of the app."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    on = bool((request.get_json(silent=True) or {}).get("open"))
+    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('business_open',?)", ("1" if on else "0",))
+    if not on:
+        # end of day: drivers start tomorrow with an empty Completed tab. Dispatch keeps the history.
+        db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('driver_done_cleared_at',?)", (now(),))
+    db().commit()
+    log("business", ("opened" if on else "closed") + " by " + (session.get("dispatcher_name") or "dispatch"))
+    return jsonify({"ok": True, "business_open": on})
+
+def business_is_open():
+    try:
+        return str(setting("business_open", str) or "1") != "0"
+    except Exception:
+        return True
+
+@app.get("/api/dispatch/alerts")
+def api_dispatch_alerts():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    return jsonify({"ok": True, "alerts": open_call_alerts(), "awaiting": awaiting_accept()})
 
 @app.post("/api/driver/call-dispatch")
 def api_driver_call_dispatch():
@@ -3889,6 +4271,14 @@ def api_driver_call_dispatch():
         return jsonify({"ok": False}), 403
     d = db().execute("SELECT * FROM drivers WHERE id=?", (did,)).fetchone()
     data = request.get_json(silent=True) or {}
+    try:
+        lat, lng = float(data["lat"]), float(data["lng"])
+    except (KeyError, TypeError, ValueError):
+        lat = lng = None
+    if lat is not None and d["status"] != "offline":
+        db().execute("UPDATE drivers SET last_lat=?,last_lng=?,last_loc_at=? WHERE id=?", (lat, lng, now(), did))
+        db().commit()
+        update_driver_addr(did, lat, lng, force=True)
     raise_call_alert("driver", d["name"], d["phone"], (data.get("note") or "").strip()[:160],
                      driver_id=did, order_id=data.get("order_id") or None)
     return jsonify({"ok": True, "phone": dispatch_phone()})

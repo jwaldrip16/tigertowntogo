@@ -1,15 +1,29 @@
 {% extends "base.html" %}{% block body %}
-<div class="head"><h1>Delivery fees</h1><a class="btn small" href="/dispatch">Back to board</a></div>
+<div class="head"><h1>Settings</h1><a class="btn small" href="/dispatch">Back to board</a></div>
 {% if saved %}<p class="good">Settings saved.</p>{% endif %}
+{% for e in errors or [] %}<p style="color:#c0392b">{{ e }}</p>{% endfor %}
 <form class="panel narrow" method="post">
+  <h2>Business</h2>
+  <label>Business name</label>
+  <input name="business_name" maxlength="60" required value="{{ s['business_name'] }}">
+  <div class="muted small">Shows at the top of every page and on the customer site.</div>
+  <label>Business address</label>
+  <input name="business_address" id="bizAddr" maxlength="160" value="{{ s['business_address'] }}">
+  <label>Dispatch phone number</label>
+  <input name="dispatch_phone" type="tel" value="{{ s['dispatch_phone'] }}" placeholder="334-209-2844">
+  <div class="muted small">The number drivers and restaurants tap to call dispatch, and the one customers see.</div>
+  <h2>Delivery fees</h2>
   <label>Base fee in cents (first miles)</label>
   <input name="base_fee_cents" value="{{ s['base_fee_cents'] }}">
   <label>Miles covered by the base fee</label>
   <input name="base_miles" value="{{ s['base_miles'] }}">
   <label>Cents per additional mile</label>
   <input name="per_mile_cents" value="{{ s['per_mile_cents'] }}">
-  <label>Tax rate in basis points (900 = 9%)</label>
-  <input name="tax_rate_bp" value="{{ s['tax_rate_bp'] }}">
+  <label>Sales tax (%)</label>
+  <input name="tax_pct" inputmode="decimal" value="{{ '%g' % ((s['tax_rate_bp']|int) / 100) }}" placeholder="9">
+  <label>Service fee (% of the food subtotal, 0 for none)</label>
+  <input name="service_pct" inputmode="decimal" value="{{ '%g' % (((s['service_fee_bp'] or 0)|int) / 100) }}" placeholder="0">
+  <div class="muted small">Both apply to the food subtotal on new orders and on orders you edit. Orders already placed keep what they were charged.</div>
   <label>Auto assign to drivers (1 on, 0 off)</label>
   <input name="auto_assign" value="{{ s['auto_assign'] }}">
   <label>Order tags, comma separated</label>
@@ -19,3 +33,4 @@
   <button class="btn primary">Save</button>
 </form>
 {% endblock %}
+{% block scripts %}<script>attachAddressPicker('bizAddr');</script>{% endblock %}

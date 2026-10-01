@@ -10,6 +10,12 @@
 {% block body %}
 <div class="head"><h1>{{ driver_name }}</h1>
   <div><a class="btn small" href="/driver/logout">Sign out</a></div></div>
+<div id="gate" class="panel hidden" style="text-align:center;padding:28px 16px">
+  <h2 id="gateMsg"></h2>
+  <p class="muted" id="gateSub"></p>
+  {% if biz_tel %}<a class="btn primary" href="tel:{{ biz_tel }}" onclick="tellDispatch()">Call dispatch</a>{% endif %}
+  <div class="muted small" id="callNote"></div>
+</div>
 <div class="panel" id="status"></div>
 <div class="row"><span class="muted small" id="locNote">Checking your location...</span></div>
 <div class="row"><span class="muted small" id="soundNote"></span>
@@ -22,6 +28,7 @@
   <button class="tab" id="tabChat" onclick="dtab('chat')">Dispatch chat
     <span class="pill red hidden" id="chatBadge"></span></button>
   <button class="tab" id="tabSched" onclick="dtab('sched')">Schedule</button>
+  <button class="tab" id="tabDone" onclick="dtab('done')">Completed <span id="cntDone"></span></button>
 </div>
 <div id="chatAlert" class="chatalert hidden" onclick="dtab('chat')"></div>
 
@@ -56,6 +63,8 @@
     </div>
   </section>
 </div>
+
+<div id="paneDone" class="hidden"><div id="doneList"></div></div>
 
 <div id="paneSched" class="hidden">
   <aside class="panel"><h2>Next week</h2>
@@ -122,7 +131,11 @@ async function tellDispatch(){
   const n = document.getElementById('callNote');
   try {
     const o = (window.STACK && STACK[0] && STACK[0].id) || null;
-    await jpost('/api/driver/call-dispatch', {order_id: o});
+    const body = {order_id: o};
+    if (LAST_FIX){ body.lat = LAST_FIX.latitude; body.lng = LAST_FIX.longitude; }
+    await jpost('/api/driver/call-dispatch', body);
+    FAST = true;           // keep dispatch's screen current until they hit Done
+    sendFix(true);
     n.textContent = 'Dispatch has been pinged that you are calling.';
   } catch (e) {
     n.textContent = 'Calling. Dispatch may not have got the ping.';
@@ -151,10 +164,51 @@ function turnPill(d){
   if (!d.up_next)             return '<span class="pill amber">at your stack limit</span>';
   return '<span class="pill blue">You are ' + ordinal(d.up_next) + ' up for the next order</span>';
 }
+let GATED = '';
+function gateCheck(res, d){
+  // closed business: closed screen only. Unscheduled: notice plus dispatch chat so they can still reach dispatch.
+  let mode = '';
+  if (res.business_open === false) mode = 'closed';
+  else if (res.scheduled === false && d.status === 'offline') mode = 'unscheduled';
+  const name = res.business_name || 'Dispatch';
+  const show = function(id, on){ const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !on); };
+  const tabbar = document.querySelector('.tabbar');
+  if (!mode){
+    if (GATED){ GATED = ''; show('gate', false); show('status', true); if (tabbar) tabbar.classList.remove('hidden'); dtab('run'); }
+    return false;
+  }
+  document.getElementById('gateMsg').textContent = mode === 'closed'
+    ? name + ' is closed.'
+    : name + ' does not have you scheduled.';
+  document.getElementById('gateSub').textContent = mode === 'closed'
+    ? 'The app will open by itself when dispatch opens the business.'
+    : 'Call dispatch or message them below to be put online.';
+  show('gate', true); show('status', false);
+  if (tabbar) tabbar.classList.add('hidden');
+  ['paneRun','paneSched','paneDone'].forEach(function(id){ show(id, false); });
+  show('paneChat', mode === 'unscheduled');
+  if (GATED !== mode && mode === 'unscheduled'){ DTAB = 'chat'; chat(); }
+  GATED = mode;
+  try { MY_STATUS = d.status; } catch(e){}
+  return true;
+}
+function renderDone(list){
+  document.getElementById('cntDone').textContent = list.length ? '(' + list.length + ')' : '';
+  document.getElementById('doneList').innerHTML = list.length ? list.map(function(o){
+    return '<div class="panel slim"><div class="row between"><div><strong>' + o.code + '</strong> ' +
+      '<span class="pill ' + (o.dispatch_status === 'delivered' ? 'green' : 'grey') + '">' + o.dispatch_status + '</span></div>' +
+      '<span class="muted small">' + (o.delivered_time || (o.delivered_at || '').slice(11, 16)) + '</span></div>' +
+      '<div class="small">' + o.restaurant + ' &rarr; ' + o.customer + '</div>' +
+      '<div class="muted small">' + o.address + '</div>' +
+      '<div class="small">Total ' + o.total + ' &middot; tip ' + o.tip + (o.cash ? ' &middot; cash' : '') + '</div></div>';
+  }).join('') : '<p class="muted">No completed orders in the last 14 hours.</p>';
+}
 async function state(){
   const res = await jget('/api/driver/state');
   if(!res.ok){ window.location='/driver/login'; return; }
   const d = res.driver;
+  try { renderDone(res.done || []); } catch(e) { console.log('done skipped', e); }
+  if (gateCheck(res, d)) return;
   try { renderStatus(d); } catch(e) { console.log('status skipped', e); }
   try { renderAvail(res.availability, res.time_off); } catch(e) { console.log(e); }
   const total = res.stack.length;
@@ -196,7 +250,7 @@ function detailBlock(o){
     '<div class="detail-row"><span class="lbl">Order ('+(o.item_count||o.items.length)+' items)</span>'+
       '<span><ul class="lines">'+lines+'</ul></span></div>'+
     '<div class="detail-row"><span class="lbl">Money</span><span>'+
-      'Subtotal '+o.subtotal+' &middot; fee '+o.fee+' &middot; tax '+o.tax+
+      'Subtotal '+o.subtotal+' &middot; fee '+o.fee+(o.service_cents ? ' &middot; service '+o.service : '')+' &middot; tax '+o.tax+
       ' &middot; <strong>tip '+o.tip+'</strong><br>Order total '+o.total+
       ' &middot; '+(o.miles||0)+' mi from the restaurant</span></div>'+
     ((o.prep_minutes||o.timer_seconds!==null)
@@ -356,12 +410,13 @@ let CHAT_SEEN = null;      // highest message id the driver has actually looked 
 let CHAT_UNREAD = 0;
 function dtab(which){
   DTAB = which;
-  ['run','chat','sched'].forEach(function(k){
+  ['run','chat','sched','done'].forEach(function(k){
     document.getElementById('pane'+k[0].toUpperCase()+k.slice(1)).classList.toggle('hidden', k!==which);
   });
   document.getElementById('tabRun').classList.toggle('on', which==='run');
   document.getElementById('tabChat').classList.toggle('on', which==='chat');
   document.getElementById('tabSched').classList.toggle('on', which==='sched');
+  document.getElementById('tabDone').classList.toggle('on', which==='done');
   if (which==='chat'){ clearChatBadge(); chat(); }
 }
 function clearChatBadge(){
@@ -405,12 +460,25 @@ async function send(){
 }
 let LAST_FIX = null;
 let MY_STATUS = 'offline';   // no fixes leave the phone while off shift
+let FAST = false, LAST_POST = 0, ADDR = '';
+function sendFix(now){
+  if(!LAST_FIX) return;
+  if(MY_STATUS === 'offline') return;              // off shift, phone stays private
+  const gap = FAST ? 8000 : 25000;
+  if(!now && Date.now() - LAST_POST < gap) return;
+  LAST_POST = Date.now();
+  jpost('/api/driver/ping', {lat: LAST_FIX.latitude, lng: LAST_FIX.longitude}).then(function(r){
+    if(!r) return;
+    FAST = !!r.fast;
+    if(r.address) ADDR = r.address;
+    const el = document.getElementById('locNote');
+    if(el) el.textContent = 'Dispatch can see your location' + (ADDR ? ' (near ' + ADDR + ')' : '') +
+      '. Last sent ' + new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) + '.';
+  }).catch(function(){});
+}
 function pushFix(pos){
   LAST_FIX = pos.coords;
-  jpost('/api/driver/ping', {lat: pos.coords.latitude, lng: pos.coords.longitude});
-  const el = document.getElementById('locNote');
-  if(el) el.textContent = 'Dispatch can see your location. Last sent ' +
-    new Date().toLocaleTimeString([], {hour:'numeric', minute:'2-digit'}) + '.';
+  sendFix(false);
 }
 function locFail(){
   const el = document.getElementById('locNote');
@@ -419,13 +487,10 @@ function locFail(){
 }
 function startLocation(){
   if(!navigator.geolocation){ locFail(); return; }
-  navigator.geolocation.getCurrentPosition(pushFix, locFail, {enableHighAccuracy:true, timeout:15000});
-  navigator.geolocation.watchPosition(pushFix, locFail, {enableHighAccuracy:true, maximumAge:20000});
-  setInterval(function(){
-    if(!LAST_FIX) return;
-    if(MY_STATUS === 'offline'){ return; }          // off shift, phone stays private
-    jpost('/api/driver/ping', {lat: LAST_FIX.latitude, lng: LAST_FIX.longitude});
-  }, 30000);
+  navigator.geolocation.getCurrentPosition(function(p){ LAST_FIX = p.coords; sendFix(true); }, locFail,
+    {enableHighAccuracy:true, timeout:15000});
+  navigator.geolocation.watchPosition(pushFix, locFail, {enableHighAccuracy:true, maximumAge:5000});
+  setInterval(function(){ sendFix(false); }, 4000);
 }
 state(); chat(); startLocation();
 setInterval(state,4000); setInterval(chat,4000);

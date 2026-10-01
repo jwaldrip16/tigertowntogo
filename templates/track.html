@@ -60,6 +60,7 @@ async function tick(){
   if (o.driver) html += '<p class="big">Driver: '+o.driver+' (stop #'+o.stack_seq+' on their run)</p>';
   html += '<div class="row"><span>Subtotal</span><span>'+o.subtotal+'</span></div>'+
           '<div class="row"><span>Delivery ('+(o.miles===null?'distance confirmed by dispatch':o.miles+' mi')+')</span><span>'+o.fee+'</span></div>'+
+          (o.service_cents ? '<div class="row"><span>Service fee</span><span>'+o.service+'</span></div>' : '')+
           '<div class="row"><span>Tax</span><span>'+o.tax+'</span></div>'+
           '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>'+
           '<p><a class="btn" target="_blank" href="'+o.restaurant_nav+'">Navigate to the restaurant</a></p>';

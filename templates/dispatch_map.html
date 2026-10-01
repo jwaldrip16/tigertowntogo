@@ -3,7 +3,7 @@
   <div><a class="btn small" href="/dispatch">Board</a>
        <a class="btn small" href="/dispatch/account">Dispatchers</a>
        <a class="btn small" href="/dispatch/logout">Sign out</a></div></div>
-<p class="muted small">Live positions from each driver's phone, refreshed every 15 seconds. A pin goes
+<p class="muted small">Live positions from each driver's phone, refreshed every 5 seconds, with the closest street address. A pin goes
 grey once a fix is more than 10 minutes old, which usually means the driver closed the app.</p>
 <div class="maprow">
   <div id="map" class="map"></div>
@@ -30,6 +30,8 @@ async function refresh(){
   if(!res.ok){ window.location = '/dispatch/login'; return; }
   LAYER.clearLayers();
   const pts = [];
+  const SIDE = document.createElement('div');
+  SIDE.innerHTML = '<h2>Drivers</h2>';
   res.drivers.forEach(d => {
     const rows = [];
     rows.push('<div class="row between"><div><strong>'+d.name+'</strong> '+
@@ -38,6 +40,7 @@ async function refresh(){
     if(d.location){
       const age = d.location.minutes_ago===null ? 'just now'
         : (d.location.minutes_ago<1 ? 'seconds ago' : d.location.minutes_ago+' min ago');
+      rows.push('<div class="small"><strong>'+(d.location.address||'Looking up address...')+'</strong></div>');
       rows.push('<div class="muted small">Last fix '+age+
         ' · <a href="'+d.location.map_url+'" target="_blank">open in Maps</a></div>');
       if(d.next_stop) rows.push('<div class="muted small">Next: '+d.next_stop.code+' to '+
@@ -46,6 +49,7 @@ async function refresh(){
         : d.status==='break' ? '#bf7e0a' : '#1e58c8');
       const m = L.marker([d.location.lat, d.location.lng], {icon: dot(color, d.name[0])}).addTo(LAYER);
       m.bindPopup('<strong>'+d.name+'</strong><br>'+d.status+
+        (d.location.address ? ('<br>'+d.location.address) : '')+
         (d.next_stop ? ('<br>next: '+d.next_stop.code) : '')+'<br>'+age);
       pts.push([d.location.lat, d.location.lng]);
     } else {
@@ -56,14 +60,12 @@ async function refresh(){
     const div = document.createElement('div');
     div.className = 'card pad';
     div.innerHTML = rows.join('');
-    document.getElementById('side').appendChild(div);
+    SIDE.appendChild(div);
   });
+  document.getElementById('side').replaceChildren(...SIDE.childNodes);
   if(pts.length && !FITTED){ MAP.fitBounds(pts, {padding:[40,40], maxZoom:14}); FITTED = true; }
 }
-async function tick(){
-  document.getElementById('side').innerHTML = '<h2>Drivers</h2>';
-  await refresh();
-}
-initMap(); tick(); setInterval(tick, 15000);
+async function tick(){ try { await refresh(); } catch(e){} }
+initMap(); tick(); setInterval(tick, 5000);
 </script>
 {% endblock %}

@@ -23,8 +23,11 @@
 <section class="panel callbar">
   <div class="row between">
     <div><strong>Need dispatch?</strong>
-      <div class="muted small">Ask here and they will call the kitchen. On a phone: {{ dispatch_phone }}</div></div>
-    <button class="btn primary" onclick="askCall()">Ask dispatch to call me</button>
+      <div class="muted small">Tap Call dispatch to ring {{ biz_phone or dispatch_phone }}. If this tablet cannot make calls, tap Ask dispatch to call me and they will ring the kitchen.</div></div>
+    <div class="row gap">
+      {% if dispatch_tel %}<a class="btn primary" href="tel:{{ dispatch_tel }}" onclick="askCall('dialed')">Call dispatch</a>{% endif %}
+      <button class="btn" onclick="askCall()">Ask dispatch to call me</button>
+    </div>
   </div>
   <div class="row gap">
     <input id="callCode" placeholder="Order number, if it is about one">
@@ -40,6 +43,10 @@
   <button class="tab" id="tabDone" onclick="showTab('done')">Completed <span id="cntDone"></span></button>
 </div>
 <div id="orders"></div>
+<div id="doneTools" class="row hidden"><label class="small">Day
+  <input type="date" id="doneDay" onchange="load(true)"></label>
+  <button class="btn tiny" onclick="document.getElementById('doneDay').value='';load(true)">Since close</button>
+  <span class="muted small">Blank shows everything since dispatch last pressed Close.</span></div>
 <div id="ordersDone" class="hidden"></div>
 {% endblock %}
 {% block scripts %}<script>
@@ -48,9 +55,11 @@ async function askCall(level){
   const note = document.getElementById('callNote').value.trim();
   let msg = note || 'please call the kitchen';
   if (level === 'urgent') msg = 'URGENT: ' + msg;
+  if (level === 'dialed') msg = 'calling dispatch now' + (note ? ': ' + note : '') + '. If you missed it, call the kitchen back';
   const res = await jpost('/api/restaurant/call-dispatch', {code: code, note: msg, urgent: level === 'urgent'});
   if (res && res.ok){
     document.getElementById('callNote').value = '';
+    if (level === 'dialed') { said('Calling dispatch. They also got an alert in case the call does not connect.'); return; }
     said(level === 'urgent' ? 'Sent as urgent. Dispatch is being alerted now.'
                             : 'Dispatch has it. They will call the kitchen back.');
   } else { said('That did not go through. Try again in a moment.'); }
@@ -88,7 +97,8 @@ function editing(){
 }
 async function load(force){
   if (editing() && !force) return;
-  const res = await jget('/api/restaurant/orders');
+  const dd = (document.getElementById('doneDay')||{}).value || '';
+  const res = await jget('/api/restaurant/orders' + (dd ? '?day=' + dd : ''));
   if(!res.ok){ window.location='/restaurant/login'; return; }
   document.getElementById('openpill').textContent =
     res.open_24 ? 'Open 24 hours' : (res.open ? 'Open' : 'Closed');
@@ -138,7 +148,7 @@ async function load(force){
       '<div class="detail-row"><span class="lbl">Times</span><span>'+
         (o.timeline||[]).map(x=>x.time+' '+x.label).join('<br>')+'</span></div>'+
       '<div class="detail-row"><span class="lbl">Ticket</span><span>Subtotal '+o.subtotal+
-        ' &middot; fee '+o.fee+' &middot; tax '+o.tax+' &middot; tip '+o.tip+
+        ' &middot; fee '+o.fee+(o.service_cents ? ' &middot; service '+o.service : '')+' &middot; tax '+o.tax+' &middot; tip '+o.tip+
         '<br>Total '+o.total+' &middot; placed '+(o.placed_by||'customer')+
         ' &middot; '+(o.miles||0)+' mi out</span></div>'+
       '<div class="detail-row"><span class="lbl">Driver</span><span>'+
@@ -162,6 +172,7 @@ function showTab(which){
   TAB = which;
   document.getElementById('orders').classList.toggle('hidden', which !== 'active');
   document.getElementById('ordersDone').classList.toggle('hidden', which !== 'done');
+  document.getElementById('doneTools').classList.toggle('hidden', which !== 'done');
   document.getElementById('tabActive').classList.toggle('on', which === 'active');
   document.getElementById('tabDone').classList.toggle('on', which === 'done');
 }

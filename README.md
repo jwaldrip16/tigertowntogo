@@ -413,3 +413,32 @@ The card is encrypted on the server and only dispatch can open it (each opening 
 - Cash orders go straight to the restaurant. Switching an order to cash releases it; switching back to card pulls it back if the kitchen has not started.
 - If the card will not go through, use "Card failed: cancel" on the order or "Card would not go through" in the card box. The order is cancelled and the card is deleted.
 - An unpaid card order left for CARD_HOLD_HOURS (24 by default) is cancelled automatically.
+
+
+## Business name, address and phone
+Dispatch > Settings (top menu) holds the business name, business address and dispatch phone number.
+The name shows at the top of every page; the customer site footer shows all three. The phone is
+the number drivers and restaurants tap to call dispatch.
+
+
+## Driver location and address
+
+When a driver taps Call dispatch, their phone sends its GPS fix and the board shows the closest street address under the call ("Near: 908 Avenue B, Opelika, AL 36801"). While that call is open the phone checks in every 8 seconds, so the address keeps updating until a dispatcher taps Done.
+
+The Driver map page (Dispatch > Map) refreshes every 5 seconds and shows each on-shift driver's closest address, updated as they move.
+
+Addresses come from OpenStreetMap for free (about one lookup a second, cached every ~10 metres). For a bigger fleet set GOOGLE_MAPS_API_KEY in the host's environment and Google is used instead. Drivers must allow location in their browser, and nothing is tracked while they are off shift.
+
+
+## Open and close the business
+The dispatch board has Open Business and Close buttons at the top. While closed, every driver sees "<business name> is closed." in place of the app, and the app opens by itself when dispatch presses Open Business. A driver who is offline and not on today's schedule sees "<business name> does not have you scheduled. Call dispatch or message them below to be put online." with a Call dispatch button and the dispatch chat, so they can still reach you. The name comes from Dispatch > Settings.
+
+## Completed tabs
+Drivers and restaurants each have a Completed tab. Finished orders stay there until dispatch presses Close at the end of the day, then both start fresh. The restaurant can also pick an earlier day.
+
+
+## Completed by day, GPS log, Excel export
+- Dispatch board > Completed orders: pick a day (or Previous/Next day). Shows that day's delivered and cancelled orders with a total.
+- Export this day to Excel, or pick From/To and Export range. The workbook has Orders, Summary and By driver sheets.
+- Dispatch > GPS log: pick a driver and dates. Shows every status the driver marks (requests, Received, At restaurant, On the way, Delivered), every status dispatch sets, and GPS points about once a minute while online or on break, each with the address and a Maps link. Route in Maps draws the day's path. Export to Excel from the same page. Kept 90 days (env GPS_LOG_KEEP_DAYS).
+- requirements.txt now includes openpyxl. Render/Railway install it on the next deploy.

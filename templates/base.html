@@ -1,18 +1,20 @@
 <!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}Fleet Delivery{% endblock %}</title>
+<title>{% block title %}{{ biz_name }}{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 {% block head %}{% endblock %}
 </head><body class="{% block bodyclass %}{% endblock %}">
 <header class="topbar">
-  <a class="brand" href="{% if portal == 'dispatch' %}/dispatch{% elif portal == 'driver' %}/driver{% elif portal == 'kitchen' %}/restaurant{% else %}/{% endif %}">Fleet Delivery{% if portal %} {{ portal|capitalize if portal != "kitchen" else "Kitchen" }}{% endif %}</a>
+  <a class="brand" href="{% if portal == 'dispatch' %}/dispatch{% elif portal == 'driver' %}/driver{% elif portal == 'kitchen' %}/restaurant{% else %}/{% endif %}">{{ biz_name }}{% if portal %} {{ portal|capitalize if portal != "kitchen" else "Kitchen" }}{% endif %}</a>
   <nav>
     {% if portal == 'dispatch' %}
       <a href="/dispatch">Board</a>
       <a href="/dispatch/manage">Manage</a>
       <a href="/dispatch/schedule">Schedule</a>
       <a href="/dispatch/map">Map</a>
+      <a href="/dispatch/gps-log">GPS log</a>
+      <a href="/dispatch/settings">Settings</a>
       <a href="/dispatch/account">Account</a>
       <a href="/dispatch/logout">Sign out</a>
     {% elif portal == 'driver' %}
@@ -27,6 +29,9 @@
   </nav>
 </header>
 <main>{% block body %}{% endblock %}</main>
+{% if not portal %}<footer class="muted small" style="text-align:center;padding:18px 12px">
+  {{ biz_name }}{% if biz_address %} &middot; {{ biz_address }}{% endif %}{% if biz_phone %} &middot; <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>{% endif %}
+</footer>{% endif %}
 <script src="{{ url_for('static', filename='alert.js') }}"></script>
 <script src="{{ url_for('static', filename='notify.js') }}"></script>
 <script>
