@@ -1,0 +1,185 @@
+{% extends "base.html" %}{% block body %}
+<div class="head">
+  <h1>Driver schedule</h1>
+  <div><a class="btn small" href="/dispatch">Board</a>
+    <a class="btn small" href="/dispatch/manage">Restaurants and drivers</a>
+    <a class="btn small" href="/dispatch/hours">Store hours</a></div>
+</div>
+<p class="muted small">Every driver's week is listed here. Requests from drivers show as pending
+until you approve them, and anything you add or change is approved straight away.</p>
+<div class="row"><span class="pill amber" id="pendCount">0 waiting</span>
+  <span class="muted small">Approved hours are green, denied are red.</span></div>
+
+<h2 class="mt">Weekly submissions</h2>
+<div class="row">
+  <select id="wkPick" onchange="loadWeek(this.value).then(load)"></select>
+  <span id="wkDue" class="muted small"></span>
+</div>
+<div class="row">
+  <span class="muted small">Opens every week on</span>
+  <select id="openDow">
+    <option value="0">Monday</option><option value="1">Tuesday</option>
+    <option value="2">Wednesday</option><option value="3">Thursday</option>
+    <option value="4">Friday</option><option value="5">Saturday</option>
+    <option value="6">Sunday</option>
+  </select>
+  <span class="muted small">or a one-off date</span>
+  <input type="date" id="openDate">
+  <button class="btn tiny primary" onclick="saveWindow()">Save</button>
+  <button class="btn tiny" onclick="clearWindow()">Clear one-off</button>
+</div>
+<div id="wkMissing" class="duebar hidden"></div>
+<div id="wkBoard"></div>
+
+<h2 class="mt">Hours by date</h2>
+<p class="muted small">Shows the week picked above. Hours you add here are for that one date and do not repeat.</p>
+<div id="sched"></div>
+{% endblock %}
+{% block scripts %}<script>
+const DAYS = {{ days|tojson }};
+function pill(s){
+  const c = s==='approved' ? 'green' : s==='denied' ? 'red' : 'amber';
+  return '<span class="pill '+c+'">'+s+'</span>';
+}
+function daySel(id, v){
+  return '<select id="'+id+'">'+DAYS.map((d,i)=>
+    '<option value="'+i+'"'+(i===v?' selected':'')+'>'+d+'</option>').join('')+'</select>';
+}
+async function load(){
+  const res = await jget('/api/dispatch/schedule');
+  if(!res.ok){ window.location='/dispatch/login'; return; }
+  document.getElementById('pendCount').textContent = res.pending + ' waiting on you';
+  document.getElementById('sched').innerHTML = res.drivers.map(d=>{
+    const week = DAYS.map((name,i)=>{
+      const slots = d.availability.filter(a=>a.dow===i && (!WEEK || a.week_start===WEEK));
+      return '<div class="wday"><div class="wname">'+name+(WEEK_DATES[i]?' '+WEEK_DATES[i]:'')+'</div>'+
+        (slots.length ? slots.map(a=>'<div class="wslot '+a.status+'">'+a.start+'-'+a.end+'</div>').join('')
+                      : '<div class="wslot none">off</div>')+'</div>';
+    }).join('');
+    const rows = d.availability.filter(a=>!WEEK || a.week_start===WEEK).map(a=>
+      '<div class="row between schedrow"><span>'+a.day+' '+(a.date_label||'')+' '+a.start+'-'+a.end+' '+pill(a.status)+
+      (a.decided_by?' <span class="muted small">by '+a.decided_by+'</span>':'')+'</span><span>'+
+      (a.status==='pending'
+        ? '<button class="btn tiny primary" onclick="decide('+a.id+',true)">Approve</button>'+
+          '<button class="btn tiny" onclick="decide('+a.id+',false)">Deny</button>' : '')+
+      '<button class="btn tiny" onclick="editSlot('+a.id+',\''+a.start+'\',\''+a.end+'\','+a.dow+')">Edit</button>'+
+      '<button class="btn tiny" onclick="delSlot('+a.id+')">Remove</button></span></div>').join('')
+      || '<p class="muted small">No hours on file.</p>';
+    const off = d.time_off.map(o=>
+      '<div class="row between schedrow"><span>Off '+o.start+(o.end!==o.start?' to '+o.end:'')+' '+
+      pill(o.status)+(o.reason?' <span class="muted">'+o.reason+'</span>':'')+'</span><span>'+
+      (o.status==='pending'
+        ? '<button class="btn tiny primary" onclick="decideOff('+o.id+',true)">Approve</button>'+
+          '<button class="btn tiny" onclick="decideOff('+o.id+',false)">Deny</button>' : '')+
+      '<button class="btn tiny" onclick="delOff('+o.id+')">Remove</button></span></div>').join('');
+    return '<section class="panel"><div class="row between"><h2>'+d.name+
+      ' <span class="pill '+(d.roster==='unavailable'?'red':'grey')+'">'+d.roster+'</span>'+
+      (d.off_today?' <span class="pill amber">off today</span>':'')+'</h2>'+
+      '<span class="muted small">'+d.phone+'</span></div>'+
+      '<div class="week">'+week+'</div>'+ rows + off +
+      '<div class="row"><input id="nd'+d.id+'" type="date" value="'+new Date().toLocaleDateString('en-CA')+'">'+
+      '<input id="ns'+d.id+'" type="time" value="16:00"><input id="ne'+d.id+'" type="time" value="22:00">'+
+      '<button class="btn tiny primary" onclick="addSlot('+d.id+')">Add hours</button>'+
+      '<input id="os'+d.id+'" type="date"><input id="oe'+d.id+'" type="date">'+
+      '<button class="btn tiny" onclick="addOff('+d.id+')">Mark off</button></div></section>';
+  }).join('');
+}
+async function post(b){ const r = await jpost('/api/dispatch/schedule', b);
+  if(!r.ok){ alert(r.error||'That did not save.'); return false; } load(); return true; }
+async function decide(id, ok){ post({op:'decide', id:id, approve:ok}); }
+async function decideOff(id, ok){ post({op:'decide_off', id:id, approve:ok}); }
+async function delSlot(id){ post({op:'delete', id:id}); }
+async function delOff(id){ post({op:'delete_off', id:id}); }
+async function addSlot(did){
+  const date = document.getElementById('nd'+did).value;
+  if(!date){ alert('Pick the date.'); return; }
+  const ok = await post({op:'add', driver_id:did, date:date,
+        start:document.getElementById('ns'+did).value, end:document.getElementById('ne'+did).value});
+  if(ok) loadWeek(WEEK);
+}
+async function addOff(did){
+  const s = document.getElementById('os'+did).value;
+  if(!s){ alert('Pick the first day off.'); return; }
+  post({op:'add_off', driver_id:did, start:s, end:document.getElementById('oe'+did).value||s});
+}
+async function editSlot(id, start, end, dow){
+  const ns = prompt('Start time (24h, like 16:00)', start); if(!ns) return;
+  const ne = prompt('End time (24h, like 22:00)', end); if(!ne) return;
+  post({op:'update', id:id, dow:dow, start:ns, end:ne});
+}
+let WEEK = '', WEEK_DATES = [];
+function mdy(iso){ const p = iso.split('-'); return (+p[1])+'/'+(+p[2]); }
+function editDay(did, name, date, day, start, end){
+  let m = document.getElementById('dayModal');
+  if(!m){
+    m = document.createElement('div'); m.id = 'dayModal';
+    m.style.cssText = 'position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:9999';
+    document.body.appendChild(m);
+  }
+  m.innerHTML = '<div class="panel" style="min-width:320px;max-width:420px">'+
+    '<h3 style="margin-top:0">'+name+' &middot; '+day+' '+mdy(date)+'</h3>'+
+    '<div class="row"><label class="small muted">Start</label><input type="time" id="dmS" value="'+(start||'16:00')+'">'+
+    '<label class="small muted">End</label><input type="time" id="dmE" value="'+(end||'22:00')+'"></div>'+
+    '<div class="row mt"><button class="btn primary" id="dmOn">Mark available</button>'+
+    '<button class="btn" id="dmOff">Mark off</button><button class="btn" id="dmX">Cancel</button></div>'+
+    '<p class="muted small">This applies to '+day+' '+mdy(date)+' only.</p></div>';
+  m.style.display = 'flex';
+  const close = ()=>{ m.style.display = 'none'; };
+  m.onclick = e=>{ if(e.target === m) close(); };
+  document.getElementById('dmX').onclick = close;
+  document.getElementById('dmOn').onclick = async ()=>{
+    const ok = await post({op:'set_day', driver_id:did, date:date,
+      start:document.getElementById('dmS').value, end:document.getElementById('dmE').value});
+    if(ok){ close(); loadWeek(WEEK); }
+  };
+  document.getElementById('dmOff').onclick = async ()=>{
+    const ok = await post({op:'set_day', driver_id:did, date:date, off:true});
+    if(ok){ close(); loadWeek(WEEK); }
+  };
+}
+load(); setInterval(load, 15000);
+
+async function loadWeek(start){
+  const r = await jget('/api/dispatch/week' + (start ? ('?start=' + start) : ''));
+  if(!r.ok) return;
+  document.getElementById('wkPick').innerHTML = r.weeks.map(w=>
+    '<option value="'+w+'"'+(w===r.week_start?' selected':'')+'>'+((r.week_labels||{})[w]||w)+'</option>').join('');
+  WEEK = r.week_start; WEEK_DATES = r.dates || [];
+  document.getElementById('wkDue').textContent =
+    (r.range || r.label) + ' \u00b7 opens ' + r.opens_human + ', closes ' + r.due_human +
+    (r.window_open ? ' \u00b7 open now' : (r.past_due ? ' \u00b7 closed' : ' \u00b7 not open yet'));
+  const miss = document.getElementById('wkMissing');
+  miss.className = 'duebar ' + (r.missing.length ? (r.past_due ? 'late' : 'open') : 'ok');
+  miss.textContent = r.missing.length
+    ? (r.past_due ? 'No availability in from: ' : 'Still waiting on: ') + r.missing.join(', ')
+    : 'Every driver has sent this week in.';
+  miss.classList.remove('hidden');
+  document.getElementById('openDow').value = r.open_dow;
+  document.getElementById('openDate').value = r.open_date || '';
+  document.getElementById('wkBoard').innerHTML =
+    '<table class="weekgrid"><tr><th>Driver</th>' +
+    DAYS.map((d,i)=>'<th>'+d+' '+(r.dates?r.dates[i]:'')+'</th>').join('') + '<th>Sent</th></tr>' +
+    r.drivers.map(d=>'<tr><td><strong>'+d.driver+'</strong></td>' +
+      d.days.map(x=>'<td class="daycell'+(!d.submitted && x.off?' noshow':'')+'" title="Click to set hours" '+
+        'onclick="editDay('+d.driver_id+',\''+d.driver.replace(/'/g,"")+'\',\''+x.date+'\',\''+x.day+'\',\''+(x.start||'')+'\',\''+(x.end||'')+'\')">' +
+        (x.off ? '<span class="muted">off</span>'
+               : x.start+'-'+x.end+'<br>'+pill(x.status||'pending')) +
+        (x.closed ? '<br><span class="pill grey">time off</span>' : '') + '</td>').join('') +
+      '<td>' + (d.submitted ? '<span class="pill green">in</span><br><span class="muted small">' +
+        d.submitted_at.slice(0,16).replace('T',' ') + '</span>'
+        : '<span class="pill red">missing</span>') + '</td></tr>').join('') +
+    '</table>';
+}
+async function saveWindow(){
+  const r = await jpost('/api/dispatch/week-window', {
+    open_dow: +document.getElementById('openDow').value,
+    open_date: document.getElementById('openDate').value});
+  if(!r.ok){ alert(r.error || 'Could not save that.'); return; }
+  loadWeek(document.getElementById('wkPick').value);
+}
+async function clearWindow(){
+  const r = await jpost('/api/dispatch/week-window', {open_date: ''});
+  if(r.ok) loadWeek(document.getElementById('wkPick').value);
+}
+loadWeek().then(load);
+</script>{% endblock %}

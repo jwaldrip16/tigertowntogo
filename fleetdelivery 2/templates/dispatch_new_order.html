@@ -1,0 +1,319 @@
+{% extends "base.html" %}{% block body %}
+<a class="back" href="/dispatch">Back to board</a>
+<h1>{% if src %}New order from {{ src['code'] }}{% else %}Create an order{% endif %}</h1>
+{% if src %}
+<div class="issuebar">Everything below is copied from {{ src['code'] }}. Change anything you need,
+  say what went wrong, then send it to the pending queue.</div>
+{% endif %}
+<div class="cols">
+  <section>
+    <h2>Restaurant</h2>
+    <select id="rest" onchange="drawMenu()">
+      {% for r in restaurants %}<option value="{{ r['id'] }}">{{ r['name'] }}</option>{% endfor %}
+      <option value="{{ oneoff }}">Not on the list, type the pickup in</option>
+    </select>
+    <div id="pickup" class="hidden">
+      <h3>Pickup we are not carrying yet</h3>
+      <input id="puName" placeholder="Place name, e.g. Mama Mocha's">
+      <input id="puAddr" placeholder="Pickup address, street, city, state, ZIP">
+      <div class="row gap">
+        <input id="puPhone" placeholder="Pickup phone, e.g. 3345551234">
+        <button class="btn small" onclick="validate()">Price it</button>
+      </div>
+      <p class="muted small">The mileage fee prices off this address, the driver navigates to it
+        and calls this number. Add the food as custom items on the right.</p>
+    </div>
+    <div id="menu"></div>
+  </section>
+  <aside class="panel">
+    <h2>Order</h2>
+    <div id="cart"><p class="muted">Nothing added yet.</p></div>
+    <div class="customline">
+      <h3>Add a custom item</h3>
+      <p class="muted small">Works for any pickup, listed or typed in.</p>
+      <input id="cName" placeholder="Item name, e.g. off-menu catering tray">
+      <div class="row gap">
+        <input id="cPrice" type="number" step="0.01" min="0" placeholder="Price $">
+        <input id="cFee" type="number" step="0.01" min="0" placeholder="Item fee $">
+        <input id="cQty" type="number" min="1" value="1" placeholder="Qty">
+      </div>
+      <input id="cNote" placeholder="Note for the kitchen (optional)">
+      <button class="btn tiny" onclick="addCustom()">Add custom item</button>
+      <p class="muted small">The item fee is charged on top of the price, per unit, and shows as
+        a custom item fee on the order.</p>
+    </div>
+    {% if src %}
+    <h3>Why is this going out again?{% if request.args.get('redo') %}
+      <span class="muted small">required</span>{% endif %}</h3>
+    <select id="issue">
+      <option value="">{% if request.args.get('redo') %}Pick a reason{% else %}Not a redo, just a new order{% endif %}</option>
+      {% for r in reasons %}<option value="{{ r['key'] }}">{{ r['label'] }}</option>{% endfor %}
+    </select>
+    <input id="issueNote" placeholder="Detail, e.g. no side salad in the bag">
+    <h3>Send the new order to</h3>
+    <select id="sendTo">
+      {% if src['driver_id'] %}<option value="driver">{{ src['driver'] }} (original driver)</option>{% endif %}
+      <option value="queue">The queue (next driver up)</option>
+    </select>
+    <div class="muted small">A card order still waits until you mark it paid, then goes where you picked.</div>
+    {% endif %}
+    <h3>Customer</h3>
+    <input id="ref" placeholder="Their order number (optional)">
+    <label>Tag</label>
+    <select id="token">
+      <option value="">Match how it came in</option>
+      {% for t in tokens %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
+    </select>
+    <div class="muted small" id="refNote">Whatever the shop calls this order. Ours is assigned on its own.</div>
+    <input id="name" placeholder="Customer name">
+    <input id="phone" placeholder="Phone">
+  <label>How did this order come in?</label>
+  <select id="source"><option value="call_in">Call-in (phone)</option><option value="dispatch_online">Placed online by dispatch</option></select>
+    <textarea id="address" rows="2" placeholder="Street, city, state, ZIP"></textarea>
+    <input id="note" placeholder="Gate code, apartment, door instructions">
+    <button class="btn" onclick="validate()">Validate address and price delivery</button>
+    <div id="quote" class="quote"></div>
+    <div id="omap" class="minimap hidden"></div>
+    <div id="omapNote" class="muted small"></div>
+    <h3>Fee and tip</h3>
+    <div class="row">
+      <input id="feeOverride" type="number" step="0.01" placeholder="Fee override $" style="max-width:130px">
+      <input id="tip" type="number" step="0.50" placeholder="Tip $" style="max-width:110px" oninput="totals()">
+    </div>
+    <div class="totals" id="totals"></div>
+    <h3>When</h3>
+    <div class="row">
+      <select id="whenMode" onchange="whenToggle()" style="max-width:170px">
+        <option value="now">As soon as possible</option>
+        <option value="later">Future order</option>
+      </select>
+      <input id="whenAt" type="datetime-local" class="hidden" style="max-width:220px">
+    </div>
+    <div class="muted small" id="whenNote"></div>
+    <label class="switch" style="display:flex;gap:8px;align-items:center;margin:8px 0">
+      <input type="checkbox" id="cashOrder"> <b>Cash order</b>
+      <span class="muted small">the driver collects at the door, no card needed</span></label>
+    <button class="btn primary" id="place" disabled onclick="placeOrder()">Create order</button>
+    <p class="muted small">Dispatcher orders go through even when the kitchen is closed or the
+      customer's number is blocked.</p>
+  </aside>
+</div>
+{% endblock %}
+{% block scripts %}
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="/static/cardbox.js"></script>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const MENUS = {{ menus | tojson }};
+let cart = [], geo = null, feeCents = 0, miles = 0;
+const SRC = {{ src|tojson if src else 'null' }};
+const ONEOFF = String({{ oneoff|tojson }});
+function typedPickup(){ return document.getElementById('rest').value === ONEOFF; }
+function pickupPayload(){
+  if (!typedPickup()) return {};
+  return {pickup_name: (document.getElementById('puName').value||'').trim(),
+          pickup_address: (document.getElementById('puAddr').value||'').trim(),
+          pickup_phone: (document.getElementById('puPhone').value||'').trim()};
+}
+function drawMenu(){
+  const rid = document.getElementById('rest').value;
+  const one = typedPickup();
+  document.getElementById('pickup').classList.toggle('hidden', !one);
+  document.getElementById('menu').classList.toggle('hidden', one);
+  cart = [];
+  document.getElementById('menu').innerHTML = (MENUS[rid]||[]).map(i=>
+    '<div class="row"><div><strong>'+i.name+'</strong></div><div class="right">'+
+    '<span>'+money(i.price_cents)+'</span> <button class="btn small" onclick="addItem('+i.id+
+    ',\'' + '\'+0+\'' + '\',0)">Add</button></div></div>').join('');
+  rebind(rid);
+  draw();
+}
+function rebind(rid){
+  const items = MENUS[rid]||[];
+  document.getElementById('menu').innerHTML = items.map((i,n)=>
+    '<div class="row"><div><strong>'+i.name+'</strong><div class="muted small">'+
+    (i.description||'')+'</div></div><div class="right"><span>'+money(i.price_cents)+
+    '</span> <button class="btn small" data-n="'+n+'">Add</button></div></div>').join('');
+  document.querySelectorAll('#menu button[data-n]').forEach(b=>{
+    b.onclick = ()=>{ const i = items[parseInt(b.dataset.n,10)];
+      const f = cart.find(c=>c.id===i.id);
+      if (f) f.qty++; else cart.push({id:i.id,menu_item_id:i.id,name:i.name,price_cents:i.price_cents,qty:1,fee_cents:0});
+      draw(); };
+  });
+}
+function bump(id,d){
+  const f = cart.find(c=>c.id===id); if(!f) return;
+  f.qty += d; if (f.qty<=0) cart = cart.filter(c=>c.id!==id);
+  draw();
+}
+function subtotal(){ return cart.reduce((s,c)=>s+c.price_cents*c.qty,0); }
+function itemFees(){ return cart.reduce((s,c)=>s+(c.fee_cents||0)*c.qty,0); }
+function addCustom(){
+  const name = (document.getElementById('cName').value||'').trim();
+  const price = Math.round(parseFloat(document.getElementById('cPrice').value||'0')*100);
+  const fee = Math.round(parseFloat(document.getElementById('cFee').value||'0')*100);
+  const qty = parseInt(document.getElementById('cQty').value||'1',10);
+  if(!name){ alert('Give the custom item a name.'); return; }
+  if(!(price>=0) || !(qty>0)){ alert('Check the price and quantity.'); return; }
+  cart.push({id:'c'+Date.now(), menu_item_id:null, custom:true, name:name, price_cents:price,
+             fee_cents:Math.max(0,fee||0), qty:qty,
+             note:(document.getElementById('cNote').value||'').trim()});
+  ['cName','cPrice','cFee','cNote'].forEach(x=>document.getElementById(x).value='');
+  document.getElementById('cQty').value='1';
+  draw();
+}
+function draw(){
+  const el = document.getElementById('cart');
+  el.innerHTML = cart.length ? cart.map(c=>'<div class="row"><span>'+c.name+'</span><span>'+
+    '<button class="btn tiny" onclick="bump(\''+c.id+'\',-1)">-</button> '+c.qty+
+    ' <button class="btn tiny" onclick="bump(\''+c.id+'\',1)">+</button> '+
+    money((c.price_cents+(c.fee_cents||0))*c.qty)+
+    '</span></div>').join('') : '<p class="muted">Nothing added yet.</p>';
+  totals();
+}
+function tipCents(){ return Math.max(0, Math.round((parseFloat(document.getElementById('tip').value||'0'))*100)); }
+function feeNow(){
+  const o = document.getElementById('feeOverride').value;
+  return o === '' ? feeCents : Math.max(0, Math.round(parseFloat(o)*100));
+}
+function totals(){
+  const sub = subtotal(), tax = Math.round(sub*{{ tax_bp }}/10000), svc = Math.round(sub*{{ service_bp }}/10000), t = document.getElementById('totals');
+  if(!sub){ t.innerHTML=''; document.getElementById('place').disabled = true; return; }
+  const ifee = itemFees();
+  t.innerHTML = '<div class="row"><span>Subtotal</span><span>'+money(sub)+'</span></div>'+
+    '<div class="row"><span>Delivery ('+miles+' mi)</span><span>'+money(feeNow())+'</span></div>'+
+    (ifee ? '<div class="row"><span>Custom item fees</span><span>'+money(ifee)+'</span></div>' : '')+
+    (svc ? '<div class="row"><span>Service fee</span><span>'+money(svc)+'</span></div>' : '')+
+    '<div class="row"><span>Tax</span><span>'+money(tax)+'</span></div>'+
+    '<div class="row"><span>Tip</span><span>'+money(tipCents())+'</span></div>'+
+    '<div class="row total"><span>Total</span><span>'+money(sub+feeNow()+ifee+tax+svc+tipCents())+'</span></div>';
+  document.getElementById('place').disabled = !cart.length;
+}
+async function validate(){
+  const res = await jpost('/api/validate-address', Object.assign(
+      {address: document.getElementById('address').value,
+       restaurant_id: parseInt(document.getElementById('rest').value,10)}, pickupPayload()));
+  const q = document.getElementById('quote');
+  if(!res.ok){ geo=null;
+    q.innerHTML = '<span class="pill red">'+(res.error||'Could not validate')+'</span>'+
+      '<div class="muted small">You can still place it. It lands on the board as pending address approval.</div>';
+    totals(); return; }
+  geo = res; miles = res.miles; feeCents = res.fee_cents;
+  q.innerHTML = '<div>'+res.formatted+'</div><div class="muted small">'+res.miles+' mi &middot; fee '+res.fee+'</div>';
+  showOnMap(res);
+  totals();
+}
+async function placeOrder(){
+  if (typedPickup()){
+    const pn=(document.getElementById('puName').value||'').trim();
+    const pa=(document.getElementById('puAddr').value||'').trim();
+    if(!pn || !pa){ alert('Type the pickup name and address.'); return; }
+  }
+  let scheduled_for = '';
+  if (document.getElementById('whenMode').value === 'later'){
+    scheduled_for = document.getElementById('whenAt').value;
+    if (!scheduled_for){ alert('Pick the date and time for the future order.'); return; }
+  }
+  const res = await jpost('/checkout', Object.assign(pickupPayload(), {
+    scheduled_for: scheduled_for,
+    restaurant_id: parseInt(document.getElementById('rest').value,10),
+    ref: (document.getElementById('ref') ? document.getElementById('ref').value : ''),
+    token: (document.getElementById('token') ? document.getElementById('token').value : ''),
+    customer_name: document.getElementById('name').value,
+    customer_phone: document.getElementById('phone').value,
+    address: document.getElementById('address').value,
+    note: document.getElementById('note').value,
+    items: cart, tip_cents: tipCents(),
+    fee_cents_override: (document.getElementById('feeOverride').value === '' ? null : feeNow()),
+    from_order_id: SRC ? SRC.id : null,
+    issue: SRC && document.getElementById('issue') ? document.getElementById('issue').value : '',
+    issue_note: SRC && document.getElementById('issueNote') ? document.getElementById('issueNote').value : '',
+    send_to: SRC && document.getElementById('sendTo') ? document.getElementById('sendTo').value : '',
+    placed_by: 'dispatch',
+    cash: document.getElementById('cashOrder').checked,
+    source: document.getElementById('source').value}));
+  if(!res.ok){ alert(res.error); return; }
+  if(res.send_note && res.cash) alert(res.code + ': ' + res.send_note);
+  if(res.future_note) alert(res.code + ': ' + res.future_note + ' It waits on the Future orders tab until then.');
+  if(!res.cash){
+    // card order: type the card, copy it to your terminal, mark paid. Nothing is saved.
+    ffCard.open({id:res.order_id, code:res.code, amount:res.total, closeLabel:'Close and go to the board',
+                 onClose:function(){ window.location = '/dispatch'; }});
+    return;
+  }
+  window.location = '/dispatch';
+}
+function whenToggle(){
+  const later = document.getElementById('whenMode').value === 'later';
+  const at = document.getElementById('whenAt');
+  at.classList.toggle('hidden', !later);
+  if (later && !at.value){
+    const d = new Date(Date.now() + 60*60000); d.setMinutes(Math.ceil(d.getMinutes()/15)*15, 0, 0);
+    const p = n => String(n).padStart(2,'0');
+    at.value = d.getFullYear()+'-'+p(d.getMonth()+1)+'-'+p(d.getDate())+'T'+p(d.getHours())+':'+p(d.getMinutes());
+  }
+  document.getElementById('whenNote').textContent = later
+    ? 'Delivery time. It stays off the kitchen and driver screens until close to then, even if the restaurant is closed now.' : '';
+}
+let OMAP = null, OLAYER = null;
+function prefill(){
+  if(!SRC) return;
+  try {
+    const qs = new URLSearchParams(window.location.search);
+    if (qs.get('issue') && document.getElementById('issue')) document.getElementById('issue').value = qs.get('issue');
+    if (qs.get('issue_note') && document.getElementById('issueNote')) document.getElementById('issueNote').value = qs.get('issue_note');
+    if (qs.get('send_to') && document.getElementById('sendTo')) document.getElementById('sendTo').value = qs.get('send_to');
+  } catch(e) {}
+  document.getElementById('rest').value = SRC.restaurant_id;
+  drawMenu();
+  cart = SRC.items.map((i,x)=>Object.assign({}, i, {id: i.menu_item_id || ('c'+x)}));
+  document.getElementById('name').value = SRC.customer_name || '';
+  document.getElementById('phone').value = SRC.customer_phone || '';
+  document.getElementById('address').value = SRC.address || '';
+  document.getElementById('note').value = SRC.address_note || '';
+  const tip = document.getElementById('tip');
+  if(tip) tip.value = ((SRC.tip_cents||0)/100).toFixed(2);
+  draw();
+  validate();
+}
+window.addEventListener('load', prefill);
+function pinIcon(color, letter){
+  return L.divIcon({className:'', iconSize:[24,24], html:
+    '<div style="width:24px;height:24px;border-radius:12px;background:'+color+
+    ';color:#fff;font:700 11px sans-serif;display:flex;align-items:center;justify-content:center;'+
+    'border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)">'+letter+'</div>'});
+}
+function showOnMap(res){
+  const box = document.getElementById('omap');
+  box.classList.remove('hidden');
+  if(!OMAP){
+    OMAP = L.map('omap').setView([res.lat, res.lng], 13);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      {maxZoom:19, attribution:'&copy; OpenStreetMap'}).addTo(OMAP);
+    OLAYER = L.layerGroup().addTo(OMAP);
+  }
+  OLAYER.clearLayers();
+  const pts = [[res.lat, res.lng]];
+  L.marker([res.lat, res.lng], {icon: pinIcon('#1e58c8','C')}).addTo(OLAYER)
+    .bindPopup('<strong>Delivery</strong><br>'+res.formatted).openPopup();
+  if(res.restaurant_lat && res.restaurant_lng){
+    pts.push([res.restaurant_lat, res.restaurant_lng]);
+    L.marker([res.restaurant_lat, res.restaurant_lng], {icon: pinIcon('#bf7e0a','R')}).addTo(OLAYER)
+      .bindPopup('<strong>'+(res.restaurant||'Restaurant')+'</strong>');
+    L.polyline(pts, {color:'#1e58c8', weight:3, opacity:.6, dashArray:'6 6'}).addTo(OLAYER);
+  }
+  setTimeout(function(){
+    OMAP.invalidateSize();
+    if(pts.length > 1) OMAP.fitBounds(pts, {padding:[35,35], maxZoom:14});
+    else OMAP.setView(pts[0], 14);
+  }, 60);
+  document.getElementById('omapNote').innerHTML =
+    'Pin dropped on the validated address. ' +
+    '<a href="https://www.google.com/maps/dir/?api=1&destination=' + res.lat + ',' + res.lng +
+    '" target="_blank">Open the drive in Maps</a>' +
+    (res.restaurant ? (' &middot; ' + res.miles + ' mi from ' + res.restaurant) : '');
+}
+drawMenu();
+
+attachAddressPicker('address', ()=>validate());
+</script>{% endblock %}
