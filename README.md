@@ -406,3 +406,10 @@ Customers type their card at checkout, and it's checked the same way as the disp
 
 The card is encrypted on the server and only dispatch can open it (each opening is logged). When the order is marked paid, the security code is deleted and the name, number, expiration and ZIP stay encrypted so dispatch can click **View card** on the order later, even after it's complete. Paid cards are deleted after 30 days (`CARD_KEEP_DAYS`), unpaid cards after 24 hours (`CARD_HOLD_HOURS`), and a cancelled order's card right away. A card typed into the dispatch card box is kept when you close the box. Set a `CARD_KEY` variable (or at least `SECRET_KEY`) on your host and don't change it, or cards still waiting can't be read. Keeping card numbers on your server, even briefly, puts you under PCI card-security rules. Ask your card processor which self-assessment applies to you.
 
+
+
+## Card payments and the restaurant
+- A card order does not reach the restaurant or a driver until dispatch marks it paid. A timer you set before that is saved and starts when it is paid. Mark ready is blocked until then.
+- Cash orders go straight to the restaurant. Switching an order to cash releases it; switching back to card pulls it back if the kitchen has not started.
+- If the card will not go through, use "Card failed: cancel" on the order or "Card would not go through" in the card box. The order is cancelled and the card is deleted.
+- An unpaid card order left for CARD_HOLD_HOURS (24 by default) is cancelled automatically.

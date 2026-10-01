@@ -748,9 +748,7 @@ def auto_assign():
                   else "'preparing','ready'")
         o = con.execute("""SELECT * FROM orders
                            WHERE driver_id IS NULL
-                             AND (dispatch_status IN ('queued','held')
-                                  OR (dispatch_status='awaiting_payment'
-                                      AND kitchen_status IN ('preparing','ready')))
+                             AND dispatch_status IN ('queued','held')
                              AND kitchen_status IN (""" + stages + """)
                            ORDER BY created_at ASC LIMIT 1""").fetchone()
         if not o:
@@ -1260,11 +1258,47 @@ def keep_card_after_paid(order_id):
     db().execute("UPDATE card_vault SET blob=?, paid_at=? WHERE order_id=?",
                  (_fernet().encrypt(json.dumps(card).encode()).decode(), now(), order_id))
 
+def cancel_unpaid(o, reason, who="dispatch"):
+    """The card could not be charged: cancel the order and forget the card."""
+    db().execute("""UPDATE orders SET dispatch_status='cancelled', payment_status='declined',
+                    kitchen_status='waiting', hold_reason=?, stack_seq=NULL,
+                    delivered_at=COALESCE(delivered_at, ?) WHERE id=?""", (reason, now(), o["id"]))
+    if o["driver_id"]:
+        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                     (o["driver_id"], "system",
+                      "Order " + o["code"] + " was cancelled, the card could not be charged.", now()))
+    db().execute("DELETE FROM card_vault WHERE order_id=?", (o["id"],))
+    db().commit()
+    log("cancel", o["code"] + " cancelled by " + who + ": " + reason)
+
+@app.post("/api/order/payment-failed")
+def api_payment_failed():
+    """Dispatch could not get the card to go through."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(force=True) or {}
+    o = db().execute("SELECT * FROM orders WHERE id=?", (data.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    if o["payment_status"] == "paid":
+        return jsonify({"ok": False, "error": o["code"] + " is already marked paid. Refund it instead."}), 400
+    if o["dispatch_status"] == "cancelled":
+        return jsonify({"ok": True, "already": True})
+    note = (data.get("note") or "").strip()[:120]
+    who = dispatcher_row()
+    cancel_unpaid(o, "card could not be charged" + (": " + note if note else ""),
+                  who["name"] if who else "dispatch")
+    auto_assign()
+    return jsonify({"ok": True})
+
 def purge_cards():
     """Unpaid cards go after CARD_HOLD_HOURS, paid ones after CARD_KEEP_DAYS,
     and a cancelled order's card right away."""
     hold = (dt.datetime.now() - dt.timedelta(hours=CARD_HOLD_HOURS)).isoformat(timespec="seconds")
     keep = (dt.datetime.now() - dt.timedelta(days=CARD_KEEP_DAYS)).isoformat(timespec="seconds")
+    for o in db().execute("""SELECT * FROM orders WHERE dispatch_status='awaiting_payment'
+                             AND created_at < ?""", (hold,)).fetchall():
+        cancel_unpaid(o, "never paid, cancelled after " + str(int(CARD_HOLD_HOURS)) + " hours", "the system")
     db().execute("""DELETE FROM card_vault WHERE
                     (paid_at IS NULL AND created_at < ?)
                     OR (paid_at IS NOT NULL AND paid_at < ?)
@@ -1450,6 +1484,11 @@ def checkout():
                         "Restaurants cannot place delivery orders. Call dispatch."}), 403
     kitchen_status = "pending" if address_ok else "waiting"
     hold_reason = "waiting on kitchen" if address_ok else "address needs dispatch approval"
+    dstat = "held"
+    if not (bool(payload.get("cash")) and placed_by == "dispatch" and bool(dispatcher_required())):
+        # Card order: the kitchen never sees it until dispatch marks the card paid.
+        kitchen_status, dstat = "waiting", "awaiting_payment"
+        hold_reason = "card on file, run it" if card else "waiting on card"
     code = "FF" + dt.datetime.now().strftime("%H%M%S") + str(secrets.randbelow(900) + 100)
     while db().execute("SELECT 1 FROM orders WHERE code=?", (code,)).fetchone():
         code = "FF" + dt.datetime.now().strftime("%H%M%S") + str(secrets.randbelow(900) + 100)
@@ -1458,14 +1497,14 @@ def checkout():
         tip_cents,total_cents,miles,issue,issue_note,cloned_from,address_ok,source,ref_code,token,
         kitchen_status,dispatch_status,hold_reason,placed_by,created_at,
         pickup_name,pickup_address,pickup_phone,pickup_lat,pickup_lng)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'held',?,?,?,?,?,?,?,?)""",
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (code, r["id"], payload["customer_name"], payload["customer_phone"], formatted,
          payload.get("note", ""), payload.get("dispatch_note", ""), lat, lng,
          json.dumps(items), subtotal, fee, ifee, tax, tip, total, miles,
          issue_label, issue_note, from_code, address_ok, src,
          clean_ref(payload.get("ref")) if dispatcher_required() else None,
          (clean_token(payload.get("token")) or token_from_source(src)),
-         kitchen_status, hold_reason, placed_by, now(),
+         kitchen_status, dstat, hold_reason, placed_by, now(),
          pu_name or None, pu_addr if pu_name else None, pu_phone if pu_name else None,
          pu_lat if pu_name else None, pu_lng if pu_name else None))
     db().commit()
@@ -1735,6 +1774,9 @@ def api_order_status():
             return jsonify({"ok": False, "error": "not your order"}), 403
     k = data.get("kitchen_status")
     d = data.get("dispatch_status")
+    if k in ("pending", "preparing", "ready") and o["dispatch_status"] == "awaiting_payment":
+        return jsonify({"ok": False, "error": "Mark the card paid first. The restaurant gets this "
+                        "order the moment it is paid."}), 400
     if k in ("pending", "preparing", "ready"):
         if k == "preparing":
             mins = int(data.get("prep_minutes") or 15)
@@ -1814,6 +1856,11 @@ def api_order_cash():
         log("payment", o["code"] + " switched to cash by dispatch")
     else:
         db().execute("UPDATE orders SET pay_method=NULL, payment_status='unpaid' WHERE id=?", (o["id"],))
+        if o["kitchen_status"] in ("pending", "waiting") and o["dispatch_status"] in ("held", "queued"):
+            # Kitchen has not started it: pull it back until the card is run.
+            db().execute("""UPDATE orders SET kitchen_status='waiting', dispatch_status='awaiting_payment',
+                            hold_reason='waiting on card', driver_id=NULL, stack_seq=NULL WHERE id=?""",
+                         (o["id"],))
         log("payment", o["code"] + " switched back to card by dispatch")
     db().commit()
     auto_assign()
@@ -3006,9 +3053,13 @@ def api_hold():
         return jsonify({"ok": False, "error":
                         "That order is already picked up and en route. "
                         "Complete it or send it back to the queue first."}), 400
-    db().execute("""UPDATE orders SET dispatch_status='held', kitchen_status='pending',
-                    hold_reason=?, driver_id=NULL, stack_seq=NULL WHERE id=?""",
-                 (data.get("reason", "held by dispatch"), oid))
+    if o["dispatch_status"] == "awaiting_payment" or o["payment_status"] == "unpaid":
+        db().execute("""UPDATE orders SET dispatch_status='awaiting_payment', kitchen_status='waiting',
+                        driver_id=NULL, stack_seq=NULL WHERE id=?""", (oid,))
+    else:
+        db().execute("""UPDATE orders SET dispatch_status='held', kitchen_status='pending',
+                        hold_reason=?, driver_id=NULL, stack_seq=NULL WHERE id=?""",
+                     (data.get("reason", "held by dispatch"), oid))
     if had:
         rest = db().execute("""SELECT id FROM orders WHERE driver_id=? AND dispatch_status
                                IN ('assigned','received','at_restaurant','enroute')
@@ -3442,6 +3493,7 @@ def api_rest_orders():
     # if that gets undone (status put back to received or at the restaurant).
     cutoff = (dt.datetime.now() - dt.timedelta(hours=14)).isoformat(timespec="seconds")
     rows = db().execute("""SELECT * FROM orders WHERE restaurant_id=? AND kitchen_status!='waiting'
+                           AND dispatch_status!='awaiting_payment'
                            AND (dispatch_status NOT IN ('delivered','cancelled') OR created_at>=?)
                            ORDER BY created_at ASC""", (rid, cutoff)).fetchall()
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (rid,)).fetchone()

@@ -533,6 +533,7 @@ function payPill(o){
       (o.pay_method?' '+o.pay_method.replace('card_','card ').replace('_',' '):'')+'</span>';
   else if(o.payment_status === 'part_refunded') s = '<span class="pill amber">refunded '+o.refunded+'</span>';
   else if(o.payment_status === 'refunded') s = '<span class="pill grey">fully refunded</span>';
+  else if(o.payment_status === 'declined') s = '<span class="pill red">card failed, cancelled</span>';
   else if(o.cash) s = '<span class="pill amber">cash: collect '+o.total+'</span>';
   else if(o.card_on_file) s = '<span class="pill amber">card on file, run it</span>';
   else s = '<span class="pill red">card not run</span>';
@@ -540,6 +541,9 @@ function payPill(o){
   else if(o.balance_cents < 0) s += ' <span class="pill amber">overcharged '+o.balance+'</span>';
   if(o.tip_sig) s += ' <span class="pill green">tip signed</span>';
   return s ? ' '+s : '';
+}
+async function payFailed(id, code){
+  if(await window.ffFailPay(id, code)) board(true);
 }
 function payButtons(o){
   let h = '';
@@ -553,6 +557,8 @@ function payButtons(o){
     h += '<label class="switch tiny" title="Cash order: the driver collects at the door">'+
          '<input type="checkbox" '+(o.cash?'checked':'')+' onchange="setCash('+o.id+',this.checked)"> Cash</label>';
     h += '<button class="btn tiny" onclick="keyed('+o.id+')">Mark paid</button>';
+    if(!o.cash && o.dispatch_status !== 'cancelled' && o.payment_status !== 'declined')
+      h += '<button class="btn tiny" style="color:#c0392b" onclick="payFailed('+o.id+',\''+o.code+'\')">Card failed: cancel</button>';
   }
   if(o.paid && o.balance_cents > 0 && !o.cash){
     h += '<button class="btn tiny primary" onclick="cardFor('+o.id+',\''+o.code+'\',\''+o.balance+'\')">Card for '+o.balance+'</button>';
@@ -708,11 +714,14 @@ function orderCard(o, opts, drivers){
 }
 async function kitchen(id, st){
   const mins = document.getElementById('m'+id).value;
-  await jpost('/api/order/status', {order_id:id, kitchen_status:st, prep_minutes:mins});
+  const res = await jpost('/api/order/status', {order_id:id, kitchen_status:st, prep_minutes:mins});
+  if(res && res.ok === false && res.error) alert(res.error);
   board(true);
 }
 async function setTimer(id){
-  await jpost('/api/order/timer', {order_id:id, minutes:document.getElementById('m'+id).value});
+  const res = await jpost('/api/order/timer', {order_id:id, minutes:document.getElementById('m'+id).value});
+  if(res && res.ok === false && res.error) alert(res.error);
+  else if(res && res.timer_seconds === null) alert('Saved '+document.getElementById('m'+id).value+' minutes. The restaurant gets the order and the timer starts once the card is marked paid.');
   document.activeElement.blur();
   board(true);
 }

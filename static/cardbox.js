@@ -167,6 +167,26 @@
     delete DRAFTS[ORDER.id]; ORDER.saved = true;
     close();
   }
+  async function failPay(){
+    if(!ORDER || !ORDER.id){ close(); return; }
+    const note = prompt('The card would not go through. Cancel '+(ORDER.code||'this order')+'?\nOptional reason (declined, wrong number, customer hung up):', 'declined');
+    if(note === null) return;
+    const r = await fetch('/api/order/payment-failed', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({order_id: ORDER.id, note: note})});
+    let res = {}; try{ res = await r.json(); }catch(e){}
+    if(!r.ok || !res.ok){ alert(res.error || 'That did not save.'); return; }
+    delete DRAFTS[ORDER.id]; ORDER.saved = true;
+    close();
+  }
+  window.ffFailPay = async function(id, code){
+    const note = prompt('The card would not go through. Cancel '+code+'?\nOptional reason:', 'declined');
+    if(note === null) return false;
+    const r = await fetch('/api/order/payment-failed', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({order_id: id, note: note})});
+    let res = {}; try{ res = await r.json(); }catch(e){}
+    if(!r.ok || !res.ok){ alert(res.error || 'That did not save.'); return false; }
+    delete DRAFTS[id]; return true;
+  };
   function field(id, label, attrs, copyLabel){
     return '<label class="small" style="display:block;margin-top:8px">'+label+'</label>'+
       '<div style="display:flex;gap:6px"><input id="'+id+'" '+attrs+' autocomplete="off" style="flex:1">'+
@@ -197,7 +217,8 @@
         '<button type="button" class="btn" id="cbClear">Clear</button></div>'+
         (ORDER.id ? '<hr><label class="small">Approval or reference number from your terminal (optional)</label>'+
            '<input id="cbRef" type="text" autocomplete="off">'+
-           '<button type="button" class="btn go" id="cbPaid" style="margin-top:8px;width:100%">It went through: mark '+(ORDER.code||'order')+' paid</button>' : '')+
+           '<button type="button" class="btn go" id="cbPaid" style="margin-top:8px;width:100%">It went through: mark '+(ORDER.code||'order')+' paid</button>'+
+           (ORDER.viewOnly ? '' : '<button type="button" class="btn" id="cbFail" style="margin-top:8px;width:100%;color:#c0392b">Card would not go through: cancel '+(ORDER.code||'order')+'</button>') : '')+
         '<button type="button" class="btn" id="cbClose" style="margin-top:8px;width:100%">'+(ORDER.closeLabel || 'Close and clear')+'</button></form>';
       document.body.appendChild(box);
       box.querySelectorAll('input').forEach(el => {
@@ -219,6 +240,7 @@
       document.getElementById('cbClear').onclick = wipe;
       document.getElementById('cbClose').onclick = close;
       const paid = document.getElementById('cbPaid'); if(paid) paid.onclick = markPaid;
+      const fl = document.getElementById('cbFail'); if(fl) fl.onclick = failPay;
       if(!ORDER.prefill && ORDER.id && DRAFTS[ORDER.id]) ORDER.prefill = DRAFTS[ORDER.id];
       if(ORDER.viewOnly){
         const pb = document.getElementById('cbPaid'); if(pb) pb.style.display = 'none';
