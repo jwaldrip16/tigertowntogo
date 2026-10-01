@@ -1,5 +1,5 @@
-// Tiger Town To Go service worker: shell cache so the app opens offline, live data always from network.
-const SHELL = 'tigertowntogo-shell-v1';
+// Fleet Delivery service worker: shell cache so the app opens offline, live data always from network.
+const SHELL = 'fleetdelivery-shell-v2';
 const FILES = ['/static/style.css'];
 self.addEventListener('install', e => {
   e.waitUntil(caches.open(SHELL).then(c => c.addAll(FILES)).then(() => self.skipWaiting()));

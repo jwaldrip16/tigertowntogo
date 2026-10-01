@@ -30,6 +30,22 @@
       <input id="tipCustom" type="number" min="0" step="0.50" placeholder="$ custom"
              oninput="customTip()" style="max-width:120px">
     </div>
+    <h3>Card</h3>
+    <form id="custCard" autocomplete="off" onsubmit="return false">
+      <input id="ccName" placeholder="Name on card" autocomplete="cc-name">
+      <div id="ccNameErr" class="small cc-err"></div>
+      <input id="ccNum" placeholder="Card number" inputmode="numeric" autocomplete="cc-number">
+      <div id="ccNumErr" class="small cc-err"></div>
+      <div style="display:flex;gap:8px">
+        <div style="flex:1"><input id="ccExp" placeholder="MM/YY" inputmode="numeric" autocomplete="cc-exp">
+          <div id="ccExpErr" class="small cc-err"></div></div>
+        <div style="flex:1"><input id="ccCvc" placeholder="CVC" inputmode="numeric" type="password" maxlength="3" autocomplete="cc-csc">
+          <div id="ccCvcErr" class="small cc-err"></div></div>
+      </div>
+      <input id="ccZip" placeholder="Billing ZIP" inputmode="numeric" maxlength="10" autocomplete="postal-code">
+      <div id="ccZipErr" class="small cc-err"></div>
+      <div id="ccStatus" class="small muted"></div>
+    </form>
     <div class="totals" id="totals"></div>
     <button class="btn primary" id="place" disabled onclick="placeOrder()">Place order</button>
     <p class="muted small">Delivery fee: {{ base_fee }} for the first {{ base_miles }} miles,
@@ -37,7 +53,9 @@
   </aside>
 </div>
 {% endblock %}
-{% block scripts %}<script>
+{% block scripts %}<script src="/static/cardbox.js"></script>
+<style>.cc-err{color:#c0392b;min-height:1em}</style>
+<script>
 const RID = {{ r['id'] }};
 let cart = [], geo = null, feeCents = 0, miles = 0, tipCents = 0, tipPct = null;
 let MENU = [];
@@ -168,26 +186,47 @@ async function validate(){
   q.innerHTML = 'Verified: '+res.formatted+'<br>'+res.miles+' miles from the restaurant, delivery '+res.fee;
   totals();
 }
+const CC = {name:'ccName', number:'ccNum', exp:'ccExp', cvc:'ccCvc', zip:'ccZip'};
+function ccForm(){ const f = {}; for(const k in CC) f[k] = document.getElementById(CC[k]).value; return f; }
+function ccCheck(showAll){
+  const num = document.getElementById('ccNum');
+  const d = num.value.replace(/\D/g,'').slice(0,19);
+  const g = ffCard.groups(d); if(num.value !== g) num.value = g;
+  const ex = document.getElementById('ccExp');
+  const e = ex.value.replace(/\D/g,'').slice(0,4);
+  const ef = e.length > 2 ? e.slice(0,2)+'/'+e.slice(2) : e; if(ex.value !== ef) ex.value = ef;
+  document.getElementById('ccCvc').maxLength = ffCard.brand(d) === 'Amex' ? 4 : 3;
+  const r = ffCard.validate(ccForm());
+  for(const k in CC){
+    const el = document.getElementById(CC[k]);
+    const show = r.errors[k] && (showAll || el.dataset.touched);
+    document.getElementById(CC[k]+'Err').textContent = show ? r.errors[k] : '';
+    el.style.borderColor = show ? '#c0392b' : (el.value && !r.errors[k] ? '#2e8b57' : '');
+  }
+  document.getElementById('ccStatus').textContent = r.ok ? (r.brand ? r.brand+' ' : '')+'card looks good.' : '';
+  return r;
+}
+for(const k in CC){
+  const el = document.getElementById(CC[k]);
+  el.addEventListener('input', ()=>ccCheck(false));
+  el.addEventListener('blur', function(){ this.dataset.touched = '1'; ccCheck(false); });
+}
 async function placeOrder(){
+  const cc = ccCheck(true);
+  if(!cc.ok){ document.getElementById('custCard').scrollIntoView({behavior:'smooth'}); alert('Please fix the card details.'); return; }
   const res = await jpost('/checkout', {
+    card: ccForm(),
     restaurant_id: RID, customer_name: document.getElementById('name').value,
     customer_phone: document.getElementById('phone').value,
     address: document.getElementById('address').value,
     note: document.getElementById('note').value, items: cart, tip_cents: tipCents});
   if(!res.ok){ alert(res.error); return; }
-  if(res.pay_url){
-    try{
-      const seen = JSON.parse(localStorage.getItem('ffOrders')||'[]');
-      seen.unshift(res.code); localStorage.setItem('ffOrders', JSON.stringify(seen.slice(0,10)));
-    }catch(e){}
-    window.location = res.pay_url;      // Stripe's card page: the card never touches our server
-    return;
-  }
   try{
     const seen = JSON.parse(localStorage.getItem('ffOrders')||'[]');
     seen.unshift(res.code); localStorage.setItem('ffOrders', JSON.stringify(seen.slice(0,10)));
   }catch(e){}
-  if(res.address_ok === false) alert(res.message);
+  for(const k in CC) document.getElementById(CC[k]).value = '';
+  if(res.message) alert(res.message);
   window.location = '/track/' + res.code;
 }
 attachAddressPicker('address', ()=>validate());

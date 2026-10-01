@@ -275,8 +275,8 @@ async function stage(id, st, code){
   ffSound.stopLoop();
   if (st === 'delivered'){
     const o = (LAST_STACK||[]).filter(function(x){ return x.id === id; })[0];
-    // no tip online and the card is still on file: ask at the door and take a signature
-    if (o && o.cards_on && o.paid && !o.tip_cents && !o.tip_declined && !o.tip_sig){
+    // no tip online on a card order: ask at the door and take a signature
+    if (o && !o.cash && !o.tip_cents && !o.tip_declined && !o.tip_sig){
       openTip(o); return;
     }
     if (!confirm((o && o.cash && !o.paid ? 'Cash order: did you collect '+o.total+'?\n\n' : '')+'Complete '+code+'? It leaves your run and moves to completed orders.')) return;

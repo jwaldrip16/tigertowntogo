@@ -1,5 +1,5 @@
 """
-Database layer for Tiger Town To Go.
+Database layer for Fleet Delivery.
 
 SQLite only. One file on disk, opened per request, with the pragmas the app
 wants. Nothing else in the app has to know what is running underneath.

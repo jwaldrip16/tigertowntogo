@@ -1,11 +1,11 @@
-# Tiger Town To Go Delivery
+# Fleet Delivery
 
 A working four-app delivery platform: customer ordering site, dispatcher portal, driver app and
 restaurant app. One Flask process, one SQLite file, no build step.
 
 ## Run it
 
-    cd tigertowntogo
+    cd fleetdelivery
     pip install -r requirements.txt
     TZ=America/Chicago python app.py     # http://localhost:5000
 
@@ -16,7 +16,7 @@ Demo logins
 | Customer   | /                  | none                                           |
 | Dispatch   | /dispatch          | admin / dispatch123                            |
 | Driver     | /driver            | 3345550111 / 1234 (also ...0122, ...0133)      |
-| Restaurant | /restaurant        | tigertown / 1111, noodle / 1111, valleybbq / 1111 |
+| Restaurant | /restaurant        | popeyeschicken / 1111, niffersplace / 1111 (any store: its code and PIN 1111) |
 
 ## What each surface does
 
@@ -390,12 +390,19 @@ The reading still happens on your own computer. No screenshot leaves the machine
 The app runs on Central time (America/Chicago) on its own, even when the host is on UTC. To use a different zone, set the `APP_TZ` variable. Check it any time at `/api/clock`.
 
 
-## Card payments (Stripe)
+## Card payments (typed in, nothing saved)
 
-1. In Stripe, copy your publishable key and secret key (Developers, API keys).
-2. In Stripe, add a webhook pointing at `https://YOUR-SITE/api/stripe/webhook` for the event `checkout.session.completed`, and copy its signing secret.
-3. In the dispatch portal open Payments, paste all three, and switch card payments on.
+Stripe is gone. On any card order, dispatch clicks **Card** on the order (or the card box pops up right after you place an order on the new-order page). Type the name, number, expiration, CVC and billing ZIP, use the Copy buttons (or Copy everything) to paste them into whatever card terminal you use, run it there, then hit **It went through: mark paid**.
 
-Customers pay on Stripe's own card page, and the card is saved to the order. If dispatch adds an item or fee after the order is placed, the board shows a red "balance due" pill with a button to charge it to the saved card (or text a card link if the card won't go through). If the order total drops, it shows "overcharged" with a refund button for the difference. Tips signed at the door also go on the saved card.
+The card box lives only in that browser tab. The number is never sent to the server and never saved; it clears when you close the box, after 10 idle minutes, or when you leave the page. The order keeps only "card ending 1234" and the approval number you type. Run refunds on your card terminal too, then record them with Refund on the order.
 
-Dispatch can mark any order as cash with the Cash switch on the new-order page or on the order itself. Cash orders skip the card step, the driver sees "Collect cash", and the order is marked paid when it's delivered.
+If dispatch adds an item or fee after the order was paid, the board shows "balance due" with a **Card for $X** button for the difference.
+
+Cash orders work as before: flip the Cash switch, the driver sees "Collect cash", and the order is marked paid on delivery.
+
+### Customer cards on the website
+
+Customers type their card at checkout, and it's checked the same way as the dispatch card box (name, number, expiration, CVC, ZIP). A card order goes to Pending as "card on file, run it". Dispatch clicks **Run card**, and the card box opens already filled in. Copy it into your outside terminal, run it, then hit **It went through: mark paid**. The order then moves to the kitchen and the driver queue.
+
+The card is encrypted on the server and only dispatch can open it (each opening is logged). It's deleted the moment the order is marked paid, and anything left over is wiped after 24 hours (`CARD_HOLD_HOURS`) or when the order closes. Set a `CARD_KEY` variable (or at least `SECRET_KEY`) on your host and don't change it, or cards still waiting can't be read. Keeping card numbers on your server, even briefly, puts you under PCI card-security rules. Ask your card processor which self-assessment applies to you.
+

@@ -8,19 +8,15 @@
 {% endblock %}
 {% block scripts %}{% if order %}<script>
 const CODE = '{{ order.code }}';
-let PAY_TRIES = 0;
 async function tick(){
   const res = await jget('/api/track/'+CODE);
   if(!res.ok) return;
   const o = res.order;
-  if(o.cards_on && !o.paid){
-    if(PAY_TRIES < 20){ PAY_TRIES++; try{ await jget('/api/pay/check/'+CODE); }catch(e){} }
+  if(o.dispatch_status === 'awaiting_payment'){
     document.getElementById('live').innerHTML =
       '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+
-      '<p class="big">Waiting on your card payment</p>'+
-      '<p>Your order is held until the payment clears. If you closed the card page before '+
-      'paying, place the order again or call dispatch.</p>'+
-      (o.pay_link ? '<p><a class="btn go" href="'+o.pay_link+'">Finish paying</a></p>' : '')+
+      '<p class="big">Waiting on payment</p>'+
+      '<p>Dispatch will call you to take your card. Your order goes to the kitchen as soon as it is paid.</p>'+
       '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
     return;
   }
