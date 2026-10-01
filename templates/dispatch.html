@@ -475,8 +475,15 @@ async function board(force){
   if (!unconfirmed.length) clearFlash();
   SEEN_PENDING = unconfirmed.length;
 
-  const pending = res.orders.filter(o=>!o.driver_id);
-  const active  = res.orders.filter(o=>o.driver_id);
+  // An order only leaves Pending once a driver who is actually on shift has it.
+  // If its driver goes offline before pickup, it comes back here.
+  const onShift = id => res.drivers.some(d=>d.id===id && (d.status==='online' || d.status==='break'));
+  const offDriver = o => o.driver_id && !onShift(o.driver_id) &&
+    !['at_restaurant','enroute'].includes(o.dispatch_status);
+  res.orders.forEach(o=>{ if(offDriver(o)){ const dd=res.drivers.find(x=>x.id===o.driver_id);
+    o.hold_reason = (dd?dd.name:'driver')+' is off shift, reassign'; } });
+  const pending = res.orders.filter(o=>!o.driver_id || offDriver(o));
+  const active  = res.orders.filter(o=>o.driver_id && !offDriver(o));
   document.getElementById('pendCount').textContent =
     pending.length ? '(' + pending.length + ')' : '';
   document.getElementById('activeCount').textContent =
@@ -600,7 +607,9 @@ async function refund(id, total, suggest){
   if(amt.trim() !== '') body.cents = Math.round(parseFloat(amt)*100);
   const res = await jpost('/api/order/refund', body);
   if(!res.ok){ alert(res.error); return; }
-  alert('Recorded '+res.refunded+' refunded, '+res.left+' still collected. Make sure the refund also ran on your card terminal.');
+  alert(res.cancelled
+    ? 'Refunded in full ('+res.refunded+'). The order is cancelled and moved to completed orders. Make sure the refund also ran on your card terminal.'
+    : 'Recorded '+res.refunded+' refunded, '+res.left+' still collected. Make sure the refund also ran on your card terminal.');
   board(true);
 }
 function trailLine(o){

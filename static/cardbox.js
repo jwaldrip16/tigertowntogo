@@ -109,11 +109,25 @@
       if(res.ok) delete DRAFTS[ORDER.id];
     }catch(e){}
   }
-  async function close(){
-    await keep();
+  function teardown(){
+    // Synchronous: used when a new box opens over an old one. The old card is
+    // kept in this tab's memory so it is still there if that order is reopened.
+    if(box && ORDER && ORDER.id && !ORDER.viewOnly && !ORDER.saved){
+      const f = snapshot();
+      if(f.name || f.number || f.exp || f.cvc || f.zip) DRAFTS[ORDER.id] = f;
+    }
     wipe(); clearTimeout(idle);
     if(box){ box.remove(); box = null; }
-    const done = ORDER && ORDER.onClose; ORDER = null;
+    ORDER = null;
+  }
+  async function close(){
+    const mine = box, ord = ORDER;
+    await keep();
+    if(box !== mine) return;          // another box opened while saving; leave it alone
+    wipe(); clearTimeout(idle);
+    if(box){ box.remove(); box = null; }
+    ORDER = null;
+    const done = ord && ord.onClose;
     if(done) done();
   }
   function poke(){ clearTimeout(idle); idle = setTimeout(close, 10 * 60 * 1000); }
@@ -161,7 +175,7 @@
   }
   window.ffCard = {
     open: function(order){
-      close();
+      teardown();
       ORDER = order || {};
       box = document.createElement('div');
       box.id = 'cardBox';

@@ -747,7 +747,10 @@ def auto_assign():
         stages = ("'pending','preparing','ready'" if setting("assign_on_pending")
                   else "'preparing','ready'")
         o = con.execute("""SELECT * FROM orders
-                           WHERE driver_id IS NULL AND dispatch_status IN ('queued','held')
+                           WHERE driver_id IS NULL
+                             AND (dispatch_status IN ('queued','held')
+                                  OR (dispatch_status='awaiting_payment'
+                                      AND kitchen_status IN ('preparing','ready')))
                              AND kitchen_status IN (""" + stages + """)
                            ORDER BY created_at ASC LIMIT 1""").fetchone()
         if not o:
@@ -1333,7 +1336,13 @@ def mark_paid(o, method="recorded", ref="", cents=None):
     db().execute("""UPDATE orders SET payment_status='paid', paid_at=?, pay_method=?,
                     pay_ref=?, paid_cents=? WHERE id=?""",
                  (now(), method, ref, cents, o["id"]))
-    if released:
+    if released and o["kitchen_status"] in ("preparing", "ready"):
+        # The kitchen already has it: leave the timer alone and just open it to drivers.
+        db().execute("""UPDATE orders SET dispatch_status='held', hold_reason=NULL
+                        WHERE id=? AND driver_id IS NULL""", (o["id"],))
+        db().execute("""UPDATE orders SET dispatch_status='assigned'
+                        WHERE id=? AND driver_id IS NOT NULL AND dispatch_status='awaiting_payment'""", (o["id"],))
+    elif released:
         kitchen = "pending" if o["address_ok"] else "waiting"
         reason = "waiting on kitchen" if o["address_ok"] else "address needs dispatch approval"
         db().execute("""UPDATE orders SET kitchen_status=?, dispatch_status='held', hold_reason=?
@@ -1840,12 +1849,25 @@ def api_refund():
                     payment_status=? WHERE id=?""",
                  (total_ref, rid, note,
                   "refunded" if total_ref >= paid else "part_refunded", o["id"]))
+    cancelled = total_ref >= paid and o["dispatch_status"] != "cancelled"
+    if cancelled:
+        db().execute("""UPDATE orders SET dispatch_status='cancelled', stack_seq=NULL,
+                        hold_reason='refunded in full', delivered_at=COALESCE(delivered_at, ?)
+                        WHERE id=?""", (now(), o["id"]))
+        if o["driver_id"] and o["dispatch_status"] not in ("delivered",):
+            db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                         (o["driver_id"], "system",
+                          "Order " + o["code"] + " was refunded in full and cancelled. Do not pick it up.", now()))
+        db().execute("DELETE FROM card_vault WHERE order_id=?", (o["id"],))
     db().commit()
+    if cancelled:
+        log("cancel", o["code"] + " cancelled after a full refund")
+        auto_assign()
     who = dispatcher_row()
     log("refund", (who["name"] if who else "dispatch") + " refunded " + money(cents) +
         " on " + o["code"] + (": " + note if note else ""))
     return jsonify({"ok": True, "refunded": money(total_ref), "left": money(paid - total_ref),
-                    "refund_id": rid})
+                    "refund_id": rid, "cancelled": cancelled})
 
 @app.post("/api/driver/tip-sign")
 def api_tip_sign():
@@ -1904,6 +1926,13 @@ def api_timer():
     # Putting time back on the clock means the food is not ready after all:
     # a ready order drops back to preparing and the ready stamp is cleared,
     # so the board and the kitchen both stop showing "Ready".
+    if o["kitchen_status"] == "waiting":
+        # Unpaid card or unapproved address: the kitchen has not been sent this order,
+        # so just remember the minutes. The clock starts when the kitchen gets it.
+        db().execute("UPDATE orders SET prep_minutes=? WHERE id=?", (mins, o["id"]))
+        db().commit()
+        recompute_queue()
+        return jsonify({"ok": True, "prep_minutes": mins, "timer_seconds": None})
     restart = o["kitchen_status"] == "ready"
     started = now() if restart else (o["prep_started"] or now())
     db().execute("""UPDATE orders SET prep_minutes=?, prep_started=?, kitchen_status='preparing',
