@@ -521,15 +521,31 @@ function payPill(o){
       (o.pay_method?' '+o.pay_method.replace('card_','card ').replace('_',' '):'')+'</span>';
   else if(o.payment_status === 'part_refunded') s = '<span class="pill amber">refunded '+o.refunded+'</span>';
   else if(o.payment_status === 'refunded') s = '<span class="pill grey">fully refunded</span>';
+  else if(o.cash) s = '<span class="pill amber">cash: collect '+o.total+'</span>';
   else if(o.cards_on) s = '<span class="pill red">unpaid</span>';
+  if(o.balance_cents > 0) s += ' <span class="pill red">balance due '+o.balance+'</span>';
+  else if(o.balance_cents < 0) s += ' <span class="pill amber">overcharged '+o.balance+'</span>';
   if(o.tip_sig) s += ' <span class="pill green">tip signed</span>';
   return s ? ' '+s : '';
 }
 function payButtons(o){
   let h = '';
-  if(o.cards_on && !o.paid){
-    h += '<button class="btn tiny primary" onclick="payLink('+o.id+')">Text card link</button>'+
-         '<button class="btn tiny" onclick="keyed('+o.id+')">Mark paid</button>';
+  if(!o.paid){
+    if(o.cards_on && !o.cash)
+      h += '<button class="btn tiny primary" onclick="payLink('+o.id+')">Text card link</button>';
+    h += '<label class="switch tiny" title="Cash order: the driver collects at the door">'+
+         '<input type="checkbox" '+(o.cash?'checked':'')+' onchange="setCash('+o.id+',this.checked)"> Cash</label>';
+    h += '<button class="btn tiny" onclick="keyed('+o.id+')">Mark paid</button>';
+  }
+  if(o.paid && o.balance_cents > 0){
+    if(o.card_saved && !o.cash)
+      h += '<button class="btn tiny primary" onclick="chargeBal('+o.id+',\''+o.balance+'\')">Charge '+o.balance+' to card</button>';
+    if(o.cards_on && !o.cash)
+      h += '<button class="btn tiny" onclick="payLink('+o.id+')">Text link for '+o.balance+'</button>';
+    h += '<button class="btn tiny" onclick="keyed('+o.id+')">Record '+o.balance+' paid</button>';
+  }
+  if(o.paid && o.balance_cents < 0){
+    h += '<button class="btn tiny" onclick="refund('+o.id+',\''+o.total+'\','+(-o.balance_cents)+')">Refund '+o.balance+'</button>';
   }
   if(o.paid && (o.refunded_cents||0) < 100000){
     h += '<button class="btn tiny" onclick="refund('+o.id+',\''+o.total+'\')">Refund</button>';
@@ -555,9 +571,21 @@ async function keyed(id){
   if(!res.ok){ alert(res.error || 'That did not save.'); return; }
   board(true);
 }
-async function refund(id, total){
-  const amt = prompt('Refund how much on this order? Total charged '+total+
-                     '.\nEnter dollars, or leave blank to refund all of it.', '');
+async function setCash(id, on){
+  const res = await jpost('/api/order/cash', {order_id:id, cash:on});
+  if(!res.ok) alert(res.error || 'That did not save.');
+  board(true);
+}
+async function chargeBal(id, amt){
+  if(!confirm('Charge '+amt+' to the card saved on this order?')) return;
+  const res = await jpost('/api/order/charge-balance', {order_id:id});
+  if(!res.ok){ alert(res.error); return; }
+  alert('Charged '+res.charged+' to the card on file.');
+  board(true);
+}
+async function refund(id, total, suggest){
+  const amt = prompt('Refund how much on this order? Total '+total+
+                     '.\nEnter dollars, or leave blank to refund all of it.', suggest ? (suggest/100).toFixed(2) : '');
   if(amt === null) return;
   const note = prompt('Why? (kept on the order)', '') || '';
   const body = {order_id:id, note:note};

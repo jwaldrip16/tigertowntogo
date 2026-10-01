@@ -193,6 +193,7 @@ def init_db():
     for k, v in [("base_fee_cents", "399"), ("base_miles", "3"), ("per_mile_cents", "100"),
                  ("tax_rate_bp", "900"), ("auto_assign", "1"), ("max_stack_default", "3"),
                  ("assign_on_pending", "0"), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
+                 ("stripe_enabled", "0"), ("stripe_pk", ""), ("stripe_sk", ""), ("stripe_wh", ""),
                  ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
                  ("unlimited_stack", "1"),
                  ("order_tokens", "Online,App,Phone call,Third party"),
@@ -280,6 +281,12 @@ def init_db():
     ensure_column(con, "orders", "paid_at", "TEXT")
     ensure_column(con, "orders", "pay_link", "TEXT")
     ensure_column(con, "orders", "pay_ref", "TEXT")
+    ensure_column(con, "orders", "stripe_session", "TEXT")
+    ensure_column(con, "orders", "stripe_intent", "TEXT")
+    ensure_column(con, "orders", "stripe_pm", "TEXT")
+    ensure_column(con, "orders", "stripe_customer", "TEXT")
+    ensure_column(con, "orders", "paid_cents", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(con, "orders", "extra_charges", "TEXT")
     ensure_column(con, "orders", "refunded_cents", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "orders", "refund_id", "TEXT")
     ensure_column(con, "orders", "refund_note", "TEXT")
@@ -995,7 +1002,12 @@ def order_dict(o):
         "tip_sig": o["tip_sig"] or "",
         "tip_signed_at": o["tip_signed_at"] or "",
         "tip_declined": bool(o["tip_declined"]),
-        "cards_on": False,
+        "cards_on": stripe_on(),
+        "cash": is_cash(o),
+        "card_saved": bool(o["stripe_intent"]),
+        "paid_cents": int(o["paid_cents"] or 0),
+        "balance_cents": balance_cents(o) if (o["payment_status"] or "") in ("paid", "part_refunded") else 0,
+        "balance": money(abs(balance_cents(o))) if (o["payment_status"] or "") in ("paid", "part_refunded") else "",
         "subtotal_cents": int(o["subtotal_cents"] or 0),
         "subtotal": money(o["subtotal_cents"]), "fee": money(o["fee_cents"]),
         "tax": money(o["tax_cents"]), "tip": money(o["tip_cents"]), "total": money(o["total_cents"]),
@@ -1110,26 +1122,174 @@ def api_address_suggest():
     return jsonify({"ok": True, "suggestions": out[:6]})
 
 # ---------------------------------------------------------------- payments
-# No online card processing. An order is taken without a charge; the driver
-# collects at the door and dispatch records payment on the order.
+# Card payments run through Stripe once dispatch adds the keys under Payments.
+# Customers pay on Stripe's hosted page and the card is saved to the order, so a
+# fee added later, or a tip signed at the door, can go on the same card. Dispatch
+# can switch any order it takes to cash instead.
 
 def sget(key):
     return (setting(key, cast=str) or "").strip()
+
+def stripe_on():
+    return sget("stripe_enabled") == "1" and sget("stripe_sk") != ""
+
+def stripe_lib():
+    """Imported late so the app still boots without the library installed."""
+    try:
+        import stripe as _s
+    except ImportError:
+        return None
+    _s.api_key = sget("stripe_sk")
+    return _s
+
 def base_url():
     return request.url_root.rstrip("/")
 
+def is_cash(o):
+    return (o["pay_method"] or "") == "cash"
 
-def mark_paid(o, intent=None, pm=None, method="recorded", ref=""):
-    """Payment recorded on the order, so it can go into the queue."""
-    kitchen = "pending" if o["address_ok"] else "waiting"
-    reason = "waiting on kitchen" if o["address_ok"] else "address needs dispatch approval"
-    db().execute("""UPDATE orders SET payment_status='paid', paid_at=?, pay_method=?,
-                    pay_ref=?, kitchen_status=?, dispatch_status='held', hold_reason=?
-                    WHERE id=?""",
-                 (now(), method, ref, kitchen, reason, o["id"]))
+def balance_cents(o):
+    """What is still owed: order total less what was collected, plus refunds.
+    Negative means the customer was charged more than the order now comes to."""
+    kept = int(o["paid_cents"] or 0) - int(o["refunded_cents"] or 0)
+    return int(o["total_cents"] or 0) - kept
+
+def pay_lines(o):
+    """One Stripe line per charge, so the receipt reads like the order."""
+    out = []
+    def line(name, cents):
+        if cents and cents > 0:
+            out.append({"price_data": {"currency": "usd", "unit_amount": int(cents),
+                                       "product_data": {"name": name}}, "quantity": 1})
+    line("Food (" + o["code"] + ")", o["subtotal_cents"])
+    line("Item fees", o["item_fee_cents"])
+    line("Delivery fee", o["fee_cents"])
+    line("Sales tax", o["tax_cents"])
+    line("Tip", o["tip_cents"])
+    return out
+
+def pay_session(o, cents=None, label=None):
+    """A hosted Stripe Checkout page for one order, or for a balance on it.
+    Returns (url, error)."""
+    st = stripe_lib()
+    if not st:
+        return None, "The stripe library is not installed on the server."
+    kind = "balance" if cents else "order"
+    lines = ([{"price_data": {"currency": "usd", "unit_amount": int(cents),
+                              "product_data": {"name": (label or "Balance") + " (" + o["code"] + ")"}},
+               "quantity": 1}] if cents else pay_lines(o))
+    try:
+        sess = st.checkout.Session.create(
+            mode="payment", line_items=lines, client_reference_id=o["code"],
+            metadata={"order_code": o["code"], "order_id": str(o["id"]), "kind": kind},
+            customer_creation="always",
+            payment_intent_data={"setup_future_usage": "off_session",
+                                 "description": "Tiger Town To Go " + o["code"]},
+            success_url=base_url() + "/track/" + o["code"] + "?paid=1",
+            cancel_url=base_url() + "/track/" + o["code"] + "?paid=0")
+    except Exception as e:
+        return None, str(e)
+    db().execute("UPDATE orders SET stripe_session=?, pay_link=? WHERE id=?", (sess.id, sess.url, o["id"]))
     db().commit()
-    log("payment", o["code"] + " marked paid (" + method.replace("_", " ") + ")")
+    return sess.url, None
+
+def mark_paid(o, intent=None, pm=None, method="recorded", ref="", cents=None, customer=None):
+    """Payment landed: record it and let the order into the queue."""
+    cents = int(o["total_cents"]) if cents is None else int(cents)
+    released = o["dispatch_status"] == "awaiting_payment"
+    db().execute("""UPDATE orders SET payment_status='paid', paid_at=?, pay_method=?,
+                    stripe_intent=COALESCE(?,stripe_intent), stripe_pm=COALESCE(?,stripe_pm),
+                    stripe_customer=COALESCE(?,stripe_customer),
+                    pay_ref=?, paid_cents=? WHERE id=?""",
+                 (now(), method, intent, pm, customer, ref, cents, o["id"]))
+    if released:
+        kitchen = "pending" if o["address_ok"] else "waiting"
+        reason = "waiting on kitchen" if o["address_ok"] else "address needs dispatch approval"
+        db().execute("""UPDATE orders SET kitchen_status=?, dispatch_status='held', hold_reason=?
+                        WHERE id=?""", (kitchen, reason, o["id"]))
+    db().commit()
+    log("payment", o["code"] + " paid " + money(cents) + " (" + method.replace("_", " ") + ")")
     auto_assign()
+
+def add_extra_charge(o, cents, label, ref):
+    rows = json.loads(o["extra_charges"] or "[]")
+    rows.append({"cents": int(cents), "label": label, "ref": ref, "at": now()})
+    db().execute("UPDATE orders SET paid_cents=paid_cents+?, extra_charges=? WHERE id=?",
+                 (int(cents), json.dumps(rows), o["id"]))
+    db().commit()
+
+def charge_saved_card(o, cents, label):
+    """Charge the card saved on the order (a tip at the door, a fee added later).
+    Returns (payment_intent_id, error)."""
+    st = stripe_lib()
+    if not st:
+        return None, "The stripe library is not installed on the server."
+    if not o["stripe_intent"]:
+        return None, "No card on file for this order."
+    try:
+        old = st.PaymentIntent.retrieve(o["stripe_intent"])
+        pm = o["stripe_pm"] or old.payment_method
+        cust = o["stripe_customer"] or old.customer
+        pi = st.PaymentIntent.create(amount=int(cents), currency="usd", customer=cust,
+                                     payment_method=pm, off_session=True, confirm=True,
+                                     description=label + " " + o["code"])
+    except Exception as e:
+        return None, str(getattr(e, "user_message", None) or e)[:200]
+    return pi.id, None
+
+@app.post("/api/stripe/webhook")
+def api_stripe_webhook():
+    """Stripe tells us the customer actually paid. This is what releases the order."""
+    st = stripe_lib()
+    raw = request.get_data()
+    secret = sget("stripe_wh")
+    if not (st and secret):
+        return jsonify({"ok": False, "error": "webhook secret not set"}), 400
+    try:
+        event = st.Webhook.construct_event(raw, request.headers.get("Stripe-Signature", ""), secret)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    if event["type"] != "checkout.session.completed":
+        return jsonify({"ok": True, "ignored": event["type"]})
+    return settle_session(event["data"]["object"])
+
+def settle_session(obj):
+    meta = obj.get("metadata") or {}
+    code = meta.get("order_code") or obj.get("client_reference_id")
+    o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "unknown order"}), 404
+    intent = obj.get("payment_intent")
+    amount = int(obj.get("amount_total") or 0)
+    if meta.get("kind") == "balance":
+        done = [x.get("ref") for x in json.loads(o["extra_charges"] or "[]")]
+        if intent and intent not in done:
+            add_extra_charge(o, amount, "Balance (card link)", intent)
+            log("payment", o["code"] + " balance " + money(amount) + " paid by card link")
+        return jsonify({"ok": True})
+    if o["payment_status"] == "paid":
+        return jsonify({"ok": True, "already": True})
+    mark_paid(o, intent=intent, customer=obj.get("customer"), cents=amount or None,
+              method="card_link" if o["placed_by"] != "customer" else "card_online")
+    return jsonify({"ok": True})
+
+@app.get("/api/pay/check/<code>")
+def api_pay_check(code):
+    """Backup for a late webhook: the track page asks Stripe directly."""
+    o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
+    if not o:
+        return jsonify({"ok": False}), 404
+    if not o["stripe_session"] or not stripe_on():
+        return jsonify({"ok": True, "paid": o["payment_status"] == "paid"})
+    st = stripe_lib()
+    try:
+        sess = st.checkout.Session.retrieve(o["stripe_session"])
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)[:160]}), 400
+    if sess.get("payment_status") == "paid":
+        settle_session(sess)
+        return jsonify({"ok": True, "paid": True})
+    return jsonify({"ok": True, "paid": o["payment_status"] == "paid"})
 
 
 @app.post("/checkout")
@@ -1240,9 +1400,29 @@ def checkout():
         ("" if address_ok else " (address not verified, waiting on dispatch approval)") +
         (" (from " + from_code + (": " + issue_label if issue_label else "") + ")" if from_code else ""))
     oid = cur.lastrowid
+    cash = bool(payload.get("cash")) and placed_by == "dispatch" and bool(dispatcher_required())
+    if cash:
+        db().execute("UPDATE orders SET pay_method='cash', payment_status='cash_due' WHERE id=?", (oid,))
+        db().commit()
+    elif stripe_on():
+        # Card: the order waits on payment before dispatch or the kitchen can act on it.
+        db().execute("""UPDATE orders SET payment_status='unpaid', kitchen_status='waiting',
+                        dispatch_status='awaiting_payment', hold_reason='waiting on card payment'
+                        WHERE id=?""", (oid,))
+        db().commit()
+        o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+        url, err = pay_session(o)
+        if not url:
+            return jsonify({"ok": False, "error": "Card payment could not start: " + err}), 502
+        body = ("Your " + code + " order from Tiger Town To Go comes to " + money(total) +
+                ". Pay here: " + url)
+        return jsonify({"ok": True, "code": code, "order_id": oid, "total": money(total),
+                        "address_ok": bool(address_ok), "pay_url": url, "pay_text": body,
+                        "pay_sms": "sms:" + digits(o["customer_phone"]) + "?&body=" + urllib.parse.quote(body),
+                        "message": "Taking you to our secure card page to finish the order."})
     if address_ok:
         auto_assign()
-    return jsonify({"ok": True, "code": code, "order_id": oid, "total": money(total),
+    return jsonify({"ok": True, "cash": cash, "code": code, "order_id": oid, "total": money(total),
                     "address_ok": bool(address_ok),
                     "message": ("" if address_ok else
                                 "We could not verify that address, so your order is pending "
@@ -1500,6 +1680,9 @@ def api_order_status():
         db().execute("UPDATE orders SET dispatch_status=? WHERE id=?", (d, oid))
         if d in ("delivered", "cancelled"):
             db().execute("UPDATE orders SET stack_seq=NULL, delivered_at=? WHERE id=?", (now(), oid))
+            if d == "delivered" and is_cash(o) and o["payment_status"] != "paid":
+                db().execute("""UPDATE orders SET payment_status='paid', paid_at=?,
+                                paid_cents=total_cents WHERE id=?""", (now(), oid))
             if o["driver_id"]:
                 # finishing a run sends the driver to the back of the rotation
                 db().execute("UPDATE drivers SET last_completed_at=? WHERE id=?", (now(), o["driver_id"]))
@@ -1514,18 +1697,216 @@ def api_order_status():
 
 @app.post("/api/order/mark-paid")
 def api_mark_paid():
-    """Dispatcher records that this order has been paid for."""
+    """Dispatch records a payment taken outside the site: cash the driver brought
+    back, or a card keyed into the Stripe dashboard."""
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     data = request.get_json(force=True)
     o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
-    if o["payment_status"] == "paid":
-        return jsonify({"ok": True, "already": True})
     ref = (data.get("ref") or "").strip()
-    mark_paid(o, method="recorded", ref=ref)
+    if o["payment_status"] == "paid":
+        bal = balance_cents(o)
+        if bal > 0:
+            add_extra_charge(o, bal, "Recorded by dispatch", ref)
+            return jsonify({"ok": True, "balance_recorded": money(bal)})
+        return jsonify({"ok": True, "already": True})
+    method = "cash" if is_cash(o) else ("card_keyed" if ref.startswith("pi_") else "recorded")
+    mark_paid(o, intent=ref if ref.startswith("pi_") else None, method=method, ref=ref)
     return jsonify({"ok": True})
+
+@app.post("/api/order/cash")
+def api_order_cash():
+    """Switch an order between cash and card. Dispatch only."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
+    if not o:
+        return jsonify({"ok": False}), 404
+    if o["payment_status"] == "paid" and not is_cash(o):
+        return jsonify({"ok": False, "error": "That order is already paid by card."}), 400
+    if data.get("cash"):
+        db().execute("UPDATE orders SET pay_method='cash', payment_status='cash_due' WHERE id=?", (o["id"],))
+        if o["dispatch_status"] == "awaiting_payment":
+            kitchen = "pending" if o["address_ok"] else "waiting"
+            db().execute("""UPDATE orders SET kitchen_status=?, dispatch_status='held',
+                            hold_reason='waiting on kitchen' WHERE id=?""", (kitchen, o["id"]))
+        log("payment", o["code"] + " switched to cash by dispatch")
+    else:
+        db().execute("UPDATE orders SET pay_method=NULL, payment_status='unpaid' WHERE id=?", (o["id"],))
+        log("payment", o["code"] + " switched back to card by dispatch")
+    db().commit()
+    auto_assign()
+    return jsonify({"ok": True})
+
+@app.post("/api/order/pay-link")
+def api_pay_link():
+    """Dispatch makes a one-time card page (full order, or just the balance) to text."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
+    if not o:
+        return jsonify({"ok": False}), 404
+    if not stripe_on():
+        return jsonify({"ok": False, "error": "Card payments are switched off. Add your keys under Payments."}), 400
+    if o["payment_status"] == "paid":
+        bal = balance_cents(o)
+        if bal <= 0:
+            return jsonify({"ok": False, "error": "That order is paid in full."}), 400
+        url, err = pay_session(o, cents=bal, label="Order change")
+        amount = bal
+    else:
+        url, err = pay_session(o)
+        amount = int(o["total_cents"])
+    if not url:
+        return jsonify({"ok": False, "error": err}), 502
+    body = ("Your " + o["code"] + " order from Tiger Town To Go: " + money(amount) +
+            " due. Pay here: " + url)
+    log("payment", "card link for " + money(amount) + " made on " + o["code"])
+    return jsonify({"ok": True, "url": url, "text": body,
+                    "sms": "sms:" + digits(o["customer_phone"]) + "?&body=" + urllib.parse.quote(body)})
+
+@app.post("/api/order/charge-balance")
+def api_charge_balance():
+    """Charge whatever the order now owes (a fee or item added after payment) to the
+    card saved at checkout."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
+    if not o:
+        return jsonify({"ok": False}), 404
+    bal = balance_cents(o)
+    if bal <= 0:
+        return jsonify({"ok": False, "error": "Nothing is owed on that order."}), 400
+    if is_cash(o):
+        return jsonify({"ok": False, "error": "Cash order: the driver collects " + money(bal) + " more at the door."}), 400
+    if not stripe_on() or not o["stripe_intent"]:
+        return jsonify({"ok": False, "error": "No card saved on this order. Send a card link for the balance instead."}), 400
+    label = (data.get("label") or "Order change").strip()[:40]
+    pid, err = charge_saved_card(o, bal, label)
+    if not pid:
+        return jsonify({"ok": False, "error": "The card did not go through: " + err +
+                        ". Send the customer a card link for the balance instead."}), 402
+    add_extra_charge(o, bal, label, pid)
+    who = dispatcher_row()
+    log("payment", (who["name"] if who else "dispatch") + " charged " + money(bal) +
+        " balance on " + o["code"])
+    return jsonify({"ok": True, "charged": money(bal), "charge_id": pid})
+
+@app.post("/api/order/refund")
+def api_refund():
+    """Full or partial refund, dispatcher only. cents blank = everything collected."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
+    if not o:
+        return jsonify({"ok": False}), 404
+    paid = int(o["paid_cents"] or 0)
+    already = int(o["refunded_cents"] or 0)
+    left = paid - already
+    if left <= 0:
+        return jsonify({"ok": False, "error": "Nothing collected on that order is left to refund."}), 400
+    raw = data.get("cents")
+    cents = left if raw in (None, "", "all") else int(round(float(raw)))
+    if cents <= 0:
+        return jsonify({"ok": False, "error": "Enter an amount to refund."}), 400
+    if cents > left:
+        return jsonify({"ok": False, "error": "That is more than is left to refund (" + money(left) + ")."}), 400
+    note = (data.get("note") or "").strip()
+    rid = "cash" if is_cash(o) else ""
+    if not is_cash(o) and stripe_on() and o["stripe_intent"]:
+        st = stripe_lib()
+        # spread the refund over the later charges first, then the original one
+        extras = [x for x in json.loads(o["extra_charges"] or "[]")
+                  if str(x.get("ref", "")).startswith("pi_")]
+        first = paid - sum(int(x["cents"]) for x in extras)
+        pieces = [(o["stripe_intent"], first)] + [(x["ref"], int(x["cents"])) for x in extras]
+        refunded_before = already
+        need, ids = cents, []
+        for pi, cap in pieces[::-1]:
+            # skip what earlier refunds already took from the newest charges
+            used = min(cap, refunded_before)
+            refunded_before -= used
+            room = cap - used
+            amt = min(need, room)
+            if amt <= 0:
+                continue
+            try:
+                ids.append(st.Refund.create(payment_intent=pi, amount=amt,
+                                            reason="requested_by_customer").id)
+            except Exception as e:
+                return jsonify({"ok": False, "error": str(e)[:200]}), 502
+            need -= amt
+            if need <= 0:
+                break
+        rid = ",".join(ids)
+    total_ref = already + cents
+    db().execute("""UPDATE orders SET refunded_cents=?, refund_id=?, refund_note=?,
+                    payment_status=? WHERE id=?""",
+                 (total_ref, rid, note,
+                  "refunded" if total_ref >= paid else "part_refunded", o["id"]))
+    db().commit()
+    who = dispatcher_row()
+    log("refund", (who["name"] if who else "dispatch") + " refunded " + money(cents) +
+        " on " + o["code"] + (": " + note if note else ""))
+    return jsonify({"ok": True, "refunded": money(total_ref), "left": money(paid - total_ref),
+                    "refund_id": rid})
+
+@app.get("/dispatch/payments")
+def dispatch_payments():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    s = {r["key"]: r["value"] for r in db().execute("SELECT * FROM settings").fetchall()}
+    try:
+        import stripe  # noqa: F401
+        lib = True
+    except ImportError:
+        lib = False
+    return render_template("dispatch_payments.html", s=s, lib=lib,
+                           hook=request.url_root.rstrip("/") + "/api/stripe/webhook")
+
+@app.post("/api/dispatch/payments")
+def api_dispatch_payments():
+    """Save the Stripe keys. A blank field keeps the stored key, so the page never
+    shows or wipes a secret by accident."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Dispatchers only."}), 403
+    data = request.get_json(force=True)
+    for field, key in (("pk", "stripe_pk"), ("sk", "stripe_sk"), ("wh", "stripe_wh")):
+        val = (data.get(field) or "").strip()
+        if val:
+            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, val))
+    if "tip_prompt" in data:
+        db().execute("UPDATE settings SET value=? WHERE key='tip_prompt'",
+                     ("1" if data.get("tip_prompt") else "0",))
+    db().commit()
+    want_on = bool(data.get("enabled"))
+    warn = ""
+    if want_on:
+        if not sget("stripe_sk"):
+            return jsonify({"ok": False, "error": "Paste your secret key before switching it on."}), 400
+        st = stripe_lib()
+        if not st:
+            return jsonify({"ok": False, "error": "The stripe library is missing. Run: pip install stripe"}), 400
+        try:
+            st.Balance.retrieve()
+        except Exception as e:
+            return jsonify({"ok": False, "error": "Stripe refused that key: " + str(e)[:160]}), 400
+        if not sget("stripe_wh"):
+            warn = ("Saved and switched on. Add the webhook signing secret too, or paid orders "
+                    "only show up once the customer's tracking page checks in.")
+    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('stripe_enabled',?)",
+                 ("1" if want_on else "0",))
+    db().commit()
+    who = dispatcher_row()
+    log("payments", "Card payments switched " + ("on" if want_on else "off") + " by " +
+        (who["name"] if who else "dispatch"))
+    return jsonify({"ok": True, "enabled": want_on, "warn": warn})
 
 @app.post("/api/driver/tip-sign")
 def api_tip_sign():
@@ -1559,6 +1940,11 @@ def api_tip_sign():
     except Exception:
         return jsonify({"ok": False, "error": "That signature did not save."}), 400
     charge = ""
+    if stripe_on() and o["stripe_intent"] and not is_cash(o):
+        charge, err = charge_saved_card(o, cents, "Tip")
+        if not charge:
+            return jsonify({"ok": False, "error": "The card declined the tip: " + err}), 402
+        db().execute("UPDATE orders SET paid_cents=paid_cents+? WHERE id=?", (cents, o["id"]))
     db().execute("""UPDATE orders SET tip_cents=tip_cents+?, total_cents=total_cents+?,
                     tip_sig=?, tip_signed_at=?, tip_charge_id=?, tip_declined=0 WHERE id=?""",
                  (cents, cents, "/static/signatures/" + o["code"] + ".png", now(),

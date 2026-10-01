@@ -388,3 +388,14 @@ The reading still happens on your own computer. No screenshot leaves the machine
 ## Time zone
 
 The app runs on Central time (America/Chicago) on its own, even when the host is on UTC. To use a different zone, set the `APP_TZ` variable. Check it any time at `/api/clock`.
+
+
+## Card payments (Stripe)
+
+1. In Stripe, copy your publishable key and secret key (Developers, API keys).
+2. In Stripe, add a webhook pointing at `https://YOUR-SITE/api/stripe/webhook` for the event `checkout.session.completed`, and copy its signing secret.
+3. In the dispatch portal open Payments, paste all three, and switch card payments on.
+
+Customers pay on Stripe's own card page, and the card is saved to the order. If dispatch adds an item or fee after the order is placed, the board shows a red "balance due" pill with a button to charge it to the saved card (or text a card link if the card won't go through). If the order total drops, it shows "overcharged" with a refund button for the difference. Tips signed at the door also go on the saved card.
+
+Dispatch can mark any order as cash with the Cash switch on the new-order page or on the order itself. Cash orders skip the card step, the driver sees "Collect cash", and the order is marked paid when it's delivered.

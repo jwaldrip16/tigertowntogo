@@ -260,6 +260,9 @@ function stageButtons(o){
             ' onclick="stage('+o.id+',\''+s[0]+'\',\''+o.code+'\')">'+s[1]+'</button>';
   });
   html += '</div>';
+  if (o.cash && !o.paid){
+    html = '<div class="pill amber" style="font-size:15px">Cash order: collect '+o.total+'</div>' + html;
+  }
   if (now === 'enroute' || now === 'at_restaurant'){
     html += '<button class="btn tiny go" onclick="stage('+o.id+',\'delivered\',\''+o.code+'\')">'+
             'Complete delivery</button>';
@@ -276,7 +279,7 @@ async function stage(id, st, code){
     if (o && o.cards_on && o.paid && !o.tip_cents && !o.tip_declined && !o.tip_sig){
       openTip(o); return;
     }
-    if (!confirm('Complete '+code+'? It leaves your run and moves to completed orders.')) return;
+    if (!confirm((o && o.cash && !o.paid ? 'Cash order: did you collect '+o.total+'?\n\n' : '')+'Complete '+code+'? It leaves your run and moves to completed orders.')) return;
   }
   await jpost('/api/order/status', {order_id:id, dispatch_status:st});
   state();

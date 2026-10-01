@@ -75,6 +75,9 @@
       <input id="tip" type="number" step="0.50" placeholder="Tip $" style="max-width:110px" oninput="totals()">
     </div>
     <div class="totals" id="totals"></div>
+    <label class="switch" style="display:flex;gap:8px;align-items:center;margin:8px 0">
+      <input type="checkbox" id="cashOrder"> <b>Cash order</b>
+      <span class="muted small">the driver collects at the door, no card needed</span></label>
     <button class="btn primary" id="place" disabled onclick="placeOrder()">Create order</button>
     <p class="muted small">Dispatcher orders go through even when the kitchen is closed or the
       customer's number is blocked.</p>
@@ -203,8 +206,17 @@ async function placeOrder(){
     issue: SRC && document.getElementById('issue') ? document.getElementById('issue').value : '',
     issue_note: SRC && document.getElementById('issueNote') ? document.getElementById('issueNote').value : '',
     placed_by: 'dispatch',
+    cash: document.getElementById('cashOrder').checked,
     source: document.getElementById('source').value}));
   if(!res.ok){ alert(res.error); return; }
+  if(res.pay_url){
+    try{ await navigator.clipboard.writeText(res.pay_url); }catch(e){}
+    if(confirm('Order '+res.code+' needs a card ('+res.total+').\n\nThe card link is copied. OK opens your texting app '+
+               'with it ready for the customer. Cancel opens the card page here to key it in.')){
+      window.location = res.pay_sms; return;
+    }
+    window.open(res.pay_url, '_blank');
+  }
   window.location = '/dispatch';
 }
 let OMAP = null, OLAYER = null;
