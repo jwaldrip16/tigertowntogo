@@ -291,8 +291,10 @@ function chatNote(d){
 function renderDrivers(list){
   const all = (list||[]).slice();
   const counts = {active: all.filter(d=>d.status!=='offline').length,
-                  scheduled: all.filter(d=>grp(d)==='scheduled').length,
-                  unavailable: all.filter(d=>grp(d)==='unavailable').length};
+                  scheduled: all.filter(d=>d.status==='offline' && grp(d)==='scheduled').length,
+                  unavailable: all.filter(d=>d.status==='offline' && grp(d)==='unavailable').length};
+  // A driver who is online or on break lives on the On shift tab only. Scheduled and
+  // Unavailable list the drivers who are off right now.
   // With auto dispatch off nobody is online yet, so On shift is empty on load.
   // Drop to the Scheduled list rather than showing an empty rail, until a tab
   // is picked by hand.
@@ -301,7 +303,8 @@ function renderDrivers(list){
     document.querySelectorAll('#rosterTabs .tab').forEach(t=>
       t.classList.toggle('on', t.dataset.roster === 'scheduled'));
   }
-  const shown = all.filter(d => ROSTER === 'active' ? d.status !== 'offline' : grp(d) === ROSTER);
+  const shown = all.filter(d => ROSTER === 'active' ? d.status !== 'offline'
+                                : (d.status === 'offline' && grp(d) === ROSTER));
   document.querySelectorAll('#rosterTabs .tab').forEach(t=>{
     const base = {active:'On shift', scheduled:'Scheduled',
                   unavailable:'Unavailable'}[t.dataset.roster];
@@ -323,7 +326,7 @@ function renderDrivers(list){
           ' <span class="pill blue">'+x.stage+'</span> <span class="muted small">'+
           x.restaurant+' &rarr; '+x.customer+'</span></div>').join('')+'</div>'
       : '<div class="muted small">no active run</div>';
-    const shift = '<div><button class="btn tiny'+(d.status==='online'?' on':'')+
+    const shift = '<div class="btnrow"><button class="btn tiny'+(d.status==='online'?' on':'')+
       '" onclick="setStatus('+d.id+',\'online\')">Online</button>'+
       '<button class="btn tiny'+(d.status==='break'?' on':'')+
       '" onclick="setStatus('+d.id+',\'break\')">Break</button>'+
@@ -345,7 +348,7 @@ function renderDrivers(list){
         ? '<button class="btn tiny go" onclick="setStatus('+d.id+',\'online\')">Move to active</button>'
         : '')+'</div>';
     return '<div class="driver dropzone" ondragover="allowDrop(event)" ondragleave="dragLeave(event)" '+
-      'ondrop="dropOnDriver(event,'+d.id+')"><div><strong>'+d.name+'</strong> <span class="pill '+
+      'ondrop="dropOnDriver(event,'+d.id+')"><div class="drvhead"><strong>'+d.name+'</strong> <span class="pill '+
       (d.status==='online'?'green':d.status==='break'?'amber':'grey')+'">'+
       (d.status_label || d.status)+'</span> '+turn+
       ' <span class="pill '+(grp(d)==='unavailable'?
