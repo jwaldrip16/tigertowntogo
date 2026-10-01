@@ -342,7 +342,7 @@ function renderDrivers(list){
       : '<div class="muted small">no location yet</div>';
     const group = '<div class="grouprow"><span class="muted small">Group</span>'+
       ['scheduled','unavailable'].map(g=>
-        '<button class="btn tiny'+(d.roster===g?' on':'')+'" onclick="setGroup('+d.id+',\''+g+'\')">'+
+        '<button class="btn tiny'+(grp(d)===g?' on':'')+'" onclick="setGroup('+d.id+',\''+g+'\')">'+
         {scheduled:'Scheduled', unavailable:'Unavailable'}[g]+'</button>').join('')+
       (d.status==='offline'
         ? '<button class="btn tiny go" onclick="setStatus('+d.id+',\'online\')">Move to active</button>'

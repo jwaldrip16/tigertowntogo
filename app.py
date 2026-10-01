@@ -213,6 +213,7 @@ def init_db():
     con.execute("""CREATE TABLE IF NOT EXISTS blocked_customers(
         id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT UNIQUE, name TEXT, reason TEXT,
         created_at TEXT)""")
+    ensure_column(con, "drivers", "roster_day", "TEXT")
     ensure_column(con, "drivers", "online_since", "TEXT")
     ensure_column(con, "drivers", "last_assigned_at", "TEXT")
     ensure_column(con, "drivers", "last_completed_at", "TEXT")
@@ -2244,7 +2245,8 @@ def api_driver_roster():
     if roster not in ROSTERS:
         return jsonify({"ok": False, "error": "unknown group"}), 400
     did = data["driver_id"]
-    db().execute("UPDATE drivers SET roster=? WHERE id=?", (roster, did))
+    db().execute("UPDATE drivers SET roster=?, roster_day=? WHERE id=?",
+                 (roster, dt.date.today().isoformat() if roster == "scheduled" else None, did))
     if roster == "unavailable":
         load = db().execute("""SELECT COUNT(*) c FROM orders WHERE driver_id=?
                                AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
@@ -2489,6 +2491,12 @@ def driver_group(d):
     and not pulled by dispatch. Anyone not on today's schedule is Unavailable."""
     if d["roster"] == "unavailable":
         return "unavailable"
+    # dispatch moved this driver to Scheduled by hand today: that wins for the day
+    try:
+        if d["roster_day"] and d["roster_day"] == dt.date.today().isoformat():
+            return "scheduled"
+    except (IndexError, KeyError):
+        pass
     return "scheduled" if scheduled_today(d["id"]) else "unavailable"
 
 @app.post("/api/driver/availability")

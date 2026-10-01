@@ -274,3 +274,7 @@ pre.code{background:#0f172a;color:#e2e8f0;padding:10px;border-radius:8px;overflo
 
 .panel.slim{padding:10px 12px;margin:8px 0}
 .panel.slim .right{text-align:right}
+
+/* driver cards are drop targets but should read like cards, left aligned */
+.driver.dropzone{text-align:left;padding:14px;cursor:default;background:#fff}
+.driver.dropzone strong{display:inline;margin-bottom:0}
