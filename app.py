@@ -327,6 +327,8 @@ def init_db():
                    event TEXT, created_at TEXT NOT NULL)""")
     con.execute("CREATE INDEX IF NOT EXISTS ix_driver_log ON driver_log(driver_id, created_at)")
     ensure_column(con, "orders", "ref_code", "TEXT")
+    ensure_column(con, "orders", "paged_at", "TEXT")
+    ensure_column(con, "orders", "redo_driver_id", "INTEGER")
     ensure_column(con, "orders", "token", "TEXT")
     ensure_column(con, "restaurants", "cuisine", "TEXT")
     con.execute("UPDATE drivers SET roster='scheduled' WHERE roster IS NULL OR roster=''")
@@ -746,7 +748,38 @@ def queue_position(order_id):
             return i + 1
     return None
 
+def place_redo_orders():
+    """A new order made from a finished one can go back to its original driver. It goes to
+    them as soon as it is released to dispatch (paid card or cash), even with auto dispatch off,
+    and waits in Pending if that driver is off shift."""
+    con = db()
+    rows = con.execute("""SELECT * FROM orders WHERE redo_driver_id IS NOT NULL AND driver_id IS NULL
+                          AND dispatch_status IN ('queued','held') AND kitchen_status!='waiting'""").fetchall()
+    for o in rows:
+        d = con.execute("SELECT * FROM drivers WHERE id=?", (o["redo_driver_id"],)).fetchone()
+        if not d:
+            con.execute("UPDATE orders SET redo_driver_id=NULL WHERE id=?", (o["id"],))
+            continue
+        if d["status"] not in ("online", "break"):
+            con.execute("UPDATE orders SET dispatch_status='held', hold_reason=? WHERE id=?",
+                        ("waiting on " + d["name"] + " (original driver) to come on shift", o["id"]))
+            continue
+        seq = con.execute("""SELECT COALESCE(MAX(stack_seq),0)+1 s FROM orders WHERE driver_id=?
+                             AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
+                          (d["id"],)).fetchone()["s"]
+        con.execute("""UPDATE orders SET driver_id=?, dispatch_status='assigned', stack_seq=?, hold_reason=NULL,
+                       redo_driver_id=NULL, paged_at=? WHERE id=?""", (d["id"], seq, now(), o["id"]))
+        con.execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                    (d["id"], "dispatch", "New order " + o["code"] + " (redo of " + (o["cloned_from"] or "an earlier order") +
+                     ((": " + o["issue"]) if o["issue"] else "") + ") was sent to you. Tap Received to accept it.", now()))
+        log("redo", o["code"] + " sent to original driver " + d["name"])
+    con.commit()
+
 def auto_assign():
+    try:
+        place_redo_orders()
+    except Exception as e:
+        print("redo placement skipped:", e)
     if not setting("auto_assign"):
         recompute_queue()
         return
@@ -758,7 +791,7 @@ def auto_assign():
         stages = ("'pending','preparing','ready'" if setting("assign_on_pending")
                   else "'preparing','ready'")
         o = con.execute("""SELECT * FROM orders
-                           WHERE driver_id IS NULL
+                           WHERE driver_id IS NULL AND redo_driver_id IS NULL
                              AND dispatch_status IN ('queued','held')
                              AND kitchen_status IN (""" + stages + """)
                            ORDER BY created_at ASC LIMIT 1""").fetchone()
@@ -789,6 +822,16 @@ def nav_url(dest, lat=None, lng=None, name=None):
     return url
 
 app.jinja_env.globals["nav_url"] = nav_url
+
+def customer_nav_url(address, lat=None, lng=None):
+    """Customer directions go to the street address itself, so Maps shows the house number,
+    street and city instead of bare coordinates. Coordinates are only the fallback when the
+    address has no city on it."""
+    addr = " ".join(str(address or "").split())
+    if addr and "," in addr:
+        return ("https://www.google.com/maps/dir/?api=1&travelmode=driving&destination="
+                + urllib.parse.quote(addr))
+    return nav_url(addr, lat, lng)
 
 def digits(v):
     return "".join(ch for ch in str(v or "") if ch.isdigit())
@@ -1017,7 +1060,8 @@ def order_dict(o):
         "customer": o["customer_name"], "phone": o["customer_phone"],
         "address": o["address"], "note": o["address_note"],
         "dispatch_note": o["dispatch_note"],
-        "customer_nav": nav_url(o["address"], o["lat"], o["lng"]),
+        "customer_nav": customer_nav_url(o["address"], o["lat"], o["lng"]),
+        "paged_at": (o["paged_at"] if "paged_at" in o.keys() else "") or "",
         "items": _safe_items(o["items"]),
         "lines": [line_label(x) for x in json.loads(o["items"])],
         "item_count": sum(int(x.get("qty", 1)) for x in json.loads(o["items"])),
@@ -1546,9 +1590,19 @@ def checkout():
         db().commit()
         if card:
             store_card(oid, card)
+    send_note = ""
+    if src_id and dispatcher_required() and payload.get("send_to") == "driver":
+        srow = db().execute("SELECT driver_id FROM orders WHERE id=?", (src_id,)).fetchone()
+        if srow and srow["driver_id"]:
+            db().execute("UPDATE orders SET redo_driver_id=? WHERE id=?", (srow["driver_id"], oid))
+            db().commit()
+            dn = db().execute("SELECT name FROM drivers WHERE id=?", (srow["driver_id"],)).fetchone()
+            send_note = "Going to " + (dn["name"] if dn else "the original driver") + \
+                        (" once the card is marked paid." if not cash else ".")
     if address_ok and cash:
         auto_assign()
     return jsonify({"ok": True, "cash": cash, "code": code, "order_id": oid, "total": money(total),
+                    "send_note": send_note,
                     "address_ok": bool(address_ok),
                     "message": ("" if address_ok and cash else
                                 "Thanks! Your card is being run now. Your order goes to the "
@@ -2108,7 +2162,8 @@ def dispatch_new_order():
                    "address": o["address"], "address_note": o["address_note"] or "",
                    "dispatch_note": o["dispatch_note"] or "",
                    "items": json.loads(o["items"]), "tip_cents": o["tip_cents"],
-                   "fee_cents": o["fee_cents"]}
+                   "fee_cents": o["fee_cents"], "driver_id": o["driver_id"],
+                   "driver": (db().execute("SELECT name FROM drivers WHERE id=?", (o["driver_id"],)).fetchone() or {"name": ""})["name"] if o["driver_id"] else ""}
     oneoff = oneoff_id()
     return render_template("dispatch_new_order.html",
                            restaurants=[dict(r) for r in rests if r["slug"] != "oneoff"],
@@ -3296,16 +3351,20 @@ def api_reopen():
         seq = db().execute("""SELECT COALESCE(MAX(stack_seq),0)+1 s FROM orders WHERE driver_id=?
                               AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
                            (o["driver_id"],)).fetchone()["s"]
-        db().execute("""UPDATE orders SET dispatch_status='enroute', delivered_at=NULL, stack_seq=?
-                        WHERE id=?""", (seq, o["id"]))
+        # back to "assigned" so the driver's phone pages again and the board flashes
+        # until the driver taps Received
+        db().execute("""UPDATE orders SET dispatch_status='assigned', delivered_at=NULL, stack_seq=?,
+                        paged_at=? WHERE id=?""", (seq, now(), o["id"]))
         db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                      (o["driver_id"], "dispatch",
-                      "Order " + o["code"] + " was reopened and is back on your run.", now()))
+                      "Order " + o["code"] + " was reopened and sent back to you. Tap Received to accept it.", now()))
     else:
         db().execute("""UPDATE orders SET dispatch_status='queued', delivered_at=NULL, driver_id=NULL,
                         stack_seq=NULL, hold_reason=NULL WHERE id=?""", (o["id"],))
     db().commit()
     log("reopen", o["code"])
+    if keep:
+        log_driver(o["driver_id"], "Dispatch reopened " + o["code"] + " and re-paged the driver")
     auto_assign()
     return jsonify({"ok": True})
 

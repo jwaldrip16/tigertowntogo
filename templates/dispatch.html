@@ -516,6 +516,33 @@ function drawDoneTools(res){
     (list.length - delivered.length) + ' cancelled, $' + sum.toFixed(2) + ' total';
   document.getElementById('xlsDay').href = '/dispatch/export/orders.xlsx?from=' + day + '&to=' + day;
 }
+const REDO_REASONS = [['missing_item','Restaurant left an item off'],['wrong_item','Restaurant made the wrong item'],
+  ['food_quality','Food was cold or wrong temperature'],['wrong_address','Driver delivered to the wrong address'],
+  ['never_delivered','Order never reached the customer'],['damaged','Order was damaged in transit'],
+  ['late','Order was too late'],['other','Other']];
+function redoDialog(id){
+  const o = (LIVE_ORDERS||[]).find(x=>x.id===id);
+  if(!o){ window.location = '/dispatch/new-order?from='+id+'&redo=1'; return; }
+  let box = document.getElementById('redoBox');
+  if(!box){ box = document.createElement('div'); box.id = 'redoBox'; box.className = 'modalback'; document.body.appendChild(box); }
+  box.innerHTML = '<div class="modal panel"><h2>New order from '+o.code+'</h2>'+
+    '<label>Why is this going out again?</label><select id="redoWhy"><option value="">Pick a reason</option>'+
+    REDO_REASONS.map(r=>'<option value="'+r[0]+'">'+r[1]+'</option>').join('')+'</select>'+
+    '<input id="redoNote" placeholder="Detail, e.g. no side salad in the bag">'+
+    '<label>Send the new order to</label>'+
+    (o.driver_id ? '<label class="small"><input type="radio" name="redoTo" value="driver" checked> '+o.driver+' (original driver)</label>' : '')+
+    '<label class="small"><input type="radio" name="redoTo" value="queue"'+(o.driver_id?'':' checked')+'> The queue (next driver up)</label>'+
+    '<div class="row"><button class="btn primary" onclick="redoGo('+id+')">Continue</button>'+
+    '<button class="btn" onclick="document.getElementById(\'redoBox\').remove()">Cancel</button></div></div>';
+}
+function redoGo(id){
+  const why = document.getElementById('redoWhy').value;
+  if(!why){ alert('Pick why this order is going out again.'); return; }
+  const to = (document.querySelector('input[name=redoTo]:checked')||{}).value || 'queue';
+  const note = document.getElementById('redoNote').value;
+  window.location = '/dispatch/new-order?from='+id+'&redo=1&issue='+encodeURIComponent(why)+
+    '&issue_note='+encodeURIComponent(note)+'&send_to='+to;
+}
 function renderCompleted(res){
   try {
   document.getElementById('completed').innerHTML = (res.completed||[]).map(o=>
@@ -523,18 +550,16 @@ function renderCompleted(res){
     (o.dispatch_status==='delivered'?'green':'grey')+'">'+o.dispatch_status+'</span> '+
     '<span class="muted small">'+(o.delivered_time || (o.delivered_at||'').replace('T',' '))+'</span></div>'+
     '<div class="muted small">'+o.restaurant+' &rarr; '+o.customer+' &middot; '+o.address+
-    ' &middot; '+milesLabel(o)+' &middot; fee '+o.fee+' &middot; total '+o.total+
+    ' &middot; '+milesLabel(o)+' &middot; fee '+o.fee+' &middot; <strong>tip '+o.tip+'</strong> &middot; total '+o.total+
     (o.driver?' &middot; driver '+o.driver:'')+'</div>'+
     '<div class="order-actions">'+
       (!o.driver_id && o.dispatch_status!=='cancelled' ? '<select class="sendsel" id="sd'+o.id+'">'+
         '<option value="">Next up</option>'+ (res.drivers||[]).filter(d=>d.status==='online')
           .map(d=>'<option value="'+d.id+'">'+d.name+'</option>').join('') + '</select>'+
         '<button class="btn tiny primary" onclick="sendToDriver('+o.id+')">Send to driver</button>' : '')+
-    '<a class="btn tiny primary" href="/dispatch/new-order?from='+o.id+'&redo=1">New order from this</a>'+
+    '<button class="btn tiny primary" onclick="redoDialog('+o.id+')">New order from this</button>'+
     (o.card_on_file ? '<button class="btn tiny" onclick="viewCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">View card &bull;'+o.card_last4+'</button>' : '')+
-    '<button class="btn tiny" onclick="reopen('+o.id+',\''+o.code+'\',false)">Reopen to queue</button>'+
-    (o.driver ? '<button class="btn tiny" onclick="reopen('+o.id+',\''+o.code+'\',true)">Reopen to '+
-      o.driver+'</button>' : '')+
+
     (o.issue ? '<div class="muted small">Redo reason on file: '+o.issue+
       (o.issue_note?' - '+o.issue_note:'')+'</div>' : '')+'</div></div>').join('') ||
     '<p class="muted">Nothing completed yet.</p>';
@@ -803,7 +828,6 @@ function orderCard(o, opts, drivers){
       '<button class="btn tiny" onclick="dstat('+o.id+',\'enroute\')">Enroute</button>'+
       '<button class="btn tiny" onclick="complete('+o.id+',\''+o.code+'\')">Complete</button>'+
       '<button class="btn tiny" onclick="hold('+o.id+')">Hold</button>'+
-      '<a class="btn tiny" target="_blank" href="'+o.customer_nav+'">Nav</a>'+
     '</div></div>';
 }
 async function kitchen(id, st){

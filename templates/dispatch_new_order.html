@@ -50,6 +50,12 @@
       {% for r in reasons %}<option value="{{ r['key'] }}">{{ r['label'] }}</option>{% endfor %}
     </select>
     <input id="issueNote" placeholder="Detail, e.g. no side salad in the bag">
+    <h3>Send the new order to</h3>
+    <select id="sendTo">
+      {% if src['driver_id'] %}<option value="driver">{{ src['driver'] }} (original driver)</option>{% endif %}
+      <option value="queue">The queue (next driver up)</option>
+    </select>
+    <div class="muted small">A card order still waits until you mark it paid, then goes where you picked.</div>
     {% endif %}
     <h3>Customer</h3>
     <input id="ref" placeholder="Their order number (optional)">
@@ -207,10 +213,12 @@ async function placeOrder(){
     from_order_id: SRC ? SRC.id : null,
     issue: SRC && document.getElementById('issue') ? document.getElementById('issue').value : '',
     issue_note: SRC && document.getElementById('issueNote') ? document.getElementById('issueNote').value : '',
+    send_to: SRC && document.getElementById('sendTo') ? document.getElementById('sendTo').value : '',
     placed_by: 'dispatch',
     cash: document.getElementById('cashOrder').checked,
     source: document.getElementById('source').value}));
   if(!res.ok){ alert(res.error); return; }
+  if(res.send_note && res.cash) alert(res.code + ': ' + res.send_note);
   if(!res.cash){
     // card order: type the card, copy it to your terminal, mark paid. Nothing is saved.
     ffCard.open({id:res.order_id, code:res.code, amount:res.total, closeLabel:'Close and go to the board',
@@ -222,6 +230,12 @@ async function placeOrder(){
 let OMAP = null, OLAYER = null;
 function prefill(){
   if(!SRC) return;
+  try {
+    const qs = new URLSearchParams(window.location.search);
+    if (qs.get('issue') && document.getElementById('issue')) document.getElementById('issue').value = qs.get('issue');
+    if (qs.get('issue_note') && document.getElementById('issueNote')) document.getElementById('issueNote').value = qs.get('issue_note');
+    if (qs.get('send_to') && document.getElementById('sendTo')) document.getElementById('sendTo').value = qs.get('send_to');
+  } catch(e) {}
   document.getElementById('rest').value = SRC.restaurant_id;
   drawMenu();
   cart = SRC.items.map((i,x)=>Object.assign({}, i, {id: i.menu_item_id || ('c'+x)}));

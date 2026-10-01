@@ -288,8 +288,9 @@ function newOrderAlert(stack){
   if (waiting.length){
     if (banner) banner.classList.remove('hidden');
     const top = waiting[waiting.length-1];
-    if (top && top.code !== NOTIFIED){
-      NOTIFIED = top.code;
+    const key = top ? top.code + '|' + (top.paged_at || '') : '';
+    if (top && key !== NOTIFIED){
+      NOTIFIED = key;
       try { ffNotify.show('New order ' + top.code,
             (top.restaurant || '') + ' to ' + (top.address || ''), 'order'); } catch(e){}
     }
