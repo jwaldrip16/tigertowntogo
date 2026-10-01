@@ -278,3 +278,6 @@ pre.code{background:#0f172a;color:#e2e8f0;padding:10px;border-radius:8px;overflo
 /* driver cards are drop targets but should read like cards, left aligned */
 .driver.dropzone{text-align:left;padding:14px;cursor:default;background:#fff}
 .driver.dropzone strong{display:inline;margin-bottom:0}
+
+.weekgrid td.daycell{cursor:pointer}
+.weekgrid td.daycell:hover{outline:2px solid #2563eb;outline-offset:-2px}

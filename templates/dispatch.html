@@ -499,6 +499,7 @@ async function board(force){
           .map(d=>'<option value="'+d.id+'">'+d.name+'</option>').join('') + '</select>'+
         '<button class="btn tiny primary" onclick="sendToDriver('+o.id+')">Send to driver</button>' : '')+
     '<a class="btn tiny primary" href="/dispatch/new-order?from='+o.id+'&redo=1">New order from this</a>'+
+    (o.card_on_file ? '<button class="btn tiny" onclick="viewCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">View card &bull;'+o.card_last4+'</button>' : '')+
     '<button class="btn tiny" onclick="reopen('+o.id+',\''+o.code+'\',false)">Reopen to queue</button>'+
     (o.driver ? '<button class="btn tiny" onclick="reopen('+o.id+',\''+o.code+'\',true)">Reopen to '+
       o.driver+'</button>' : '')+
@@ -536,7 +537,9 @@ function payPill(o){
 function payButtons(o){
   let h = '';
   if(!o.paid){
-    if(!o.cash && o.card_on_file)
+    if(o.card_on_file && o.payment_status==='paid')
+      h += '<button class="btn tiny" onclick="viewCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">View card '+(o.card_brand||'')+' &bull;'+o.card_last4+'</button>';
+    else if(!o.cash && o.card_on_file)
       h += '<button class="btn tiny primary" onclick="runCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">Run card '+(o.card_brand||'')+' &bull;'+o.card_last4+'</button>';
     else if(!o.cash)
       h += '<button class="btn tiny primary" onclick="cardFor('+o.id+',\''+o.code+'\',\''+o.total+'\')">Card</button>';
@@ -561,6 +564,11 @@ function payButtons(o){
     h += '<a class="btn tiny" target="_blank" href="'+o.tip_sig+'">Signature</a>';
   }
   return h;
+}
+async function viewCard(id, code, amount){
+  const res = await jpost('/api/order/card-view', {order_id:id});
+  if(!res.ok){ alert(res.error || 'Could not open that card.'); return; }
+  ffCard.open({id:id, code:code, amount:amount, prefill:res.card, viewOnly:res.paid});
 }
 async function runCard(id, code, amount){
   const res = await jpost('/api/order/card-view', {order_id:id});

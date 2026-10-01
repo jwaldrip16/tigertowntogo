@@ -1,7 +1,7 @@
 // Card box: type a customer's card, copy it into your own card terminal, then mark
-// the order paid. The card lives only in this browser tab. It is never sent to the
-// server, never saved, and is wiped when the box closes, after 10 idle minutes, or
-// when you leave the page. Only the last four digits go with "Mark paid".
+// the order paid. Closing the box keeps the card on the order (encrypted on the
+// server once it checks out, otherwise held in this tab) so nothing typed is lost.
+// After it is marked paid the security code is dropped; the rest can be viewed later.
 (function(){
   let box = null, ORDER = null, idle = null;
   const digits = s => (s || '').replace(/\D/g, '');
@@ -90,7 +90,27 @@
     });
     const m = document.getElementById('cbCheck'); if(m) m.textContent = '';
   }
-  function close(){
+  const DRAFTS = {};
+  function snapshot(){
+    return {name: val('cbName'), number: val('cbNum'), exp: val('cbExp'), cvc: val('cbCvc'),
+            zip: val('cbZip'), ref: val('cbRef')};
+  }
+  async function keep(){
+    // Save what was typed so closing never loses the card.
+    if(!ORDER || !ORDER.id || ORDER.viewOnly || ORDER.saved || !box) return;
+    const f = snapshot();
+    if(!(f.name || f.number || f.exp || f.cvc || f.zip)) { delete DRAFTS[ORDER.id]; return; }
+    DRAFTS[ORDER.id] = f;
+    if(!validate(f).ok) return;
+    try{
+      const r = await fetch('/api/order/card-save', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({order_id: ORDER.id, card: f})});
+      const res = await r.json();
+      if(res.ok) delete DRAFTS[ORDER.id];
+    }catch(e){}
+  }
+  async function close(){
+    await keep();
     wipe(); clearTimeout(idle);
     if(box){ box.remove(); box = null; }
     const done = ORDER && ORDER.onClose; ORDER = null;
@@ -122,10 +142,15 @@
     const v = showErrors(false);
     if(!v.ok){ alert('Fix the highlighted card fields first.'); return; }
     const n = digits(val('cbNum'));
+    try{
+      await fetch('/api/order/card-save', {method:'POST', headers:{'Content-Type':'application/json'},
+        body: JSON.stringify({order_id: ORDER.id, card: snapshot()})});
+    }catch(e){}
     const r = await fetch('/api/order/mark-paid', {method:'POST', headers:{'Content-Type':'application/json'},
       body: JSON.stringify({order_id: ORDER.id, method:'card_keyed', last4: n.slice(-4), ref: val('cbRef')})});
     let res = {}; try{ res = await r.json(); }catch(e){}
     if(!r.ok || !res.ok){ alert(res.error || 'That did not save.'); return; }
+    delete DRAFTS[ORDER.id]; ORDER.saved = true;
     close();
   }
   function field(id, label, attrs, copyLabel){
@@ -180,8 +205,17 @@
       document.getElementById('cbClear').onclick = wipe;
       document.getElementById('cbClose').onclick = close;
       const paid = document.getElementById('cbPaid'); if(paid) paid.onclick = markPaid;
+      if(!ORDER.prefill && ORDER.id && DRAFTS[ORDER.id]) ORDER.prefill = DRAFTS[ORDER.id];
+      if(ORDER.viewOnly){
+        const pb = document.getElementById('cbPaid'); if(pb) pb.style.display = 'none';
+        const rf = document.getElementById('cbRef'); if(rf){ rf.closest('div').style.display = 'none'; }
+        const st = document.createElement('p'); st.className = 'small muted';
+        st.textContent = 'Paid. Security code is not kept after a card is run.';
+        box.querySelector('#cbCheck').after(st);
+      }
       if(ORDER.prefill){
         const p = ORDER.prefill;
+        if(p.ref && document.getElementById('cbRef')) document.getElementById('cbRef').value = p.ref;
         document.getElementById('cbName').value = p.name || '';
         document.getElementById('cbNum').value = p.number || '';
         document.getElementById('cbExp').value = p.exp || '';

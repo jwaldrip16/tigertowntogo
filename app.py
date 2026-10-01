@@ -220,6 +220,9 @@ def init_db():
     ensure_column(con, "drivers", "roster", "TEXT NOT NULL DEFAULT 'scheduled'")
     ensure_column(con, "availability", "status", "TEXT NOT NULL DEFAULT 'approved'")
     ensure_column(con, "availability", "week_start", "TEXT")
+    _ws = (dt.date.today() - dt.timedelta(days=dt.date.today().weekday())).isoformat()
+    con.execute("UPDATE availability SET week_start=? WHERE week_start IS NULL OR week_start=''", (_ws,))
+    ensure_column(con, "card_vault", "paid_at", "TEXT")
     ensure_column(con, "week_submissions", "opened_at", "TEXT")
     ensure_column(con, "week_submissions", "locked_at", "TEXT")
     ensure_column(con, "availability", "created_at", "TEXT")
@@ -1019,6 +1022,7 @@ def order_dict(o):
         "card_last4": (card_info(o["id"]) or {"last4": ""})["last4"] or "",
         "card_brand": (card_info(o["id"]) or {"brand": ""})["brand"] or "",
         "card_viewed_by": (card_info(o["id"]) or {"viewed_by": ""})["viewed_by"] or "",
+        "card_paid": bool((card_info(o["id"]) or {"paid_at": None})["paid_at"]),
         "paid_cents": int(o["paid_cents"] or 0),
         "balance_cents": balance_cents(o) if (o["payment_status"] or "") in ("paid", "part_refunded") else 0,
         "balance": money(abs(balance_cents(o))) if (o["payment_status"] or "") in ("paid", "part_refunded") else "",
@@ -1148,6 +1152,7 @@ def api_address_suggest():
 # wiped after CARD_HOLD_HOURS (default 24) or when the order closes.
 
 CARD_HOLD_HOURS = float(os.environ.get("CARD_HOLD_HOURS", "24"))
+CARD_KEEP_DAYS = float(os.environ.get("CARD_KEEP_DAYS", "30"))
 
 def _fernet():
     from cryptography.fernet import Fernet
@@ -1230,19 +1235,59 @@ def store_card(order_id, card):
     db().commit()
 
 def card_info(order_id):
-    return db().execute("SELECT brand,last4,created_at,viewed_at,viewed_by FROM card_vault WHERE order_id=?",
+    return db().execute("SELECT brand,last4,created_at,viewed_at,viewed_by,paid_at FROM card_vault WHERE order_id=?",
                         (order_id,)).fetchone()
 
 def drop_card(order_id):
     db().execute("DELETE FROM card_vault WHERE order_id=?", (order_id,))
     db().commit()
 
+def keep_card_after_paid(order_id):
+    """Once the card has been run, the security code is dropped for good. Name,
+    number, expiration and ZIP stay encrypted so dispatch can look them up later."""
+    row = db().execute("SELECT blob FROM card_vault WHERE order_id=?", (order_id,)).fetchone()
+    if not row:
+        return
+    try:
+        card = json.loads(_fernet().decrypt(row["blob"].encode()))
+    except Exception:
+        db().execute("DELETE FROM card_vault WHERE order_id=?", (order_id,))
+        return
+    card.pop("cvc", None)
+    db().execute("UPDATE card_vault SET blob=?, paid_at=? WHERE order_id=?",
+                 (_fernet().encrypt(json.dumps(card).encode()).decode(), now(), order_id))
+
 def purge_cards():
-    cutoff = (dt.datetime.now() - dt.timedelta(hours=CARD_HOLD_HOURS)).isoformat(timespec="seconds")
-    db().execute("""DELETE FROM card_vault WHERE created_at < ? OR order_id IN
-                    (SELECT id FROM orders WHERE payment_status IN ('paid','refunded','part_refunded')
-                     OR dispatch_status IN ('delivered','cancelled'))""", (cutoff,))
+    """Unpaid cards go after CARD_HOLD_HOURS, paid ones after CARD_KEEP_DAYS,
+    and a cancelled order's card right away."""
+    hold = (dt.datetime.now() - dt.timedelta(hours=CARD_HOLD_HOURS)).isoformat(timespec="seconds")
+    keep = (dt.datetime.now() - dt.timedelta(days=CARD_KEEP_DAYS)).isoformat(timespec="seconds")
+    db().execute("""DELETE FROM card_vault WHERE
+                    (paid_at IS NULL AND created_at < ?)
+                    OR (paid_at IS NOT NULL AND paid_at < ?)
+                    OR order_id IN (SELECT id FROM orders WHERE dispatch_status='cancelled')""", (hold, keep))
     db().commit()
+
+@app.post("/api/order/card-save")
+def api_card_save():
+    """Dispatch typed a card into the card box and closed it: keep it on the order."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    o = db().execute("SELECT id, code, payment_status FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    card, err = check_card(b.get("card"))
+    if not card:
+        return jsonify({"ok": False, "error": err}), 400
+    store_card(o["id"], card)
+    if o["payment_status"] == "paid":
+        keep_card_after_paid(o["id"])
+        db().commit()
+    who = dispatcher_row()
+    log("payment", (who["name"] if who else "dispatch") + " saved a card on " + o["code"] +
+        " (" + (card["brand"] or "card") + " ending " + card["number"][-4:] + ")")
+    return jsonify({"ok": True, "last4": card["number"][-4:], "brand": card["brand"]})
 
 @app.post("/api/order/card-view")
 def api_card_view():
@@ -1265,7 +1310,8 @@ def api_card_view():
     o = db().execute("SELECT code FROM orders WHERE id=?", (oid,)).fetchone()
     log("payment", name + " opened the card on " + (o["code"] if o else str(oid)) +
         " (" + (row["brand"] or "card") + " ending " + (row["last4"] or "") + ")")
-    return jsonify({"ok": True, "card": {k: card.get(k, "") for k in ("name", "number", "exp", "cvc", "zip")}})
+    return jsonify({"ok": True, "paid": bool(row["paid_at"]),
+                    "card": {k: card.get(k, "") for k in ("name", "number", "exp", "cvc", "zip")}})
 
 
 def sget(key):
@@ -1293,7 +1339,7 @@ def mark_paid(o, method="recorded", ref="", cents=None):
         db().execute("""UPDATE orders SET kitchen_status=?, dispatch_status='held', hold_reason=?
                         WHERE id=?""", (kitchen, reason, o["id"]))
     db().commit()
-    db().execute("DELETE FROM card_vault WHERE order_id=?", (o["id"],))
+    keep_card_after_paid(o["id"])
     db().commit()
     log("payment", o["code"] + " paid " + money(cents) + " (" + method.replace("_", " ") + ")")
     auto_assign()
@@ -2392,6 +2438,18 @@ def pretty_day(d):
     return d.strftime("%a %b ") + str(d.day)
 
 
+def _ordinal(n):
+    return str(n) + ("th" if 11 <= n % 100 <= 13 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
+
+def range_label(week_start):
+    """Week as people say it: 9/28 - Oct 4th 2026."""
+    end = week_start + dt.timedelta(days=6)
+    return (str(week_start.month) + "/" + str(week_start.day) + " - " +
+            end.strftime("%b") + " " + _ordinal(end.day) + " " + str(end.year))
+
+def short_date(d):
+    return str(d.month) + "/" + str(d.day)
+
 def week_label(week_start):
     end = week_start + dt.timedelta(days=6)
     return pretty_day(week_start) + " to " + pretty_day(end)
@@ -2447,11 +2505,16 @@ def availability_for(driver_id, only_approved=False):
     q = "SELECT * FROM availability WHERE driver_id=?"
     if only_approved:
         q += " AND status='approved'"
-    rows = db().execute(q + " ORDER BY dow, start_time", (driver_id,)).fetchall()
+    rows = db().execute(q + " ORDER BY week_start, dow, start_time", (driver_id,)).fetchall()
     return [{"id": r["id"], "dow": r["dow"], "day": DOW_NAMES[r["dow"]],
              "start": r["start_time"], "end": r["end_time"], "note": r["note"] or "",
              "status": r["status"] or "pending", "reply": r["reply"] or "",
-             "decided_by": r["decided_by"] or ""}
+             "decided_by": r["decided_by"] or "",
+             "week_start": r["week_start"] or "",
+             "date": ((dt.date.fromisoformat(r["week_start"]) + dt.timedelta(days=r["dow"])).isoformat()
+                      if r["week_start"] else ""),
+             "date_label": (short_date(dt.date.fromisoformat(r["week_start"]) + dt.timedelta(days=r["dow"]))
+                            if r["week_start"] else "")}
             for r in rows]
 
 
@@ -2480,7 +2543,7 @@ def scheduled_today(driver_id, day=None):
         return []
     rows = db().execute("""SELECT start_time, end_time FROM availability
                            WHERE driver_id=? AND dow=? AND COALESCE(status,'approved')='approved'
-                           AND (week_start IS NULL OR week_start='' OR week_start=?)
+                           AND week_start=?
                            ORDER BY start_time""",
                         (driver_id, day.weekday(), monday_of(day).isoformat())).fetchall()
     return [r["start_time"] + "-" + r["end_time"] for r in rows]
@@ -2515,9 +2578,17 @@ def api_driver_availability():
         end = data.get("end") or "17:00"
         if end <= start:
             return jsonify({"ok": False, "error": "The end time has to be after the start time."}), 400
-        db().execute("""INSERT INTO availability(driver_id,dow,start_time,end_time,note,status,created_at)
-                        VALUES(?,?,?,?,?,'pending',?)""",
-                     (did, dow, start, end, data.get("note", ""), now()))
+        if data.get("date"):
+            try:
+                _d = dt.date.fromisoformat(str(data["date"])[:10])
+                dow = _d.weekday()
+            except ValueError:
+                return jsonify({"ok": False, "error": "Pick a date."}), 400
+        else:
+            _d = dt.date.today() + dt.timedelta(days=(dow - dt.date.today().weekday()) % 7)
+        db().execute("""INSERT INTO availability(driver_id,dow,start_time,end_time,note,status,created_at,
+                        week_start) VALUES(?,?,?,?,?,'pending',?,?)""",
+                     (did, dow, start, end, data.get("note", ""), now(), monday_of(_d).isoformat()))
         name = db().execute("SELECT name FROM drivers WHERE id=?", (did,)).fetchone()["name"]
         log("availability", name + " asked for " + DOW_NAMES[dow] + " " + start + "-" + end)
     db().commit()
@@ -2534,6 +2605,7 @@ def api_driver_week():
     ws = parse_week(request.args.get("start"))
     weeks = [(current_week_start() + dt.timedelta(days=7 * k)).isoformat() for k in range(-4, 2)]
     return jsonify({"ok": True, "week": week_block(did, ws), "weeks": weeks,
+                    "week_labels": {w: range_label(dt.date.fromisoformat(w)) for w in weeks},
                     "open_week": open_week_start().isoformat(),
                     "this_week": current_week_start().isoformat()})
 
@@ -2643,6 +2715,11 @@ def api_dispatch_week():
                     "window_open": week_is_open(ws) and dt.datetime.now() <= due,
                     "weeks": [(current_week_start() + dt.timedelta(days=7 * k)).isoformat()
                               for k in range(-6, 3)],
+                    "week_labels": {(current_week_start() + dt.timedelta(days=7 * k)).isoformat():
+                                    range_label(current_week_start() + dt.timedelta(days=7 * k))
+                                    for k in range(-6, 3)},
+                    "range": range_label(ws),
+                    "dates": [short_date(ws + dt.timedelta(days=i)) for i in range(7)],
                     "missing": [d["driver"] for d in drivers if not d["submitted"]],
                     "drivers": drivers})
 
@@ -2741,6 +2818,34 @@ def api_dispatch_schedule_edit():
         if dec == "approved":
             db().execute("UPDATE drivers SET roster='unavailable' WHERE id=?", (row["driver_id"],)) \
                 if row["start_date"] <= dt.date.today().isoformat() <= row["end_date"] else None
+    elif op in ("add", "set_day") and b.get("date"):
+        # hours for one date only, never repeating
+        try:
+            day = dt.date.fromisoformat(str(b["date"])[:10])
+        except ValueError:
+            return jsonify({"ok": False, "error": "Pick a date."}), 400
+        ws, dow = monday_of(day).isoformat(), day.weekday()
+        did = b["driver_id"]
+        if b.get("off"):
+            db().execute("DELETE FROM availability WHERE driver_id=? AND week_start=? AND dow=?", (did, ws, dow))
+            body = "Dispatch has you off on " + DOW_NAMES[dow] + " " + short_date(day) + "."
+        else:
+            start, end = (b.get("start") or "").strip(), (b.get("end") or "").strip()
+            if not start or not end:
+                return jsonify({"ok": False, "error": "Enter a start and an end time."}), 400
+            if end <= start:
+                return jsonify({"ok": False, "error": "The end time has to be after the start time."}), 400
+            if op == "set_day":
+                db().execute("DELETE FROM availability WHERE driver_id=? AND week_start=? AND dow=?",
+                             (did, ws, dow))
+            db().execute("""INSERT INTO availability(driver_id,dow,start_time,end_time,note,status,
+                            decided_by,decided_at,created_at,week_start)
+                            VALUES(?,?,?,?,?,'approved',?,?,?,?)""",
+                         (did, dow, start, end, b.get("note", ""), who, now(), now(), ws))
+            body = ("Dispatch put you on for " + DOW_NAMES[dow] + " " + short_date(day) + " " +
+                    start + "-" + end + ".")
+        db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
+                     (did, "dispatch", who, body, now()))
     elif op == "add":
         dow = int(b.get("dow", 0))
         start, end = b.get("start") or "09:00", b.get("end") or "17:00"
