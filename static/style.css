@@ -354,3 +354,6 @@ body.assignflash{animation:assignpage 1s ease-in-out infinite}
 .brand{display:inline-flex;align-items:center;gap:8px}
 .brandlogo{height:38px;width:auto;display:block}
 .logoprev{height:90px;width:auto;display:block;margin:6px 0;background:#f7f7f8;border-radius:8px;padding:6px}
+
+.small-sec{font-size:15px;text-align:left;margin:14px 0 4px;text-transform:uppercase;letter-spacing:.04em;color:#555}
+.nowrap{white-space:nowrap}

@@ -102,6 +102,7 @@
 {% block scripts %}
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="/static/cardbox.js"></script>
+<script src="/static/itempick.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const MENUS = {{ menus | tojson }};
@@ -129,21 +130,36 @@ function drawMenu(){
   draw();
 }
 function rebind(rid){
+  // Same look as the customer website: section bar, photo cards, and the same pop-up for every item.
   const items = MENUS[rid]||[];
-  document.getElementById('menu').innerHTML = items.map((i,n)=>
-    '<div class="row"><div><strong>'+i.name+'</strong><div class="muted small">'+
-    (i.description||'')+'</div></div><div class="right"><span>'+money(i.price_cents)+
-    '</span> <button class="btn small" data-n="'+n+'">Add</button></div></div>').join('');
-  document.querySelectorAll('#menu button[data-n]').forEach(b=>{
-    b.onclick = ()=>{ const i = items[parseInt(b.dataset.n,10)];
-      const f = cart.find(c=>c.id===i.id);
-      if (f) f.qty++; else cart.push({id:i.id,menu_item_id:i.id,name:i.name,price_cents:i.price_cents,qty:1,fee_cents:0});
-      draw(); };
+  const el = document.getElementById('menu');
+  if (!items.length){ el.innerHTML = '<p class="muted">No items on this menu yet.</p>'; return; }
+  const order = [], groups = {};
+  items.forEach((it,n)=>{ const sec = (it.section||'').trim() || 'Menu'; if(!groups[sec]){ groups[sec]=[]; order.push(sec); } groups[sec].push(n); });
+  const slug = s => 'dsec-' + s.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+  const nav = order.length > 1 ? '<nav class="secnav">' + order.map(sec=>
+      '<a href="#'+slug(sec)+'" data-jump="'+slug(sec)+'">'+ItemPickEsc(sec)+'</a>').join('') + '</nav>' : '';
+  el.innerHTML = nav + order.map(sec=>
+    '<h3 class="sechead" id="'+slug(sec)+'">'+ItemPickEsc(sec)+'</h3><div class="mgrid">'+
+    groups[sec].map(n=>{ const i = items[n];
+      return '<button type="button" class="mcard" data-n="'+n+'">'+
+        (i.image ? '<img class="mimg" loading="lazy" src="'+i.image+'" alt="">' : '')+
+        '<div class="mhead"><strong>'+ItemPickEsc(i.name)+'</strong><span class="mprice">'+money(i.price_cents)+'</span></div>'+
+        (i.description ? '<div class="mdesc">'+ItemPickEsc(i.description)+'</div>' : '')+'</button>'; }).join('')+
+    '</div>').join('');
+  el.querySelectorAll('a[data-jump]').forEach(a=>{ a.onclick = ev=>{ ev.preventDefault();
+    const t = document.getElementById(a.dataset.jump); if (t) t.scrollIntoView({behavior:'smooth', block:'start'}); }; });
+  el.querySelectorAll('button[data-n]').forEach(b=>{
+    b.onclick = ()=>{
+      const i = items[parseInt(b.dataset.n,10)];
+      ItemPick.open(i, line=>{ cart.push(Object.assign({id:'m'+i.id+'-'+Date.now(), fee_cents:0}, line)); draw(); });
+    };
   });
 }
-function bump(id,d){
-  const f = cart.find(c=>c.id===id); if(!f) return;
-  f.qty += d; if (f.qty<=0) cart = cart.filter(c=>c.id!==id);
+function ItemPickEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function bump(ix,d){
+  const f = cart[ix]; if(!f) return;
+  f.qty += d; if (f.qty<=0) cart.splice(ix,1);
   draw();
 }
 function subtotal(){ return cart.reduce((s,c)=>s+c.price_cents*c.qty,0); }
@@ -164,9 +180,9 @@ function addCustom(){
 }
 function draw(){
   const el = document.getElementById('cart');
-  el.innerHTML = cart.length ? cart.map(c=>'<div class="row"><span>'+c.name+'</span><span>'+
-    '<button class="btn tiny" onclick="bump(\''+c.id+'\',-1)">-</button> '+c.qty+
-    ' <button class="btn tiny" onclick="bump(\''+c.id+'\',1)">+</button> '+
+  el.innerHTML = cart.length ? cart.map((c,ix)=>'<div class="row"><span>'+ItemPick.label(c)+'</span><span class="nowrap">'+
+    '<button class="btn tiny" onclick="bump('+ix+',-1)">-</button> '+c.qty+
+    ' <button class="btn tiny" onclick="bump('+ix+',1)">+</button> '+
     money((c.price_cents+(c.fee_cents||0))*c.qty)+
     '</span></div>').join('') : '<p class="muted">Nothing added yet.</p>';
   totals();

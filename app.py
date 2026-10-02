@@ -2521,9 +2521,7 @@ def dispatch_new_order():
     rests = db().execute("SELECT * FROM restaurants ORDER BY name").fetchall()
     menus = {}
     for r in rests:
-        menus[r["id"]] = [dict(m) for m in db().execute(
-            "SELECT * FROM menu_items WHERE restaurant_id=? AND active=1 ORDER BY name",
-            (r["id"],)).fetchall()]
+        menus[r["id"]] = menu_payload(r["id"])
     src = None
     fid = request.args.get("from")
     if fid:
@@ -2581,6 +2579,14 @@ def clean_items(raw):
                 "fee_cents": max(0, int(round(float(i.get("fee_cents", 0) or 0)))),
                 "custom": bool(i.get("custom") or not i.get("menu_item_id")),
                 "note": (i.get("note") or "")[:120]}
+        picks = []
+        for p in (i.get("options") or [])[:40]:
+            if not isinstance(p, dict) or not str(p.get("name") or "").strip():
+                continue
+            picks.append({"group": str(p.get("group") or "")[:80], "name": str(p.get("name"))[:120],
+                          "delta_cents": max(0, int(round(float(p.get("delta_cents") or 0))))})
+        if picks:
+            line["options"] = picks
         out.append(line)
     return out
 

@@ -65,6 +65,7 @@
 </div>
 {% endblock %}
 {% block scripts %}<script src="/static/cardbox.js"></script>
+<script src="/static/itempick.js"></script>
 <style>.cc-err{color:#c0392b;min-height:1em}</style>
 <script>
 const RID = {{ r['id'] }};
@@ -104,104 +105,11 @@ function jumpSection(ev, id){
   const t = document.getElementById(id);
   if (t) t.scrollIntoView({behavior:'smooth', block:'start'});
 }
-// ---- item pop-up: pick sides, drinks, sauces, add a note, set how many ----
-let CUR = null, CURQ = 1, COUNTS = {};
-function limitText(g){
-  const total = g.max > 1 ? ('pick up to '+g.max) : 'pick 1';
-  if (g.min > 0 && g.min === g.max && g.max > 1) return 'pick '+g.max;
-  return total + (g.each > 1 ? (', up to '+g.each+' of each') : '');
-}
-function groupTotal(g){ return g.options.reduce((s,o)=>s+(COUNTS[o.id]||0),0); }
 function openItem(id){
-  CUR = MENU.find(x=>x.id===id); if (!CUR) return;
-  CURQ = 1; COUNTS = {};
-  const groups = (CUR.groups||[]).map(g=>{
-    const rows = g.options.map(o=>{
-      const price = o.delta_cents ? '<span class="muted">+'+o.delta+'</span>' : '';
-      if (g.each > 1){
-        return '<div class="optrow" id="or'+o.id+'"><span>'+escH(o.name)+' '+price+'</span>'+
-          '<span class="step"><button type="button" onclick="stepOpt('+g.id+','+o.id+',-1)">&minus;</button>'+
-          '<b id="oc'+o.id+'">0</b><button type="button" onclick="stepOpt('+g.id+','+o.id+',1)">+</button></span></div>';
-      }
-      return '<label class="optrow" id="or'+o.id+'"><span><input type="'+(g.max>1?'checkbox':'radio')+
-        '" name="mg'+g.id+'" value="'+o.id+'" onchange="pickOpt('+g.id+','+o.id+',this)"> '+escH(o.name)+'</span>'+price+'</label>';
-    }).join('');
-    return '<div class="ogroup" id="og'+g.id+'"><div class="ohead"><span>'+escH(g.name)+'</span>'+
-      '<span class="req">'+(g.min>0?'REQUIRED':'OPTIONAL')+'</span></div>'+
-      '<div class="muted small ohint">'+limitText(g)+'</div><div class="ogrid">'+rows+'</div></div>';
-  }).join('');
-  const box = document.createElement('div');
-  box.className = 'modalback'; box.id = 'itemModal';
-  box.onclick = ev=>{ if (ev.target === box) closeItem(); };
-  box.innerHTML = '<div class="itemmodal" role="dialog" aria-label="'+escH(CUR.name)+'">'+
-    '<button type="button" class="imclose" onclick="closeItem()" aria-label="Close">&times;</button>'+
-    '<h2>'+escH(CUR.name)+'</h2><div class="im-cols"><div>'+
-    (groups || '<p class="muted">No choices to make on this one.</p>')+'</div><div>'+
-    (CUR.image ? '<img class="imimg" src="'+CUR.image+'" alt="">' : '')+
-    (CUR.description ? '<p>'+escH(CUR.description)+'</p>' : '')+
-    '<textarea id="imNote" rows="2" maxlength="120" placeholder="Your special instructions..."></textarea>'+
-    '<div class="addbag"><button type="button" class="qtyb" onclick="stepQty(-1)">&minus;</button>'+
-    '<b id="imQty">1</b><button type="button" class="qtyb" onclick="stepQty(1)">+</button>'+
-    '<button type="button" class="btn primary" id="imAdd" onclick="addCurrent()"></button></div>'+
-    '<div class="small bad" id="imErr"></div></div></div></div>';
-  document.body.appendChild(box);
-  document.addEventListener('keydown', escClose);
-  updateAdd();
-}
-function escClose(ev){ if (ev.key === 'Escape') closeItem(); }
-function closeItem(){
-  const m = document.getElementById('itemModal'); if (m) m.remove();
-  document.removeEventListener('keydown', escClose);
-  CUR = null;
-}
-function findGroup(gid){ return (CUR.groups||[]).find(g=>g.id===gid); }
-function stepOpt(gid, oid, d){
-  const g = findGroup(gid); const now = COUNTS[oid]||0;
-  const next = now + d;
-  if (next < 0) return;
-  if (d > 0 && next > g.each){ showErr('Up to '+g.each+' of each.'); return; }
-  if (d > 0 && groupTotal(g) + 1 > g.max){ showErr(g.name+': pick at most '+g.max+'.'); return; }
-  COUNTS[oid] = next;
-  document.getElementById('oc'+oid).textContent = next;
-  document.getElementById('or'+oid).classList.toggle('on', next > 0);
-  showErr(''); updateAdd();
-}
-function pickOpt(gid, oid, inp){
-  const g = findGroup(gid);
-  if (g.max <= 1){ g.options.forEach(o=>{ COUNTS[o.id] = 0; }); }
-  if (inp.checked && g.max > 1 && groupTotal(g) + 1 > g.max){
-    inp.checked = false; showErr(g.name+': pick at most '+g.max+'.'); return;
-  }
-  COUNTS[oid] = inp.checked ? 1 : 0;
-  showErr(''); updateAdd();
-}
-function stepQty(d){ CURQ = Math.max(1, Math.min(50, CURQ + d)); document.getElementById('imQty').textContent = CURQ; updateAdd(); }
-function showErr(t){ const e = document.getElementById('imErr'); if (e) e.textContent = t; }
-function unitPrice(){
-  let p = CUR.price_cents;
-  (CUR.groups||[]).forEach(g=>g.options.forEach(o=>{ p += (COUNTS[o.id]||0) * o.delta_cents; }));
-  return p;
-}
-function updateAdd(){ const b = document.getElementById('imAdd'); if (b) b.textContent = 'Add to bag  ' + money(unitPrice() * CURQ); }
-function addCurrent(){
-  const picks = [];
-  for (const g of (CUR.groups||[])){
-    const n = groupTotal(g);
-    if (n < g.min){
-      showErr(g.min > 1 ? (g.name+': pick '+g.min+'.') : ('Choose your '+g.name.replace(/\?$/,'').toLowerCase()+' first.'));
-      document.getElementById('og'+g.id).scrollIntoView({behavior:'smooth', block:'center'});
-      return;
-    }
-    for (const o of g.options){
-      const c = COUNTS[o.id]||0;
-      if (c) picks.push({group:g.name, name: c > 1 ? (o.name+' x'+c) : o.name, delta_cents:o.delta_cents * c});
-    }
-  }
-  const note = (document.getElementById('imNote').value||'').trim();
-  if (note) picks.push({group:'Instructions', name:note, delta_cents:0});
-  cart.push({id:CUR.id, name:CUR.name, price_cents:unitPrice(), qty:CURQ, options:picks});
-  closeItem();
-  draw();
+  ItemPick.open(MENU.find(x=>x.id===id), line=>{
+    cart.push(Object.assign({id:line.menu_item_id}, line));
+    draw();
+  });
 }
 function addItem(id,name,price){
   const f = cart.find(c=>c.id===id);
@@ -213,10 +121,7 @@ function bump(ix,d){
   f.qty += d; if (f.qty<=0) cart.splice(ix,1);
   draw();
 }
-function lineLabel(c){
-  const picks = (c.options||[]).map(o=>o.group+': '+o.name+(o.delta_cents?(' +'+money(o.delta_cents)):''));
-  return c.name + (picks.length ? ' <span class="muted small">('+picks.join(', ')+')</span>' : '');
-}
+function lineLabel(c){ return ItemPick.label(c); }
 function subtotal(){ return cart.reduce((s,c)=>s+c.price_cents*c.qty,0); }
 function draw(){
   const el = document.getElementById('cart');
