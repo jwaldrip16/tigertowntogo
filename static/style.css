@@ -357,3 +357,15 @@ body.assignflash{animation:assignpage 1s ease-in-out infinite}
 
 .small-sec{font-size:15px;text-align:left;margin:14px 0 4px;text-transform:uppercase;letter-spacing:.04em;color:#555}
 .nowrap{white-space:nowrap}
+
+.edmodal{max-width:1100px}
+.edmodal #edMenu{max-height:62vh;overflow:auto;padding-right:6px}
+.edmodal .mgrid{grid-template-columns:repeat(auto-fill,minmax(170px,1fr))}
+.edrow{display:flex;gap:8px;flex-wrap:wrap;margin:8px 0}
+.edrow label{flex:1;min-width:90px;font-size:13px}
+.edrow input,.edcustom input,.edmodal label input{width:100%}
+.edcustom{margin:10px 0;border:1px solid #ddd;border-radius:8px;padding:8px}
+.edcustom summary{cursor:pointer;font-weight:600}
+
+.paybar{background:#ecfdf3;border:1px solid #b7ebc9;color:#14532d;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:15px}
+.paybar b{font-size:16px}

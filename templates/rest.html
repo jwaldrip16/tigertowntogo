@@ -154,7 +154,8 @@ async function load(force){
   document.getElementById('ordersDone').innerHTML = done.length ? done.map(o=>
     '<div class="panel slim"><div class="row between"><div><strong>'+o.code+'</strong> '+
     (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+o.customer+
-    '<div class="muted small">'+o.lines.join(', ')+'</div></div>'+
+    '<div class="muted small">'+o.lines.join(', ')+'</div>'+
+    '<div class="small">Delivery fee '+o.fee+' &middot; Tip '+o.tip+'</div></div>'+
     '<div class="right muted small">'+({enroute:'Driver en route',delivered:'Delivered',
       cancelled:'Cancelled'}[o.dispatch_status]||'')+
     (o.ready_time ? '<div>Ready '+o.ready_time+'</div>' : '')+'</div></div></div>').join('')
@@ -169,6 +170,7 @@ async function load(force){
       (o.driver?' <span class="pill blue">driver '+o.driver+'</span>':
        o.queue_position?' <span class="pill grey">queue #'+o.queue_position+'</span>':'')+'</div>'+
       '<div class="detail">'+
+      '<div class="paybar">Delivery fee <b>'+o.fee+'</b> &middot; Tip <b>'+o.tip+'</b></div>'+
       '<div class="detail-row"><span class="lbl">Customer</span><span><strong>'+o.customer+'</strong>'+
         '<br><a href="tel:'+o.phone+'">'+o.phone+'</a><br>'+o.address+
         (o.note?('<br><em>'+o.note+'</em>'):'')+'</span></div>'+

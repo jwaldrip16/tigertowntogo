@@ -2447,6 +2447,23 @@ def api_timer():
                     "timer_seconds": order_dict(fresh)["timer_seconds"]})
 
 
+@app.get("/api/dispatch/order-edit/<int:oid>")
+def api_dispatch_order_edit_load(oid):
+    """Everything the order editor needs: the order's lines and that restaurant's full menu."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    r = db().execute("SELECT name FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+    return jsonify({"ok": True, "id": o["id"], "code": o["code"],
+                    "restaurant": r["name"] if r else "",
+                    "items": json.loads(o["items"] or "[]"),
+                    "fee_cents": o["fee_cents"], "tip_cents": o["tip_cents"],
+                    "ref": o["ref_code"] or "",
+                    "menu": menu_payload(o["restaurant_id"]) if o["restaurant_id"] else []})
+
+
 @app.post("/api/order/edit")
 def api_order_edit():
     """Dispatcher edits: line items, delivery fee, tip. Totals are recomputed."""

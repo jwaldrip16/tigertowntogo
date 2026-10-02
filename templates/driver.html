@@ -238,14 +238,24 @@ function gateCheck(res, d){
   return true;
 }
 function renderDone(list){
+  // Once an order is marked complete the driver keeps the full customer details for it.
   document.getElementById('cntDone').textContent = list.length ? '(' + list.length + ')' : '';
   document.getElementById('doneList').innerHTML = list.length ? list.map(function(o){
+    const ph = (o.phone||'').replace(/[^0-9]/g,'');
     return '<div class="panel slim"><div class="row between"><div><strong>' + o.code + '</strong> ' +
       '<span class="pill ' + (o.dispatch_status === 'delivered' ? 'green' : 'grey') + '">' + o.dispatch_status + '</span></div>' +
       '<span class="muted small">' + (o.delivered_time || (o.delivered_at || '').slice(11, 16)) + '</span></div>' +
-      '<div class="small">' + o.restaurant + ' &rarr; ' + o.customer + '</div>' +
-      '<div class="muted small">' + o.address + '</div>' +
-      '<div class="small">Total ' + o.total + ' &middot; tip ' + o.tip + (o.cash ? ' &middot; cash' : '') + '</div></div>';
+      '<div class="paybar">Delivery fee <b>' + o.fee + '</b> &middot; Tip <b>' + o.tip + '</b>' + (o.cash ? ' &middot; cash' : '') + '</div>' +
+      '<div class="small">From ' + o.restaurant + '</div>' +
+      '<div class="detail-row"><span class="lbl">Customer</span><span><strong>' + o.customer + '</strong>' +
+        (o.phone ? '<br><a href="tel:' + ph + '">' + o.phone + '</a>' : '') +
+        '<br>' + o.address + (o.note ? '<br><em>' + o.note + '</em>' : '') + '</span></div>' +
+      '<div class="muted small">' + (o.lines || []).join(', ') + '</div>' +
+      '<div class="small">Order total ' + o.total + '</div>' +
+      '<div class="row" style="gap:6px;flex-wrap:wrap;margin-top:6px">' +
+        (o.phone ? '<a class="btn tiny" href="tel:' + ph + '">Call customer</a><a class="btn tiny" href="sms:' + ph + '">Text customer</a>' : '') +
+        (o.customer_nav ? '<a class="btn tiny" target="_blank" href="' + o.customer_nav + '">Map</a>' : '') +
+      '</div></div>';
   }).join('') : '<p class="muted">No completed orders in the last 14 hours.</p>';
 }
 async function state(){
@@ -284,6 +294,7 @@ function detailBlock(o){
   const lines = (o.lines || o.items.map(i=>i.qty+' x '+i.name))
     .map(l=>'<li>'+l+'</li>').join('');
   return '<div class="detail">'+
+    '<div class="paybar">Delivery fee <b>'+o.fee+'</b> &middot; Tip <b>'+o.tip+'</b>'+(o.cash?' &middot; cash':'')+'</div>'+
     '<div class="detail-row"><span class="lbl">Pick up</span><span>'+o.restaurant+
       '<br><span class="muted small">'+o.restaurant_address+'</span></span></div>'+
     '<div class="detail-row"><span class="lbl">Deliver to</span><span><strong>'+o.customer+'</strong>'+

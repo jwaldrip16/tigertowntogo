@@ -123,7 +123,8 @@
 </div>
 </div>
 {% endblock %}
-{% block scripts %}<script src="/static/cardbox.js"></script>
+{% block scripts %}
+<script src="/static/itempick.js"></script><script src="/static/cardbox.js"></script>
 <script>
 let DRAGGED = null;
 let SEEN_PENDING = null;
@@ -253,47 +254,95 @@ async function loadBlocked(){
     : 'No blocked numbers.';
 }
 async function unblock(p){ await jpost('/api/dispatch/block', {phone:p}); loadBlocked(); }
+// ---- order editor: same menu cards and choice pop-up as the customer website
+let ED = null;
+function edEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function editOrder(oid){
-  const res = await jget('/api/dispatch/board');
-  let o = null;
-  ['orders','pending','queued','running','completed','live','done'].forEach(k=>{
-    (res[k]||[]).forEach(x=>{ if(!o && x.id===oid) o = x; });
-  });
-  if(!o){ alert('Order not found.'); return; }
-  const items = o.items.map(i=>{
-    const q = prompt('Qty for '+i.name+' ('+money(i.price_cents)+' each'+
-      (i.fee_cents?', fee '+money(i.fee_cents):'')+'). 0 removes it.', i.qty);
-    if(q===null) return i;
-    return Object.assign({}, i, {qty: parseInt(q,10) || 0});
-  });
-  while(confirm('Add a custom item to '+o.code+'?')){
-    const name = prompt('Custom item name');
-    if(!name) break;
-    const price = prompt('Price in dollars for '+name, '0');
-    if(price===null) break;
-    const cfee = prompt('Fee charged on top of that item, in dollars (0 for none)', '0');
-    if(cfee===null) break;
-    const qty = parseInt(prompt('How many?', '1')||'1', 10) || 1;
-    const note = prompt('Note for the kitchen (optional)', '') || '';
-    items.push({menu_item_id:null, custom:true, name:name, qty:qty,
-      price_cents: Math.round(parseFloat(price||'0')*100),
-      fee_cents: Math.round(parseFloat(cfee||'0')*100), note:note});
-  }
-  const fee = prompt('Delivery fee in dollars', (o.fee||'$0').replace('$',''));
-  if(fee===null) return;
-  const tip = prompt('Tip in dollars', (o.tip||'$0').replace('$',''));
-  if(tip===null) return;
-  const ref = prompt('Their order number (blank for none)', o.ref||'');
-  if(ref===null) return;
-  const r2 = await jpost('/api/order/edit', {order_id: oid, items: items, ref: ref,
-      fee_cents: Math.round(parseFloat(fee||'0')*100),
-      tip_cents: Math.round(parseFloat(tip||'0')*100)});
-  if(r2 && r2.dupe){ alert('Heads up: '+ref+' is already on order '+r2.dupe+' today.'); }
-  if(r2.ok){
-    if(r2.item_fee && r2.item_fee !== '$0.00') alert('Custom item fees: '+r2.item_fee+
-      '. New total '+r2.total+'.');
-    board(true);
-  } else alert(r2.error || 'Edit failed.');
+  const res = await jget('/api/dispatch/order-edit/'+oid);
+  if(!res || !res.ok){ alert((res && res.error) || 'Order not found.'); return; }
+  ED = {id:res.id, code:res.code, items:res.items.map(i=>Object.assign({}, i)), menu:res.menu||[]};
+  const old = document.getElementById('edModal'); if(old) old.remove();
+  const box = document.createElement('div');
+  box.className = 'modalback'; box.id = 'edModal';
+  box.innerHTML = '<div class="itemmodal edmodal" role="dialog" aria-label="Edit order">'+
+    '<button type="button" class="imclose" onclick="edClose()" aria-label="Close">&times;</button>'+
+    '<h2>Edit '+edEsc(res.code)+' <span class="muted small">'+edEsc(res.restaurant)+'</span></h2>'+
+    '<div class="im-cols"><div><h3 class="small-sec">Add from the menu</h3><div id="edMenu"></div></div>'+
+    '<div><h3 class="small-sec">On this order</h3><div id="edLines"></div>'+
+    '<details class="edcustom"><summary>Add a custom item</summary>'+
+      '<input id="edcName" placeholder="Item name" maxlength="80">'+
+      '<div class="edrow"><label>Price $ <input id="edcPrice" type="number" step="0.01" min="0" value="0"></label>'+
+      '<label>Fee $ <input id="edcFee" type="number" step="0.01" min="0" value="0"></label>'+
+      '<label>Qty <input id="edcQty" type="number" min="1" max="50" value="1"></label></div>'+
+      '<input id="edcNote" placeholder="Note for the kitchen (optional)" maxlength="120">'+
+      '<button type="button" class="btn small" onclick="edCustom()">Add custom item</button></details>'+
+    '<div class="edrow"><label>Delivery fee $ <input id="edFee" type="number" step="0.01" min="0" value="'+(res.fee_cents/100).toFixed(2)+'"></label>'+
+      '<label>Tip $ <input id="edTip" type="number" step="0.01" min="0" value="'+(res.tip_cents/100).toFixed(2)+'"></label></div>'+
+    '<label class="small">Their order number <input id="edRef" maxlength="40" value="'+edEsc(res.ref)+'"></label>'+
+    '<div class="small muted" id="edSub"></div>'+
+    '<div class="addbag"><button type="button" class="btn" onclick="edClose()">Cancel</button>'+
+      '<button type="button" class="btn primary" id="edSave" onclick="edSave()">Save changes</button></div>'+
+    '<div class="small bad" id="edErr"></div></div></div></div>';
+  document.body.appendChild(box);
+  edDrawMenu(); edDraw();
+}
+function edClose(){ const m=document.getElementById('edModal'); if(m) m.remove(); ED=null; }
+function edDrawMenu(){
+  const el = document.getElementById('edMenu'); const items = ED.menu;
+  if(!items.length){ el.innerHTML = '<p class="muted">No menu items for this restaurant. Use a custom item.</p>'; return; }
+  const order=[], groups={};
+  items.forEach((it,n)=>{ const sec=(it.section||'').trim()||'Menu'; if(!groups[sec]){groups[sec]=[];order.push(sec);} groups[sec].push(n); });
+  el.innerHTML = (order.length>1 ? '<nav class="secnav">'+order.map((sec,k)=>'<a href="#" data-k="'+k+'">'+edEsc(sec)+'</a>').join('')+'</nav>' : '')+
+    order.map((sec,k)=>'<h3 class="sechead" id="edsec'+k+'">'+edEsc(sec)+'</h3><div class="mgrid">'+
+      groups[sec].map(n=>{ const i=items[n];
+        return '<button type="button" class="mcard" data-n="'+n+'">'+
+          (i.image?'<img class="mimg" loading="lazy" src="'+i.image+'" alt="">':'')+
+          '<div class="mhead"><strong>'+edEsc(i.name)+'</strong><span class="mprice">'+money(i.price_cents)+'</span></div>'+
+          (i.description?'<div class="mdesc">'+edEsc(i.description)+'</div>':'')+'</button>'; }).join('')+'</div>').join('');
+  el.querySelectorAll('a[data-k]').forEach(a=>{ a.onclick=ev=>{ ev.preventDefault();
+    const t=document.getElementById('edsec'+a.dataset.k); if(t) t.scrollIntoView({behavior:'smooth',block:'start'}); }; });
+  el.querySelectorAll('button[data-n]').forEach(b=>{ b.onclick=()=>{
+    const i = ED.menu[parseInt(b.dataset.n,10)];
+    ItemPick.open(i, line=>{ if(!ED) return; ED.items.push(Object.assign({fee_cents:0}, line)); edDraw(); });
+  }; });
+}
+function edDraw(){
+  const el = document.getElementById('edLines'); if(!el) return;
+  el.innerHTML = ED.items.length ? ED.items.map((c,ix)=>'<div class="row"><span>'+ItemPick.label(c)+
+      (c.note?' <span class="muted small">(Note: '+edEsc(c.note)+')</span>':'')+
+      (c.fee_cents?' <span class="muted small">fee '+money(c.fee_cents)+'</span>':'')+'</span><span class="nowrap">'+
+      '<button type="button" class="btn tiny" onclick="edBump('+ix+',-1)">-</button> '+c.qty+
+      ' <button type="button" class="btn tiny" onclick="edBump('+ix+',1)">+</button> '+
+      money(c.price_cents*c.qty)+' <button type="button" class="btn tiny" title="Remove" onclick="edBump('+ix+',-999)">&times;</button></span></div>').join('')
+    : '<p class="muted">No items. Add something from the menu or a custom item.</p>';
+  const sub = ED.items.reduce((s,c)=>s+c.price_cents*c.qty,0);
+  document.getElementById('edSub').textContent = 'Items '+money(sub)+'. Tax and the new total are worked out when you save.';
+}
+function edBump(ix,d){ const c=ED.items[ix]; if(!c) return; c.qty = Math.min(50, c.qty+d); if(c.qty<=0) ED.items.splice(ix,1); edDraw(); }
+function edCustom(){
+  const name=(document.getElementById('edcName').value||'').trim();
+  if(!name){ document.getElementById('edErr').textContent='Give the custom item a name.'; return; }
+  ED.items.push({menu_item_id:null, custom:true, name:name,
+    qty: Math.max(1, parseInt(document.getElementById('edcQty').value,10)||1),
+    price_cents: Math.round((parseFloat(document.getElementById('edcPrice').value)||0)*100),
+    fee_cents: Math.round((parseFloat(document.getElementById('edcFee').value)||0)*100),
+    note: (document.getElementById('edcNote').value||'').trim()});
+  ['edcName','edcNote'].forEach(k=>document.getElementById(k).value='');
+  document.getElementById('edcPrice').value='0'; document.getElementById('edcFee').value='0'; document.getElementById('edcQty').value='1';
+  document.getElementById('edErr').textContent=''; edDraw();
+}
+async function edSave(){
+  if(!ED.items.length){ document.getElementById('edErr').textContent='An order needs at least one item. Cancel the order instead if it is not wanted.'; return; }
+  const btn=document.getElementById('edSave'); btn.disabled=true;
+  const ref=document.getElementById('edRef').value;
+  const r2 = await jpost('/api/order/edit', {order_id: ED.id, items: ED.items, ref: ref,
+      fee_cents: Math.round((parseFloat(document.getElementById('edFee').value)||0)*100),
+      tip_cents: Math.round((parseFloat(document.getElementById('edTip').value)||0)*100)});
+  btn.disabled=false;
+  if(r2 && r2.ok){
+    if(r2.dupe) alert('Heads up: '+ref+' is already on order '+r2.dupe+' today.');
+    edClose(); board(true);
+  } else document.getElementById('edErr').textContent = (r2 && r2.error) || 'Edit failed.';
 }
 let DRIVERS = [];
 let ROSTER = 'active';
@@ -827,7 +876,7 @@ function orderCard(o, opts, drivers){
       '<button class="btn tiny" onclick="nudge('+o.id+',5)">+5</button>'+
       '<button class="btn tiny" onclick="setTimer('+o.id+')">Set timer</button>'+
       '<button class="btn tiny" onclick="kitchen('+o.id+',\'ready\')">Mark ready</button>'+
-      '<button class="btn tiny" onclick="editOrder('+o.id+')">Edit items / fee / tip</button>'+
+      '<button class="btn tiny" onclick="editOrder('+o.id+')">Edit order</button>'+
       '<button class="btn tiny" onclick="setToken('+o.id+')">'+(o.token?'Tag: '+esc(o.token):'Add tag')+'</button>'+
       '<button class="btn tiny" onclick="noteOrder('+o.id+')">'+(o.dispatch_note?'Edit note':'Add note')+'</button>'+
       '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>'+
