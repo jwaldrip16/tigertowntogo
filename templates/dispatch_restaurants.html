@@ -47,6 +47,12 @@
   <div class="row"><label>Default prep minutes</label>
     <input type="number" name="prep_default" value="{{ d.r['prep_default'] }}" min="1" max="120"></div>
   <div class="row"><label>Phone</label><input name="phone" value="{{ d.r['phone'] }}"></div>
+  <div class="photoedit"><label>Photo for the customer website</label>
+    {% if d.r['image'] %}<img class="edimg" src="/media/{{ d.r['image'] }}" alt="">{% else %}<div class="noimg">No photo yet</div>{% endif %}
+    <label class="btn small">{{ 'Replace photo' if d.r['image'] else 'Upload photo' }}
+      <input type="file" accept="image/*" hidden onchange="restPhoto({{ d.r['id'] }}, this)"></label>
+    {% if d.r['image'] %}<button type="button" class="btn small" onclick="restPhoto({{ d.r['id'] }}, null)">Remove photo</button>{% endif %}
+    <span class="small muted" id="rp{{ d.r['id'] }}"></span></div>
   <button class="btn primary">Save {{ d.r['name'] }}</button>
   <p><a class="btn small" href="/dispatch/menu/{{ d.r['id'] }}">Menu items</a>
      <a class="btn small" href="/dispatch/account">Store code and PIN</a></p>
@@ -58,3 +64,13 @@
 </form>
 {% endfor %}
 {% endblock %}
+{% block scripts %}<script>
+async function restPhoto(id, inp){
+  const fd = new FormData(); fd.append('kind','restaurant'); fd.append('id', id);
+  if (inp){ if (!inp.files.length) return; fd.append('photo', inp.files[0]); document.getElementById('rp'+id).textContent = 'Uploading...'; }
+  else { if (!confirm('Remove this photo?')) return; fd.append('op','remove'); }
+  const res = await (await fetch('/api/dispatch/photo', {method:'POST', body:fd})).json().catch(()=>({ok:false}));
+  if (!res.ok){ document.getElementById('rp'+id).textContent = res.error || 'Upload failed.'; return; }
+  location.reload();
+}
+</script>{% endblock %}

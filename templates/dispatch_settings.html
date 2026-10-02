@@ -2,6 +2,26 @@
 <div class="head"><h1>Settings</h1><a class="btn small" href="/dispatch">Back to board</a></div>
 {% if saved %}<p class="good">Settings saved.</p>{% endif %}
 {% for e in errors or [] %}<p style="color:#c0392b">{{ e }}</p>{% endfor %}
+<div class="panel narrow">
+  <h2>Logo</h2>
+  <p class="muted small">Shows at the top of the customer site, dispatch, the driver app and the restaurant app,
+    and is used for the driver and kitchen app icons. A square PNG at least 512 pixels wide looks sharpest.</p>
+  <img class="logoprev" id="logoPrev" src="{{ logo_url }}" alt="Current logo">
+  <label class="btn small">Change logo<input type="file" accept="image/*" hidden onchange="setLogo(this)"></label>
+  <button type="button" class="btn small" onclick="setLogo(null)">Use the original Tiger Town logo</button>
+  <span class="small muted" id="logoMsg"></span>
+</div>
+<script>
+async function setLogo(inp){
+  const fd = new FormData();
+  if (inp){ if (!inp.files.length) return; fd.append('photo', inp.files[0]); }
+  else { if (!confirm('Go back to the original logo?')) return; fd.append('op','reset'); }
+  document.getElementById('logoMsg').textContent = 'Saving...';
+  const res = await (await fetch('/api/dispatch/logo', {method:'POST', body:fd})).json().catch(()=>({ok:false}));
+  if (!res.ok){ document.getElementById('logoMsg').textContent = res.error || 'Not saved.'; return; }
+  location.reload();
+}
+</script>
 <form class="panel narrow" method="post">
   <h2>Business</h2>
   <label>Business name</label>

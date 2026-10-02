@@ -1,7 +1,8 @@
 
 import base64, difflib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
 import dbx
-from flask import Flask, g, request, session, redirect, url_for, render_template, jsonify
+from flask import Flask, g, request, session, redirect, url_for, render_template, jsonify, send_from_directory
+import presets
 
 # ---------------------------------------------------------------- local time
 # Hosts like Railway and Render run on UTC. The whole app (order times, shop hours,
@@ -33,6 +34,7 @@ DB_PATH = os.environ.get("DB_PATH", os.path.join(APP_DIR, "delivery.db"))
 GOOGLE_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 # Railway/Render sit in front of the app and talk to it over plain http. Trust their
 # forwarded headers so links we build use https.
 from werkzeug.middleware.proxy_fix import ProxyFix
@@ -303,6 +305,9 @@ def init_db():
     """)
     ensure_column(con, "messages", "seen_by_dispatch", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "menu_items", "sort", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(con, "menu_items", "image", "TEXT")
+    ensure_column(con, "restaurants", "image", "TEXT")
+    ensure_column(con, "option_groups", "max_each", "INTEGER NOT NULL DEFAULT 1")
     ensure_column(con, "orders", "payment_status", "TEXT NOT NULL DEFAULT 'unpaid'")
     ensure_column(con, "orders", "pay_method", "TEXT")
     ensure_column(con, "orders", "paid_at", "TEXT")
@@ -387,6 +392,8 @@ def init_db():
     # The status history triggers, installed once the
     # late-added columns above exist
     dbx.install_triggers(con)
+    presets.autoload(con)
+    con.commit()
     con.close()
 
 
@@ -899,7 +906,7 @@ def item_options(item_id):
         opts = db().execute("SELECT * FROM options WHERE group_id=? ORDER BY sort, id",
                             (g["id"],)).fetchall()
         groups.append({"id": g["id"], "name": g["name"], "min": g["min_select"],
-                       "max": g["max_select"],
+                       "max": g["max_select"], "each": max(1, int(g["max_each"] or 1)),
                        "options": [{"id": o["id"], "name": o["name"],
                                     "delta_cents": o["price_delta_cents"],
                                     "delta": money(o["price_delta_cents"])} for o in opts]})
@@ -914,6 +921,7 @@ def menu_payload(rid):
         out.append({"id": it["id"], "name": it["name"], "description": it["description"],
                     "price_cents": it["price_cents"], "price": money(it["price_cents"]),
                     "section": (it["section"] or "").strip(),
+                    "image": media_url(it["image"]),
                     "groups": item_options(it["id"])})
     return out
 
@@ -1622,7 +1630,13 @@ def release_scheduled():
     con = db()
     rows = con.execute("""SELECT * FROM orders WHERE dispatch_status='scheduled'
                           AND release_at IS NOT NULL AND release_at <= ?""", (now(),)).fetchall()
+    sent = 0
     for o in rows:
+        r = con.execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+        if r is not None and not is_open(r) and not o["cloned_from"]:
+            # the kitchen is closed: the order waits and goes out the moment they open (redos still go)
+            continue
+        sent += 1
         con.execute("""UPDATE orders SET kitchen_status=?, dispatch_status=?, hold_reason=?,
                        created_at=? WHERE id=? AND dispatch_status='scheduled'""",
                     (o["sched_kitchen"] or "pending", o["sched_dispatch"] or "held",
@@ -1631,7 +1645,7 @@ def release_scheduled():
         log("order", o["code"] + " future order for " + when_label(o["scheduled_for"]) +
             " released to " + ("dispatch to run the card" if (o["sched_dispatch"] == "awaiting_payment")
                                else "the kitchen"))
-    return len(rows)
+    return sent
 
 
 
@@ -1722,7 +1736,14 @@ def api_dispatch_future():
         return jsonify({"ok": False}), 403
     rows = db().execute("""SELECT * FROM orders WHERE dispatch_status='scheduled'
                            ORDER BY scheduled_for ASC""").fetchall()
-    return jsonify({"ok": True, "lead_min": future_lead(), "orders": [order_dict(o) for o in rows]})
+    out = []
+    for o in rows:
+        x = order_dict(o)
+        r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+        x["kitchen_closed"] = bool(r is not None and not is_open(r) and not o["cloned_from"])
+        x["kitchen_hours"] = hours_label(r) if r is not None else ""
+        out.append(x)
+    return jsonify({"ok": True, "lead_min": future_lead(), "orders": out})
 
 @app.post("/api/dispatch/future-cancel")
 def api_future_cancel():
@@ -1753,6 +1774,10 @@ def api_future_release():
     o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
     if not o or o["dispatch_status"] != "scheduled":
         return jsonify({"ok": False, "error": "That future order already went out."}), 400
+    r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+    if r is not None and not is_open(r) and not o["cloned_from"]:
+        return jsonify({"ok": False, "error": r["name"] + " is closed right now (" + hours_label(r) + "), so "
+                        "the order was not sent. It goes to the kitchen on its own as soon as they open."}), 400
     db().execute("UPDATE orders SET release_at=? WHERE id=?", (now(), o["id"]))
     db().commit()
     auto_assign()
@@ -1856,6 +1881,10 @@ def checkout():
                 db().execute("UPDATE orders SET issue=?, issue_note=? WHERE id=?",
                              (issue_label, issue_note, src["id"]))
 
+    if not sched and not from_code and not is_open(r):
+        # a closed kitchen only gets redos of orders it already made
+        return jsonify({"ok": False, "error": r["name"] + " is closed right now (" + hours_label(r) + "). "
+                        "Only redo orders go to a closed kitchen. Schedule this one for a time they are open."}), 400
     src = (payload.get("source") or "").strip()
     if src not in SOURCES:
         src = {"customer": "website", "dispatcher": "call_in"}.get(placed_by, "website")
@@ -4432,19 +4461,28 @@ def api_menu_item():
     b = request.get_json(force=True)
     op = b.get("op")
     if op == "create":
-        cur = db().execute("""INSERT INTO menu_items(restaurant_id,name,description,price_cents,section)
-                              VALUES(?,?,?,?,?)""",
+        sec = (b.get("section") or "").strip()
+        nxt = db().execute("SELECT COALESCE(MAX(sort),0)+1 n FROM menu_items WHERE restaurant_id=?",
+                           (b["restaurant_id"],)).fetchone()["n"]
+        if sec:
+            same = db().execute("SELECT MAX(sort) m FROM menu_items WHERE restaurant_id=? AND section=?",
+                                (b["restaurant_id"], sec)).fetchone()["m"]
+            if same is not None:
+                nxt = same
+        cur = db().execute("""INSERT INTO menu_items(restaurant_id,name,description,price_cents,section,sort,active)
+                              VALUES(?,?,?,?,?,?,?)""",
                            (b["restaurant_id"], (b.get("name") or "Item").strip(),
                             (b.get("description") or "").strip(), int(b.get("price_cents") or 0),
-                            (b.get("section") or "").strip()))
+                            sec, nxt, 0 if b.get("active") in (0, False, "0") else 1))
         db().commit()
         return jsonify({"ok": True, "item_id": cur.lastrowid})
     if op == "update":
         db().execute("""UPDATE menu_items SET name=COALESCE(?,name),
                         description=COALESCE(?,description), price_cents=COALESCE(?,price_cents),
-                        section=COALESCE(?,section) WHERE id=?""",
+                        section=COALESCE(?,section), active=COALESCE(?,active) WHERE id=?""",
                      (b.get("name"), b.get("description"), b.get("price_cents"),
-                      b.get("section"), b["item_id"]))
+                      b.get("section"), (1 if b.get("active") else 0) if "active" in b else None,
+                      b["item_id"]))
         db().commit()
         return jsonify({"ok": True})
     if op == "toggle":
@@ -4457,6 +4495,9 @@ def api_menu_item():
         for gid in gids:
             db().execute("DELETE FROM options WHERE group_id=?", (gid,))
         db().execute("DELETE FROM option_groups WHERE item_id=?", (b["item_id"],))
+        old = db().execute("SELECT image FROM menu_items WHERE id=?", (b["item_id"],)).fetchone()
+        if old:
+            drop_media(old["image"])
         db().execute("DELETE FROM menu_items WHERE id=?", (b["item_id"],))
         db().commit()
         return jsonify({"ok": True})
@@ -4471,11 +4512,13 @@ def api_option_group():
     b = request.get_json(force=True)
     op = b.get("op")
     if op == "create":
-        cur = db().execute("""INSERT INTO option_groups(item_id,name,min_select,max_select,sort)
-                              VALUES(?,?,?,?,?)""",
+        nsort = int(b.get("sort") or 0) or db().execute(
+            "SELECT COALESCE(MAX(sort),0)+1 n FROM option_groups WHERE item_id=?", (b["item_id"],)).fetchone()["n"]
+        cur = db().execute("""INSERT INTO option_groups(item_id,name,min_select,max_select,sort,max_each)
+                              VALUES(?,?,?,?,?,?)""",
                            (b["item_id"], (b.get("name") or "Choose").strip(),
                             int(b.get("min_select", 1)), int(b.get("max_select", 1)),
-                            int(b.get("sort") or 0)))
+                            nsort, max(1, int(b.get("max_each") or 1))))
         db().commit()
         return jsonify({"ok": True, "group_id": cur.lastrowid})
     if op == "delete":
@@ -4485,9 +4528,10 @@ def api_option_group():
         return jsonify({"ok": True})
     if op == "update":
         db().execute("""UPDATE option_groups SET name=COALESCE(?,name),
-                        min_select=COALESCE(?,min_select), max_select=COALESCE(?,max_select)
-                        WHERE id=?""",
-                     (b.get("name"), b.get("min_select"), b.get("max_select"), b["group_id"]))
+                        min_select=COALESCE(?,min_select), max_select=COALESCE(?,max_select),
+                        max_each=COALESCE(?,max_each) WHERE id=?""",
+                     (b.get("name"), b.get("min_select"), b.get("max_select"), b.get("max_each"),
+                      b["group_id"]))
         db().commit()
         return jsonify({"ok": True})
     return jsonify({"ok": False, "error": "unknown op"}), 400
@@ -4568,6 +4612,245 @@ def dispatch_manage():
     return render_template("dispatch_manage.html")
 
 
+# ---------------- photos ----------------
+UPLOAD_DIR = os.environ.get("UPLOAD_DIR") or os.path.join(
+    os.path.dirname(os.path.abspath(DB_PATH)), "uploads")
+os.makedirs(UPLOAD_DIR, exist_ok=True)
+PHOTO_MAX_BYTES = 10 * 1024 * 1024
+
+
+def media_url(name):
+    return ("/media/" + name) if name else ""
+
+
+def drop_media(name):
+    if not name:
+        return
+    path = os.path.join(UPLOAD_DIR, os.path.basename(name))
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def save_photo(fs):
+    """Store an uploaded picture. Big phone photos are shrunk so menus load fast."""
+    raw = fs.read(PHOTO_MAX_BYTES + 1)
+    if not raw:
+        raise ValueError("That file was empty.")
+    if len(raw) > PHOTO_MAX_BYTES:
+        raise ValueError("That picture is over 10 MB. Pick a smaller one.")
+    head = raw[:12]
+    if head[:3] == b"\xff\xd8\xff":
+        ext = "jpg"
+    elif head[:8] == b"\x89PNG\r\n\x1a\n":
+        ext = "png"
+    elif head[:4] == b"RIFF" and head[8:12] == b"WEBP":
+        ext = "webp"
+    elif head[:6] in (b"GIF87a", b"GIF89a"):
+        ext = "gif"
+    else:
+        raise ValueError("Use a JPG, PNG, WEBP or GIF picture.")
+    name = secrets.token_hex(10)
+    try:
+        from PIL import Image, ImageOps
+        import io
+        im = Image.open(io.BytesIO(raw))
+        im = ImageOps.exif_transpose(im)
+        im.thumbnail((1400, 1400))
+        if im.mode not in ("RGB", "L"):
+            bg = Image.new("RGB", im.size, (255, 255, 255))
+            im = im.convert("RGBA")
+            bg.paste(im, mask=im.split()[-1])
+            im = bg
+        name += ".jpg"
+        im.convert("RGB").save(os.path.join(UPLOAD_DIR, name), "JPEG", quality=84, optimize=True)
+    except ImportError:
+        name += "." + ext
+        with open(os.path.join(UPLOAD_DIR, name), "wb") as fh:
+            fh.write(raw)
+    return name
+
+
+@app.get("/media/<path:name>")
+def media(name):
+    return send_from_directory(UPLOAD_DIR, os.path.basename(name), max_age=30 * 86400)
+
+
+@app.post("/api/dispatch/photo")
+def api_photo():
+    """Add, replace or remove the picture on a menu item or a restaurant."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    kind = request.form.get("kind")
+    table = {"item": "menu_items", "restaurant": "restaurants"}.get(kind)
+    try:
+        rid = int(request.form.get("id") or 0)
+    except ValueError:
+        rid = 0
+    if not table or not rid:
+        return jsonify({"ok": False, "error": "Pick an item or restaurant first."}), 400
+    row = db().execute("SELECT image FROM " + table + " WHERE id=?", (rid,)).fetchone()
+    if not row:
+        return jsonify({"ok": False, "error": "Not found."}), 404
+    if request.form.get("op") == "remove":
+        drop_media(row["image"])
+        db().execute("UPDATE " + table + " SET image=NULL WHERE id=?", (rid,))
+        db().commit()
+        return jsonify({"ok": True, "image": ""})
+    fs = request.files.get("photo")
+    if not fs:
+        return jsonify({"ok": False, "error": "Choose a picture to upload."}), 400
+    try:
+        name = save_photo(fs)
+    except ValueError as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception:
+        return jsonify({"ok": False, "error": "That picture could not be read. Try a JPG or PNG."}), 400
+    drop_media(row["image"])
+    db().execute("UPDATE " + table + " SET image=? WHERE id=?", (name, rid))
+    db().commit()
+    return jsonify({"ok": True, "image": media_url(name)})
+
+
+@app.get("/api/dispatch/menu-full/<int:rid>")
+def api_menu_full(rid):
+    """Everything on one restaurant's menu for the editor, hidden items included."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    r = db().execute("SELECT * FROM restaurants WHERE id=?", (rid,)).fetchone()
+    if not r:
+        return jsonify({"ok": False}), 404
+    items = []
+    for it in db().execute("SELECT * FROM menu_items WHERE restaurant_id=? ORDER BY sort, id",
+                           (rid,)).fetchall():
+        items.append({"id": it["id"], "name": it["name"], "description": it["description"] or "",
+                      "price_cents": it["price_cents"], "price": money(it["price_cents"]),
+                      "section": (it["section"] or "").strip(), "active": it["active"],
+                      "image": media_url(it["image"]), "groups": item_options(it["id"])})
+    return jsonify({"ok": True, "items": items, "restaurant": {
+        "id": r["id"], "name": r["name"], "slug": r["slug"], "image": media_url(r["image"])},
+        "presets": presets.available_for(r["slug"], r["name"])})
+
+
+@app.post("/api/dispatch/load-preset")
+def api_load_preset():
+    """Fill a restaurant's menu from a built-in menu (Popeyes). Replacing wipes the old menu."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True)
+    rid = b.get("restaurant_id")
+    if not db().execute("SELECT 1 FROM restaurants WHERE id=?", (rid,)).fetchone():
+        return jsonify({"ok": False, "error": "Unknown restaurant."}), 404
+    try:
+        n = presets.load(db(), rid, b.get("preset") or "", replace=bool(b.get("replace")),
+                         on_drop=drop_media)
+    except KeyError:
+        return jsonify({"ok": False, "error": "Unknown menu."}), 400
+    db().commit()
+    return jsonify({"ok": True, "items": n})
+
+
+# ---------------- logo ----------------
+DEFAULT_LOGO = "/static/brand/logo-default.png"
+
+
+def logo_url():
+    name = (setting("logo_image", str) or "").strip()
+    if name and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(name))):
+        return media_url(name)
+    return DEFAULT_LOGO
+
+
+def logo_path():
+    name = (setting("logo_image", str) or "").strip()
+    p = os.path.join(UPLOAD_DIR, os.path.basename(name)) if name else ""
+    if p and os.path.exists(p):
+        return p
+    return os.path.join(APP_DIR_STATIC, "brand", "logo-default.png")
+
+
+APP_DIR_STATIC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+
+@app.post("/api/dispatch/logo")
+def api_logo():
+    """Change the logo shown on every page and on the driver and kitchen app icons."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    old = (setting("logo_image", str) or "").strip()
+    if request.form.get("op") == "reset":
+        drop_media(old)
+        db().execute("DELETE FROM settings WHERE key='logo_image'")
+        db().commit()
+        return jsonify({"ok": True, "logo": DEFAULT_LOGO})
+    fs = request.files.get("photo")
+    if not fs:
+        return jsonify({"ok": False, "error": "Choose a picture to upload."}), 400
+    raw = fs.read(PHOTO_MAX_BYTES + 1)
+    if len(raw) > PHOTO_MAX_BYTES:
+        return jsonify({"ok": False, "error": "That picture is over 10 MB. Pick a smaller one."}), 400
+    try:
+        from PIL import Image
+        import io
+        im = Image.open(io.BytesIO(raw)).convert("RGBA")
+        im.thumbnail((512, 512))
+        name = secrets.token_hex(10) + ".png"
+        im.save(os.path.join(UPLOAD_DIR, name), "PNG", optimize=True)
+    except Exception:
+        return jsonify({"ok": False, "error": "That picture could not be read. Try a PNG or JPG."}), 400
+    drop_media(old)
+    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('logo_image',?)", (name,))
+    db().commit()
+    return jsonify({"ok": True, "logo": media_url(name)})
+
+
+@app.get("/brand/icon-<int:size>.png")
+def brand_icon(size):
+    """Square app icon made from the current logo, for phones that install the apps."""
+    size = size if size in (32, 180, 192, 512) else 192
+    try:
+        from PIL import Image
+        import io
+        src = Image.open(logo_path()).convert("RGBA")
+        canvas = Image.new("RGBA", (size, size), (255, 255, 255, 255))
+        box = int(size * 0.8)
+        src.thumbnail((box, box), Image.LANCZOS) if max(src.size) > box else None
+        if max(src.size) < box:
+            k = box / max(src.size)
+            src = src.resize((max(1, int(src.width * k)), max(1, int(src.height * k))), Image.LANCZOS)
+        canvas.paste(src, ((size - src.width) // 2, (size - src.height) // 2), src)
+        out = io.BytesIO()
+        canvas.convert("RGB").save(out, "PNG")
+        resp = app.response_class(out.getvalue(), mimetype="image/png")
+        resp.headers["Cache-Control"] = "public, max-age=3600"
+        return resp
+    except Exception:
+        return redirect(DEFAULT_LOGO)
+
+
+def seed_brand_photos():
+    """First start after this update: put the Popeyes photo on Popeyes if it has none."""
+    try:
+        con = sqlite3.connect(DB_PATH)
+        if con.execute("SELECT 1 FROM settings WHERE key='popeyes_photo_v1'").fetchone():
+            con.close()
+            return
+        r = con.execute("SELECT id, image FROM restaurants WHERE slug='popeyeschicken'").fetchone()
+        src = os.path.join(APP_DIR_STATIC, "brand", "popeyes.jpg")
+        if r and not r[1] and os.path.exists(src):
+            import shutil
+            name = secrets.token_hex(10) + ".jpg"
+            shutil.copyfile(src, os.path.join(UPLOAD_DIR, name))
+            con.execute("UPDATE restaurants SET image=? WHERE id=?", (name, r[0]))
+        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('popeyes_photo_v1','1')")
+        con.commit()
+        con.close()
+    except Exception as e:
+        print("brand photo seed skipped:", e)
+
+
 @app.get("/api/menu/<int:rid>")
 def api_menu(rid):
     return jsonify({"ok": True, "items": menu_payload(rid)})
@@ -4578,6 +4861,7 @@ def healthz():
     return jsonify({"ok": True, "time": now()})
 
 init_db()
+seed_brand_photos()
 
 def current_portal():
     """Which portal the signed-in person belongs to, if any."""
@@ -4600,10 +4884,11 @@ def inject_portal():
                "biz_address": (setting("business_address", str) or "").strip(),
                "biz_phone": ("(%s) %s-%s" % (_d[:3], _d[3:6], _d[6:])) if len(_d) == 10 else _ph,
                "biz_tel": tel_digits(_d),
-               "tax_bp": setting("tax_rate_bp") or 0, "service_bp": setting("service_fee_bp") or 0}
+               "tax_bp": setting("tax_rate_bp") or 0, "service_bp": setting("service_fee_bp") or 0,
+               "logo_url": logo_url()}
     except Exception:
         biz = {"biz_name": "Fleet Delivery", "biz_address": "", "biz_phone": "", "biz_tel": "",
-               "tax_bp": 900, "service_bp": 0}
+               "tax_bp": 900, "service_bp": 0, "logo_url": DEFAULT_LOGO}
     return {**biz, "portal": current_portal(),
             "portal_name": session.get("dispatcher_name") or session.get("driver_name")
                            or session.get("restaurant_name") or ""}

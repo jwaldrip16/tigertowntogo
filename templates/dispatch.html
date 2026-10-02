@@ -1047,14 +1047,17 @@ async function loadFuture(){
     let items = '';
     try { items = (o.items||[]).map(function(i){ return (i.qty||1)+' x '+i.name; }).join(', '); } catch(e) {}
     return '<div class="order"><div class="order-head"><b>'+o.scheduled_label+'</b> &middot; '+o.code+
-      ' <span class="pill amber">Future</span></div>'+
+      ' <span class="pill amber">Future</span>'+
+      (o.kitchen_closed ? ' <span class="pill red">Kitchen closed, sends when they open</span>' : '')+'</div>'+
       '<div>'+o.restaurant+' to <b>'+o.customer+'</b> '+(o.phone||'')+'</div>'+
       '<div class="muted small">'+o.address+'</div>'+
       (items ? '<div class="small">'+items+'</div>' : '')+
       '<div class="small">Total '+o.total+' &middot; '+(o.pay_method==='cash' ? 'cash' : 'card')+
       ' &middot; goes to the kitchen '+o.release_label+'</div>'+
       '<div class="order-actions">'+
-      '<button class="btn tiny" onclick="releaseFuture('+o.id+',\''+o.code+'\')">Send now</button>'+
+      (o.kitchen_closed
+        ? '<button class="btn tiny" disabled title="'+(o.kitchen_hours||'Closed')+'">Send now (kitchen closed)</button>'
+        : '<button class="btn tiny" onclick="releaseFuture('+o.id+',\''+o.code+'\')">Send now</button>')+
       '<button class="btn tiny danger" onclick="cancelFuture('+o.id+',\''+o.code+'\')">Cancel order</button>'+
       '</div></div>';
   }).join('') || '<p class="muted">No future orders.</p>');

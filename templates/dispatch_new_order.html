@@ -94,8 +94,8 @@
       <input type="checkbox" id="cashOrder"> <b>Cash order</b>
       <span class="muted small">the driver collects at the door, no card needed</span></label>
     <button class="btn primary" id="place" disabled onclick="placeOrder()">Create order</button>
-    <p class="muted small">Dispatcher orders go through even when the kitchen is closed or the
-      customer's number is blocked.</p>
+    <p class="muted small">Dispatcher orders go through even when the customer's number is blocked.
+      If the kitchen is closed, only a redo goes through now; schedule anything else for when they open.</p>
   </aside>
 </div>
 {% endblock %}
