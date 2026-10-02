@@ -3034,8 +3034,9 @@ def api_driver_roster():
     if roster not in ROSTERS:
         return jsonify({"ok": False, "error": "unknown group"}), 400
     did = data["driver_id"]
+    # the hand move lasts for today only; tomorrow the approved schedule decides again
     db().execute("UPDATE drivers SET roster=?, roster_day=? WHERE id=?",
-                 (roster, dt.date.today().isoformat() if roster == "scheduled" else None, did))
+                 (roster, dt.date.today().isoformat(), did))
     if roster == "unavailable":
         load = db().execute("""SELECT COUNT(*) c FROM orders WHERE driver_id=?
                                AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
@@ -3293,16 +3294,16 @@ def scheduled_today(driver_id, day=None):
 
 
 def driver_group(d):
-    """Which roster tab a driver sits in. Scheduled means an approved shift today
-    and not pulled by dispatch. Anyone not on today's schedule is Unavailable."""
-    if d["roster"] == "unavailable":
-        return "unavailable"
-    # dispatch moved this driver to Scheduled by hand today: that wins for the day
+    """Which roster tab a driver sits in. An approved shift today means Scheduled.
+    A hand move by dispatch (either way) wins for the day it was made only.
+    Approved time off today means Unavailable."""
+    today = dt.date.today().isoformat()
     try:
-        if d["roster_day"] and d["roster_day"] == dt.date.today().isoformat():
-            return "scheduled"
+        hand_day = d["roster_day"]
     except (IndexError, KeyError):
-        pass
+        hand_day = None
+    if hand_day == today and d["roster"] in ROSTERS:
+        return d["roster"]
     return "scheduled" if scheduled_today(d["id"]) else "unavailable"
 
 @app.post("/api/driver/availability")
@@ -3520,7 +3521,7 @@ def api_dispatch_schedule():
         pending += len([a for a in av if a["status"] == "pending"])
         pending += len([o for o in off if o["status"] == "pending"])
         out.append({"id": d["id"], "name": d["name"], "phone": d["phone"],
-                    "roster": d["roster"], "status": d["status"],
+                    "roster": driver_group(d), "status": d["status"],
                     "off_today": off_today(d["id"], today),
                     "availability": av, "time_off": off})
     return jsonify({"ok": True, "days": DOW_NAMES, "today": today,
@@ -3559,7 +3560,8 @@ def api_dispatch_schedule_edit():
                       "Time off " + row["start_date"] + " to " + row["end_date"] + " was " + dec + ".",
                       now()))
         if dec == "approved":
-            db().execute("UPDATE drivers SET roster='unavailable' WHERE id=?", (row["driver_id"],)) \
+            db().execute("UPDATE drivers SET roster='unavailable', roster_day=? WHERE id=?",
+                         (dt.date.today().isoformat(), row["driver_id"])) \
                 if row["start_date"] <= dt.date.today().isoformat() <= row["end_date"] else None
     elif op in ("add", "set_day") and b.get("date"):
         # hours for one date only, never repeating

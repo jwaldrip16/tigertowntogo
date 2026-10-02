@@ -897,6 +897,7 @@ function orderCard(o, opts, drivers){
       '<button class="btn tiny" onclick="setTimer('+o.id+')">Set timer</button>'+
       '<button class="btn tiny" onclick="kitchen('+o.id+',\'ready\')">Mark ready</button>'+
       '<button class="btn tiny" onclick="editOrder('+o.id+')">Edit order</button>'+
+      '<button class="btn tiny" onclick="changeFee('+o.id+')">Change fee ('+o.fee+')</button>'+
       '<button class="btn tiny" onclick="setToken('+o.id+')">'+(o.token?'Tag: '+esc(o.token):'Add tag')+'</button>'+
       '<button class="btn tiny" onclick="noteOrder('+o.id+')">'+(o.dispatch_note?'Edit note':'Add note')+'</button>'+
       '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>'+
@@ -907,6 +908,23 @@ function orderCard(o, opts, drivers){
       '<button class="btn tiny" onclick="complete('+o.id+',\''+o.code+'\')">Complete</button>'+
       '<button class="btn tiny" onclick="hold('+o.id+')">Hold</button>'+
     '</div></div>';
+}
+// quick delivery fee change: totals (tax, tip, total) are recomputed on the server
+async function changeFee(id){
+  const o = (LAST && LAST.orders || []).find(x=>x.id===id);
+  if(!o) return;
+  const cur = (o.fee||'$0.00').replace(/[^0-9.]/g,'');
+  const v = prompt('New delivery fee for '+o.code+' (now '+o.fee+', '+milesLabel(o)+'):', cur);
+  if(v === null) return;
+  const n = parseFloat(String(v).replace(/[^0-9.]/g,''));
+  if(isNaN(n) || n < 0 || n > 500){ alert('Type a fee between $0.00 and $500.00.'); return; }
+  const res = await jpost('/api/order/edit', {order_id:id, fee_cents: Math.round(n*100)});
+  if(!res || !res.ok){ alert((res && res.error) || 'Could not change the fee.'); return; }
+  let msg = o.code+': delivery fee is now '+res.fee+'. New total '+res.total+' (was '+o.total+').';
+  if(o.payment_status==='paid' || o.payment_status==='part_refunded')
+    msg += '\nThis order was already paid, so the customer now owes or is owed the difference. Check the payment pill.';
+  alert(msg);
+  board(true);
 }
 async function kitchen(id, st){
   const mins = document.getElementById('m'+id).value;

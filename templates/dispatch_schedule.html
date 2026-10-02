@@ -73,7 +73,7 @@ async function load(){
           '<button class="btn tiny" onclick="decideOff('+o.id+',false)">Deny</button>' : '')+
       '<button class="btn tiny" onclick="delOff('+o.id+')">Remove</button></span></div>').join('');
     return '<section class="panel"><div class="row between"><h2>'+d.name+
-      ' <span class="pill '+(d.roster==='unavailable'?'red':'grey')+'">'+d.roster+'</span>'+
+      ' <span class="pill '+(d.roster==='unavailable'?'red':'green')+'">'+d.roster+'</span>'+
       (d.off_today?' <span class="pill amber">off today</span>':'')+'</h2>'+
       '<span class="muted small">'+d.phone+'</span></div>'+
       '<div class="week">'+week+'</div>'+ rows + off +
