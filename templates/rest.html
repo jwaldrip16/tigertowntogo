@@ -141,7 +141,7 @@ async function load(force){
   document.getElementById('hourline').textContent = res.hours;
   document.getElementById('h24').textContent = res.open_24 ? 'Back to set hours' : 'Open 24 hours';
   try { newTicketAlert(res.orders); } catch(e) { console.log('alert skipped', e); }
-  const pend = res.orders.filter(o=>o.kitchen_status==='pending').length;
+  const pend = res.orders.filter(o=>o.kitchen_status==='pending' && !['delivered','cancelled'].includes(o.dispatch_status)).length;
   if (pend) flashTicket(pend); else clearTicketFlash();
   soundNote();
   // Active until the driver is en route. Undo that (back to received or at the
@@ -254,7 +254,7 @@ function chatCheck(res){
 }
 let NOTIFIED = null;
 function newTicketAlert(orders){
-  const waiting = orders.filter(o=>o.kitchen_status === 'pending');
+  const waiting = orders.filter(o=>o.kitchen_status === 'pending' && !['delivered','cancelled'].includes(o.dispatch_status));
   const banner = document.getElementById('newalert');
   if (waiting.length){
     if (banner) banner.classList.remove('hidden');

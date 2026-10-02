@@ -789,7 +789,7 @@ function orderCard(o, opts, drivers){
     ? '<span class="pill amber">'+Math.max(0,Math.ceil(o.timer_seconds/60))+' min</span>' : '';
   const q = o.queue_position ? '<span class="pill blue">Queue #'+o.queue_position+'</span>' : '';
   const hold = o.hold_reason ? '<span class="pill grey">'+o.hold_reason+'</span>' : '';
-  return '<div class="order'+(o.kitchen_status==='pending'?' pendingflash':'')+'" draggable="true" ondragstart="dragOrder(event,'+o.id+')" '+
+  return '<div class="order'+(o.kitchen_status==='pending' && !['delivered','cancelled'].includes(o.dispatch_status)?' pendingflash':'')+'" draggable="true" ondragstart="dragOrder(event,'+o.id+')" '+
     'ondragend="dragEnd()"><div class="order-head"><span class="grip">&#8942;&#8942;</span><strong>'+o.code+'</strong> '+
     refPill(o)+tokenPill(o)+
     '<span class="pill '+(o.kitchen_status==='ready'?'green':o.kitchen_status==='preparing'?'amber':'grey')+'">'

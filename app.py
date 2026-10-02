@@ -357,6 +357,19 @@ def init_db():
            OR NEW.driver_id IS NOT OLD.driver_id OR NEW.paged_at IS NOT OLD.paged_at)
       BEGIN UPDATE orders SET driver_paged_at=""" + _ts + """ WHERE id=NEW.id; END;
     """)
+    # A finished order never keeps asking the kitchen to accept it, whichever screen finished it.
+    con.executescript("""
+    CREATE TRIGGER IF NOT EXISTS trg_done_kitchen_ready AFTER UPDATE OF dispatch_status ON orders
+      WHEN NEW.dispatch_status='delivered' AND NEW.kitchen_status IN ('pending','preparing')
+      BEGIN UPDATE orders SET kitchen_status='ready', ready_at=COALESCE(ready_at, """ + _ts + """) WHERE id=NEW.id; END;
+    CREATE TRIGGER IF NOT EXISTS trg_cancel_kitchen_off AFTER UPDATE OF dispatch_status ON orders
+      WHEN NEW.dispatch_status='cancelled' AND NEW.kitchen_status IN ('pending','preparing')
+      BEGIN UPDATE orders SET kitchen_status='waiting' WHERE id=NEW.id; END;
+    """)
+    con.execute("""UPDATE orders SET kitchen_status='ready', ready_at=COALESCE(ready_at, delivered_at, created_at)
+                   WHERE dispatch_status='delivered' AND kitchen_status IN ('pending','preparing')""")
+    con.execute("""UPDATE orders SET kitchen_status='waiting'
+                   WHERE dispatch_status='cancelled' AND kitchen_status IN ('pending','preparing')""")
     con.execute("""UPDATE orders SET kitchen_sent_at=created_at WHERE kitchen_sent_at IS NULL
                    AND kitchen_status='pending'""")
     con.execute("""UPDATE orders SET driver_paged_at=COALESCE(paged_at, created_at) WHERE driver_paged_at IS NULL
