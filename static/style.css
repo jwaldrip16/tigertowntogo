@@ -377,3 +377,10 @@ body.assignflash{animation:assignpage 1s ease-in-out infinite}
 .stopmove{display:inline-flex;gap:2px;vertical-align:middle}
 .stopmove .btn.tiny{padding:0 6px;min-width:0}
 .stopmove .btn[disabled]{opacity:.35;cursor:default}
+
+/* menu tabs (Menu / Dinner Menu) above the section bar */
+.menutabs{display:flex;flex-wrap:wrap;justify-content:center;gap:4px 18px;padding:10px 0 4px;border-bottom:1px solid var(--line,#e5e7eb);margin-bottom:4px}
+.menutabs button{background:none;border:0;border-bottom:2px solid transparent;padding:6px 4px;font-size:15px;letter-spacing:.05em;text-transform:uppercase;color:#888;cursor:pointer}
+.menutabs button.on{color:#111;border-bottom-color:#111}
+.menutabs button:hover{color:#111}
+.menutabs button.addtab{color:var(--accent,#b44a22);text-transform:none;letter-spacing:0;font-size:13px}

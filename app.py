@@ -209,7 +209,7 @@ def init_db():
         seed(con)
     topup_restaurants(con)
     for k, v in [("base_fee_cents", "399"), ("base_miles", "3"), ("per_mile_cents", "100"),
-                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("max_stack_default", "3"),
+                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("max_stack_default", "3"), ("sched_lead_min", "60"),
                  ("assign_on_pending", "0"), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
                  ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
                  ("business_name", "Fleet Delivery"),
@@ -306,6 +306,7 @@ def init_db():
     ensure_column(con, "messages", "seen_by_dispatch", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "menu_items", "sort", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "menu_items", "image", "TEXT")
+    ensure_column(con, "menu_items", "menu_tab", "TEXT")
     ensure_column(con, "restaurants", "image", "TEXT")
     ensure_column(con, "option_groups", "max_each", "INTEGER NOT NULL DEFAULT 1")
     ensure_column(con, "orders", "payment_status", "TEXT NOT NULL DEFAULT 'unpaid'")
@@ -377,6 +378,9 @@ def init_db():
                    WHERE dispatch_status='cancelled' AND kitchen_status IN ('pending','preparing')""")
     con.execute("""UPDATE orders SET kitchen_sent_at=created_at WHERE kitchen_sent_at IS NULL
                    AND kitchen_status='pending'""")
+    # pull back unpaid card orders an address approval sent to the kitchen early
+    con.execute("""UPDATE orders SET kitchen_status='waiting', kitchen_sent_at=NULL
+                   WHERE dispatch_status='awaiting_payment' AND kitchen_status='pending'""")
     con.execute("""UPDATE orders SET driver_paged_at=COALESCE(paged_at, created_at) WHERE driver_paged_at IS NULL
                    AND dispatch_status='assigned'""")
     ensure_column(con, "orders", "scheduled_for", "TEXT")
@@ -943,6 +947,7 @@ def menu_payload(rid):
         out.append({"id": it["id"], "name": it["name"], "description": it["description"],
                     "price_cents": it["price_cents"], "price": money(it["price_cents"]),
                     "section": (it["section"] or "").strip(),
+                    "tab": (it["menu_tab"] or "").strip(),
                     "image": media_url(it["image"]),
                     "groups": item_options(it["id"])})
     return out
@@ -1187,7 +1192,7 @@ def order_dict(o):
         "address_ok": bool(o["address_ok"]),
         "source": o["source"], "source_label": SOURCES.get(o["source"], "Online"),
         "token": (o["token"] or ""),
-        "needs_address_approval": (not o["address_ok"]) or o["kitchen_status"] == "waiting",
+        "needs_address_approval": not o["address_ok"],
         "dispatch_status": o["dispatch_status"], "hold_reason": o["hold_reason"],
         "issue": o["issue"] or "", "issue_note": o["issue_note"] or "",
         "cloned_from": o["cloned_from"] or "",
@@ -1203,8 +1208,9 @@ def order_dict(o):
 @app.route("/")
 def home():
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
-    cards = [{"r": r, "open": is_open(r), "hours": hours_label(r)} for r in rs]
-    return render_template("index.html", cards=cards)
+    biz = business_is_open()
+    cards = [{"r": r, "open": biz and is_open(r), "hours": hours_label(r)} for r in rs]
+    return render_template("index.html", cards=cards, biz_open=biz)
 
 @app.route("/r/<slug>")
 def menu(slug):
@@ -1212,7 +1218,9 @@ def menu(slug):
     if not r:
         return redirect(url_for("home"))
     items = db().execute("SELECT * FROM menu_items WHERE restaurant_id=? AND active=1", (r["id"],)).fetchall()
-    return render_template("menu.html", r=r, items=items, open=is_open(r), hours=hours_label(r),
+    biz = business_is_open()
+    return render_template("menu.html", r=r, items=items, open=biz and is_open(r), biz_open=biz,
+                           hours=hours_label(r),
                            base_fee=money(setting("base_fee_cents")),
                            base_miles=setting("base_miles"),
                            per_mile=money(setting("per_mile_cents")))
@@ -1655,6 +1663,9 @@ def release_scheduled():
     sent = 0
     for o in rows:
         r = con.execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+        if not business_is_open():
+            # the business is closed: future orders wait and go out once dispatch opens
+            continue
         if r is not None and not is_open(r) and not o["cloned_from"]:
             # the kitchen is closed: the order waits and goes out the moment they open (redos still go)
             continue
@@ -1903,6 +1914,12 @@ def checkout():
                 db().execute("UPDATE orders SET issue=?, issue_note=? WHERE id=?",
                              (issue_label, issue_note, src["id"]))
 
+    if not sched and not business_is_open():
+        # closed business: nothing goes out now, but future orders are still welcome
+        msg = ("The business is closed. Open the business first, or schedule this order for later."
+               if dispatcher_required() else
+               "We are closed right now. You can still schedule your order for later.")
+        return jsonify({"ok": False, "error": msg, "closed": True}), 400
     if not sched and not from_code and not is_open(r):
         # a closed kitchen only gets redos of orders it already made
         return jsonify({"ok": False, "error": r["name"] + " is closed right now (" + hours_label(r) + "). "
@@ -1992,9 +2009,13 @@ def checkout():
                     "message": ("" if address_ok and cash else
                                 "Thanks! Waiting on payment. Your order has not gone to the "
                                 "kitchen yet. It goes as soon as your payment is marked paid." if address_ok else
-                                "We could not verify that address, so your order is pending "
-                                "dispatch approval. Dispatch will confirm it shortly and your "
-                                "delivery fee may change with the distance.")})
+                                "We could not verify that address, so dispatch will confirm it shortly. "
+                                "Your order has not gone to the kitchen yet. It goes once dispatch "
+                                "confirms your address. Your delivery fee may change with the distance." if cash else
+                                "We could not verify that address, so dispatch will confirm it shortly. "
+                                "Your order has not gone to the kitchen yet. It goes once your address is "
+                                "confirmed and your payment is marked paid. Your delivery fee may change "
+                                "with the distance.")})
 
 @app.post("/api/order/approve-address")
 def api_approve_address():
@@ -2017,8 +2038,15 @@ def api_approve_address():
     if p.get("fee_cents") not in (None, ""):
         fee = max(0, int(round(float(p["fee_cents"]))))
     total = o["subtotal_cents"] + fee + o["item_fee_cents"] + o["tax_cents"] + (o["service_cents"] or 0) + o["tip_cents"]
-    kitchen = "pending" if o["kitchen_status"] == "waiting" else o["kitchen_status"]
-    hold = "waiting on kitchen" if o["hold_reason"] == "address needs dispatch approval" else o["hold_reason"]
+    unpaid_card = o["dispatch_status"] == "awaiting_payment"
+    if unpaid_card:
+        # card not run yet: the address is fine now, but the kitchen still waits on payment
+        kitchen, hold = "waiting", (o["hold_reason"] or "waiting on card")
+        if hold == "address needs dispatch approval":
+            hold = "waiting on card"
+    else:
+        kitchen = "pending" if o["kitchen_status"] == "waiting" else o["kitchen_status"]
+        hold = "waiting on kitchen" if o["hold_reason"] == "address needs dispatch approval" else o["hold_reason"]
     db().execute("""UPDATE orders SET address=?, lat=?, lng=?, miles=?, fee_cents=?, total_cents=?,
                     address_ok=1, kitchen_status=?, hold_reason=? WHERE id=?""",
                  (addr_out, lat, lng, miles, fee, total, kitchen, hold, o["id"]))
@@ -2026,7 +2054,9 @@ def api_approve_address():
     log("order", o["code"] + " address approved by dispatch (" + addr_out + ")")
     auto_assign()
     return jsonify({"ok": True, "address": addr_out, "miles": miles,
-                    "fee": money(fee), "total": money(total), "verified": bool(g1["ok"])})
+                    "fee": money(fee), "total": money(total), "verified": bool(g1["ok"]),
+                    "sent_to_kitchen": kitchen == "pending" and o["kitchen_status"] == "waiting",
+                    "waiting_on_payment": unpaid_card})
 
 @app.route("/track/<code>")
 def track(code):
@@ -3293,9 +3323,29 @@ def scheduled_today(driver_id, day=None):
     return [r["start_time"] + "-" + r["end_time"] for r in rows]
 
 
+def in_shift_window(driver_id, at=None):
+    """True from sched_lead_min before an approved shift starts until it ends."""
+    at = at or dt.datetime.now()
+    lead = setting("sched_lead_min")
+    lead = 60 if lead is None else lead
+    for span in scheduled_today(driver_id, at.date()):
+        try:
+            a_, b_ = span.split("-")
+            start = dt.datetime.combine(at.date(), dt.time.fromisoformat(a_.strip()))
+            end = dt.datetime.combine(at.date(), dt.time.fromisoformat(b_.strip()))
+        except ValueError:
+            continue
+        if end <= start:
+            end += dt.timedelta(days=1)
+        if start - dt.timedelta(minutes=lead) <= at <= end:
+            return True
+    return False
+
+
 def driver_group(d):
-    """Which roster tab a driver sits in. An approved shift today means Scheduled.
-    A hand move by dispatch (either way) wins for the day it was made only.
+    """Which roster tab a driver sits in. Scheduled starts sched_lead_min (setting,
+    default 60) before an approved shift and lasts until it ends. A driver still
+    working past the end stays Scheduled. A hand move by dispatch wins for that day.
     Approved time off today means Unavailable."""
     today = dt.date.today().isoformat()
     try:
@@ -3304,7 +3354,9 @@ def driver_group(d):
         hand_day = None
     if hand_day == today and d["roster"] in ROSTERS:
         return d["roster"]
-    return "scheduled" if scheduled_today(d["id"]) else "unavailable"
+    if d["status"] != "offline" and scheduled_today(d["id"]):
+        return "scheduled"
+    return "scheduled" if in_shift_window(d["id"]) else "unavailable"
 
 @app.post("/api/driver/availability")
 def api_driver_availability():
@@ -3999,6 +4051,15 @@ def dispatch_settings():
                     db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, str(_v)))
                 else:
                     FUTURE_LEAD_ERR.append(2)
+        if "sched_lead_min" in request.form:
+            try:
+                _v = int(request.form["sched_lead_min"] or 0)
+            except ValueError:
+                _v = -1
+            if 0 <= _v <= 240:
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('sched_lead_min',?)", (str(_v),))
+            else:
+                FUTURE_LEAD_ERR.append(3)
         if "future_lead_min" in request.form:
             try:
                 lm = int(request.form["future_lead_min"])
@@ -4584,19 +4645,22 @@ def api_menu_item():
                                 (b["restaurant_id"], sec)).fetchone()["m"]
             if same is not None:
                 nxt = same
-        cur = db().execute("""INSERT INTO menu_items(restaurant_id,name,description,price_cents,section,sort,active)
-                              VALUES(?,?,?,?,?,?,?)""",
+        cur = db().execute("""INSERT INTO menu_items(restaurant_id,name,description,price_cents,section,sort,active,menu_tab)
+                              VALUES(?,?,?,?,?,?,?,?)""",
                            (b["restaurant_id"], (b.get("name") or "Item").strip(),
                             (b.get("description") or "").strip(), int(b.get("price_cents") or 0),
-                            sec, nxt, 0 if b.get("active") in (0, False, "0") else 1))
+                            sec, nxt, 0 if b.get("active") in (0, False, "0") else 1,
+                            (b.get("tab") or "").strip()[:40]))
         db().commit()
         return jsonify({"ok": True, "item_id": cur.lastrowid})
     if op == "update":
         db().execute("""UPDATE menu_items SET name=COALESCE(?,name),
                         description=COALESCE(?,description), price_cents=COALESCE(?,price_cents),
-                        section=COALESCE(?,section), active=COALESCE(?,active) WHERE id=?""",
+                        section=COALESCE(?,section), active=COALESCE(?,active),
+                        menu_tab=COALESCE(?,menu_tab) WHERE id=?""",
                      (b.get("name"), b.get("description"), b.get("price_cents"),
                       b.get("section"), (1 if b.get("active") else 0) if "active" in b else None,
+                      (str(b["tab"]).strip()[:40] if b.get("tab") is not None else None),
                       b["item_id"]))
         db().commit()
         return jsonify({"ok": True})
@@ -4843,6 +4907,7 @@ def api_menu_full(rid):
         items.append({"id": it["id"], "name": it["name"], "description": it["description"] or "",
                       "price_cents": it["price_cents"], "price": money(it["price_cents"]),
                       "section": (it["section"] or "").strip(), "active": it["active"],
+                      "tab": (it["menu_tab"] or "").strip(),
                       "image": media_url(it["image"]), "groups": item_options(it["id"])})
     return jsonify({"ok": True, "items": items, "restaurant": {
         "id": r["id"], "name": r["name"], "slug": r["slug"], "image": media_url(r["image"])},

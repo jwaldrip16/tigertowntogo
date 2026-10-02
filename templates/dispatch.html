@@ -715,11 +715,13 @@ async function approveAddress(id, addr){
   if(a===null) return;
   const res = await jpost('/api/order/approve-address', {order_id:id, address:a});
   if(!res.ok){ alert(res.error||'Could not approve that address.'); return; }
+  const where = res.waiting_on_payment
+    ? '\nStill waiting on payment. The kitchen gets it as soon as the order is marked paid.'
+    : (res.sent_to_kitchen ? '\nThe order is now with the kitchen.' : '');
   alert(res.verified
-    ? ('Approved: '+res.address+'\n'+res.miles+' mi, delivery '+res.fee+', new total '+res.total+
-       '\nThe order is now with the kitchen.')
+    ? ('Approved: '+res.address+'\n'+res.miles+' mi, delivery '+res.fee+', new total '+res.total+where)
     : ('Approved as typed: '+res.address+'\nWe still could not place it on the map, so the fee stayed at '+
-       res.fee+'. Use Edit items / fee / tip to change it.\nThe order is now with the kitchen.'));
+       res.fee+'. Use Change fee to adjust it.'+where));
   board(true);
 }
 function payPill(o){

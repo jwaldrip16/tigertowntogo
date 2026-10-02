@@ -10,6 +10,7 @@
 <h1>Food delivery in Opelika, Auburn and Valley</h1>
 <p class="lede">Pick a restaurant, we validate your address, and the fee is calculated from how far
 the driver actually has to go.</p>
+{% if not biz_open %}<div class="panel" style="border-left:4px solid #b44a22"><b>We are closed right now.</b> You can still place a future order: pick a restaurant and choose Schedule for later.</div>{% endif %}
 <div class="grid">
   {% for c in cards %}
   <a class="card {{ 'closed' if not c.open else '' }}" href="/r/{{ c.r['slug'] }}">

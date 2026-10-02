@@ -129,17 +129,24 @@ function drawMenu(){
   rebind(rid);
   draw();
 }
+const DTAB = {};
 function rebind(rid){
   // Same look as the customer website: section bar, photo cards, and the same pop-up for every item.
   const items = MENUS[rid]||[];
   const el = document.getElementById('menu');
   if (!items.length){ el.innerHTML = '<p class="muted">No items on this menu yet.</p>'; return; }
+  const tabs = [];
+  items.forEach(it=>{ const t = (it.tab||'').trim() || 'Menu'; if (!tabs.includes(t)) tabs.push(t); });
+  if (!tabs.includes(DTAB[rid])) DTAB[rid] = tabs[0];
   const order = [], groups = {};
-  items.forEach((it,n)=>{ const sec = (it.section||'').trim() || 'Menu'; if(!groups[sec]){ groups[sec]=[]; order.push(sec); } groups[sec].push(n); });
+  items.forEach((it,n)=>{ if (((it.tab||'').trim() || 'Menu') !== DTAB[rid]) return;
+    const sec = (it.section||'').trim() || 'Menu'; if(!groups[sec]){ groups[sec]=[]; order.push(sec); } groups[sec].push(n); });
+  const tabbar = tabs.length > 1 ? '<nav class="menutabs">' + tabs.map((t,k)=>
+      '<button type="button" data-tab="'+k+'" class="'+(t===DTAB[rid]?'on':'')+'">'+ItemPickEsc(t)+'</button>').join('') + '</nav>' : '';
   const slug = s => 'dsec-' + s.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
   const nav = order.length > 1 ? '<nav class="secnav">' + order.map(sec=>
       '<a href="#'+slug(sec)+'" data-jump="'+slug(sec)+'">'+ItemPickEsc(sec)+'</a>').join('') + '</nav>' : '';
-  el.innerHTML = nav + order.map(sec=>
+  el.innerHTML = tabbar + nav + order.map(sec=>
     '<h3 class="sechead" id="'+slug(sec)+'">'+ItemPickEsc(sec)+'</h3><div class="mgrid">'+
     groups[sec].map(n=>{ const i = items[n];
       return '<button type="button" class="mcard" data-n="'+n+'">'+
@@ -147,6 +154,7 @@ function rebind(rid){
         '<div class="mhead"><strong>'+ItemPickEsc(i.name)+'</strong><span class="mprice">'+money(i.price_cents)+'</span></div>'+
         (i.description ? '<div class="mdesc">'+ItemPickEsc(i.description)+'</div>' : '')+'</button>'; }).join('')+
     '</div>').join('');
+  el.querySelectorAll('button[data-tab]').forEach(b=>{ b.onclick = ()=>{ DTAB[rid] = tabs[parseInt(b.dataset.tab,10)]; rebind(rid); }; });
   el.querySelectorAll('a[data-jump]').forEach(a=>{ a.onclick = ev=>{ ev.preventDefault();
     const t = document.getElementById(a.dataset.jump); if (t) t.scrollIntoView({behavior:'smooth', block:'start'}); }; });
   el.querySelectorAll('button[data-n]').forEach(b=>{

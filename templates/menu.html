@@ -30,7 +30,7 @@
       <select id="whenDay" class="hidden" onchange="drawSlots()" style="max-width:160px"></select>
       <select id="whenTime" class="hidden" style="max-width:130px"></select>
     </div>
-    <div class="muted small" id="whenNote">{{ '' if open else r['name'] + ' is closed right now. Pick a time they are open and we will send it to them then.' }}</div>
+    <div class="muted small" id="whenNote">{{ '' if open else ('We are closed right now. You can still schedule your order for later.' if not biz_open else r['name'] + ' is closed right now. Pick a time they are open and we will send it to them then.') }}</div>
     <h3>Tip your driver</h3>
     <div class="row" id="tipRow">
       <button class="btn tiny" onclick="setTip(0.15)">15%</button>
@@ -78,25 +78,42 @@ function itemCard(it){
     '<div class="mhead"><strong>'+escH(it.name)+'</strong><span class="mprice">'+it.price+'</span></div>'+
     (it.description ? '<div class="mdesc">'+escH(it.description)+'</div>' : '')+'</button>';
 }
+let MTAB = '';
 async function drawMenu(){
   const res = await jget('/api/menu/' + RID);
   MENU = res.items || [];
+  paintMenu();
+}
+function menuTabs(items){
+  const tabs = [];
+  items.forEach(it=>{ const t = (it.tab||'').trim() || 'Menu'; if (!tabs.includes(t)) tabs.push(t); });
+  return tabs;
+}
+function pickTab(t){ MTAB = t; paintMenu(); window.scrollTo({top: document.getElementById('menu').offsetTop - 10, behavior:'smooth'}); }
+function paintMenu(){
   const el = document.getElementById('menu');
   if (!MENU.length){ el.innerHTML = '<p class="muted">No items on this menu yet.</p>'; return; }
+  const tabs = menuTabs(MENU);
+  if (!tabs.includes(MTAB)) MTAB = tabs[0];
+  const shown = MENU.filter(it=>((it.tab||'').trim() || 'Menu') === MTAB);
   // sections keep the order the restaurant set; anything unsectioned sits under Menu
   const order = [], groups = {};
-  MENU.forEach(it=>{
+  shown.forEach(it=>{
     const sec = (it.section||'').trim() || 'Menu';
     if (!groups[sec]){ groups[sec] = []; order.push(sec); }
     groups[sec].push(it);
   });
   const slug = s => 'sec-' + s.toLowerCase().replace(/[^a-z0-9]+/g,'-').replace(/^-|-$/g,'');
+  const tabbar = tabs.length > 1
+    ? '<nav class="menutabs">' + tabs.map(t=>
+        '<button type="button" class="'+(t===MTAB?'on':'')+'" onclick="pickTab(\''+escH(t).replace(/'/g,'&#39;')+'\')">'+escH(t)+'</button>').join('') + '</nav>'
+    : '';
   const jump = order.length > 1
     ? '<nav class="secnav">' + order.map(s=>
         '<a href="#'+slug(s)+'" onclick="jumpSection(event,\''+slug(s)+'\')">'+escH(s)+'</a>').join('') +
       '</nav>'
     : '';
-  el.innerHTML = jump + order.map(s=>
+  el.innerHTML = tabbar + jump + order.map(s=>
     '<h3 class="sechead" id="'+slug(s)+'">'+escH(s)+'</h3><div class="mgrid">' +
     groups[s].map(itemCard).join('') + '</div>').join('');
 }

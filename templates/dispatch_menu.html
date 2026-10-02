@@ -14,6 +14,7 @@
   <div class="head"><h2>Menu</h2><button class="btn primary small" onclick="editItem(null,'')">Add an item</button></div>
   <p class="muted small">Click any item to change its photo, price, description, section or choices
     (sides, drinks, extra sauces). This is laid out the same way customers see it.</p>
+  <div id="tabBox"></div>
   <div id="menu"><p class="muted">Loading...</p></div>
 </div>
 {% endblock %}
@@ -41,8 +42,19 @@ function draw(){
   document.getElementById('presetBox').innerHTML = (DATA.presets||[]).map(p=>
     '<p><button class="btn small" onclick="loadPreset(\''+p.key+'\')">Load the '+escH(p.label)+'</button> '+
     '<span class="muted small">Fills this menu with the items, prices and choices from that menu.</span></p>').join('');
+  const tabs = [];
+  DATA.items.forEach(it=>{ const t = (it.tab||'').trim() || 'Menu'; if (!tabs.includes(t)) tabs.push(t); });
+  if (!tabs.includes(ETAB)) ETAB = tabs[0] || 'Menu';
+  document.getElementById('tabBox').innerHTML =
+    '<nav class="menutabs">' + tabs.map((t,k)=>
+      '<button type="button" class="'+(t===ETAB?'on':'')+'" onclick="pickETab('+k+')">'+escH(t)+'</button>').join('') +
+    '<button type="button" class="addtab" onclick="addTab()">+ Add tab</button></nav>' +
+    (tabs.length ? '<p class="muted small">Showing the '+escH(ETAB)+' tab. Customers only see the tab bar once there are two or more tabs.'+
+      (tabs.length>1 ? ' <button class="btn tiny" onclick="renameTab()">Rename this tab</button>' : '')+'</p>' : '');
+  ETABS = tabs;
   const order = [], groups = {};
   DATA.items.forEach(it=>{
+    if (((it.tab||'').trim() || 'Menu') !== ETAB) return;
     const sec = it.section || 'Menu';
     if (!groups[sec]){ groups[sec] = []; order.push(sec); }
     groups[sec].push(it);
@@ -63,6 +75,22 @@ function draw(){
       (it.groups.length ? '<span class="pill blue">'+it.groups.length+' choice'+(it.groups.length>1?'s':'')+'</span>' : '')+
       '</div></button>').join('')+'</div>').join('');
 }
+let ETAB = '', ETABS = [];
+function pickETab(k){ ETAB = ETABS[k]; draw(); }
+function addTab(){
+  const t = (prompt('Name of the new menu tab, like Dinner Menu or Lunch Specials:') || '').trim().slice(0,40);
+  if (!t) return;
+  ETAB = t; NEWTAB = t;
+  editItem(null, '');
+}
+async function renameTab(){
+  const t = (prompt('New name for the '+ETAB+' tab:', ETAB) || '').trim().slice(0,40);
+  if (!t || t === ETAB) return;
+  const ids = DATA.items.filter(it=>((it.tab||'').trim() || 'Menu') === ETAB).map(it=>it.id);
+  for (const id of ids) await jpost('/api/dispatch/menu-item', {op:'update', item_id:id, tab:t});
+  ETAB = t; load();
+}
+let NEWTAB = '';
 async function moveSection(sec, dir){
   const fd = new FormData(); fd.append('op','move-section'); fd.append('section', sec); fd.append('dir', dir);
   await fetch('/dispatch/menu/' + RID, {method:'POST', body:fd});
@@ -96,7 +124,8 @@ async function loadPreset(key){
 // ---------- item editor ----------
 function editItem(id, section){
   EDIT = id;
-  const it = id ? DATA.items.find(x=>x.id===id) : {id:null, name:'', price_cents:0, description:'', section:section||'', active:1, image:'', groups:[]};
+  const it = id ? DATA.items.find(x=>x.id===id) : {id:null, name:'', price_cents:0, description:'', section:section||'', active:1, image:'', groups:[], tab:(NEWTAB||ETAB||'')};
+  NEWTAB = '';
   let box = document.getElementById('edModal');
   if (!box){
     box = document.createElement('div'); box.className = 'modalback'; box.id = 'edModal';
@@ -129,6 +158,8 @@ function fillModal(it){
     '<h2>'+(it.id ? escH(it.name) : 'New item')+'</h2><div class="im-cols"><div>'+
     '<label>Item name</label><input id="edName" value="'+escH(it.name)+'">'+
     '<label>Price</label><input id="edPrice" value="'+dollars(it.price_cents)+'">'+
+    '<label>Menu tab</label><input id="edTab" list="edTabs" value="'+escH(it.tab||'')+'" placeholder="Menu">'+
+    '<datalist id="edTabs">'+ETABS.map(s=>'<option value="'+escH(s)+'">').join('')+'</datalist>'+
     '<label>Menu section</label><input id="edSec" list="edSecs" value="'+escH(it.section)+'" placeholder="Chicken Sandwiches">'+
     '<datalist id="edSecs">'+secs.map(s=>'<option value="'+escH(s)+'">').join('')+'</datalist>'+
     '<label>Description</label><textarea id="edDesc" rows="4">'+escH(it.description)+'</textarea>'+
@@ -147,6 +178,7 @@ async function saveItem(id){
   const body = {name:document.getElementById('edName').value.trim(),
     price_cents:cents(document.getElementById('edPrice').value),
     section:document.getElementById('edSec').value.trim(),
+    tab:document.getElementById('edTab').value.trim(),
     description:document.getElementById('edDesc').value.trim(),
     active:document.getElementById('edActive').checked ? 1 : 0};
   if (!body.name){ document.getElementById('edMsg').textContent = 'Give it a name.'; return; }
