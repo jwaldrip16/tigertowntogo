@@ -303,3 +303,7 @@ body.assignflash{animation:assignpage 1s ease-in-out infinite}
 /* Quiet banners on dispatch: no pulse until the late time passes (the late bar flashes then). */
 #flash.flashbar{animation:none;background:#c62828}
 #assignBar.flashbar{animation:none;background:#1e58c8}
+
+.soundwake{background:#fff4c2;border:2px solid #e0a800;color:#5a4300;padding:10px 14px;border-radius:10px;
+  margin:8px 0;font-weight:600;cursor:pointer;animation:wakepulse 1.4s ease-in-out infinite}
+@keyframes wakepulse{0%,100%{box-shadow:0 0 0 0 rgba(224,168,0,.5)}50%{box-shadow:0 0 0 6px rgba(224,168,0,0)}}

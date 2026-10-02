@@ -63,6 +63,8 @@
 </div>
 
 <div id="pageBoard">
+<div id="soundWake" class="soundwake hidden" onclick="try{ffSound.unlock();ffSound.play('ping');}catch(e){}">
+  Sound is asleep. Click here once so driver calls and new orders can be heard.</div>
 <div id="callAlerts" class="hidden"></div>
 <div id="assignBar" class="flashbar hidden"></div>
 <div id="lateBar" class="latebar hidden"></div>
@@ -461,8 +463,15 @@ function drawAwaiting(list){
 }
 let LAST_DRAW = 0;
 let ALERT_SEEN = 0;
+let CALL_RING = null;
+function callRing(on){
+  // keeps ringing every 10 seconds until every call-dispatch request is marked Done
+  if (on && !CALL_RING){ CALL_RING = setInterval(function(){ try { ffSound.play('call'); } catch(e){} }, 10000); }
+  if (!on && CALL_RING){ clearInterval(CALL_RING); CALL_RING = null; }
+}
 function drawAlerts(list){
   const box = document.getElementById('callAlerts');
+  callRing(list.length > 0);
   if (!list.length){ box.classList.add('hidden'); box.innerHTML = ''; return; }
   box.classList.remove('hidden');
   box.innerHTML = list.map(a =>
@@ -482,7 +491,7 @@ function drawAlerts(list){
   const top = list[0].id;
   if (top > ALERT_SEEN){
     ALERT_SEEN = top;
-    try { ffSound.play('ping'); } catch(e){}
+    try { ffSound.play('call'); } catch(e){}
     try { ffNotify.show((list[0].who === 'driver' ? 'Driver' : 'Kitchen') + ' needs dispatch',
           list[0].name + ': ' + (list[0].note || 'wants a call'), 'callalert'); } catch(e){}
   }
@@ -1070,7 +1079,12 @@ function soundLabel(){
   var n = document.getElementById('soundNote');
   if (b) b.textContent = on ? 'Sound on' : 'Sound off';
   if (n) n.textContent = on ? '' : 'alerts are silent';
+  var w = document.getElementById('soundWake');
+  var asleep = on && window.ffSound && !ffSound.armed();
+  if (w) w.classList.toggle('hidden', !asleep);
 }
+document.addEventListener('ffsound', soundLabel);
+setInterval(function(){ try { soundLabel(); } catch(e){} }, 3000);
 function toggleSound(){
   const busy = !!LATE_TIMER;
   try { if (busy && ffSound.enabled()){ alert('Sound stays on while an order is past its accept time.'); return; } } catch(e){}

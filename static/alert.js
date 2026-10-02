@@ -3,12 +3,30 @@
   var ctx = null, armed = false;
   var enabled = localStorage.getItem('ff_sound') !== 'off';
 
-  function unlock(){
+  var pending = null;   // a sound asked for while the browser still had audio locked
+  function running(){ return !!ctx && ctx.state === 'running'; }
+  function make(){
     if (ctx) return;
-    try { ctx = new (window.AudioContext || window.webkitAudioContext)(); armed = true; } catch(e){}
+    try { ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch(e){}
   }
-  ['click','keydown','touchstart'].forEach(function(ev){
-    document.addEventListener(ev, unlock, {once:false});
+  // Browsers keep audio locked until someone clicks or types on the page. Every click
+  // re-wakes it, even if an alert tried to play earlier and left it asleep.
+  function unlock(){
+    make();
+    if (!ctx) return;
+    var after = function(){
+      armed = running();
+      if (armed && pending){ var p = pending; pending = null; window.ffSound.play(p); }
+      try { document.dispatchEvent(new Event('ffsound')); } catch(e){}
+    };
+    if (ctx.state !== 'running'){ try { ctx.resume().then(after, after); } catch(e){ after(); } }
+    else after();
+  }
+  ['pointerdown','click','keydown','touchstart'].forEach(function(ev){
+    document.addEventListener(ev, unlock, {capture:true});
+  });
+  document.addEventListener('visibilitychange', function(){
+    if (!document.hidden && ctx && ctx.state !== 'running'){ try { ctx.resume().then(function(){ armed = running(); }); } catch(e){} }
   });
 
   function beep(freq, start, len, vol){
@@ -37,10 +55,22 @@
     // pattern: 'order' = three rising tones, 'ping' = single tone
     play: function(pattern){
       if (!enabled) return;
-      unlock();
+      make();
       if (!ctx) return;
-      if (ctx.state === 'suspended') ctx.resume();
+      if (ctx.state !== 'running'){
+        // try to wake it; if the browser still says no, play it on the next click
+        try { ctx.resume(); } catch(e){}
+        if (ctx.state !== 'running'){ pending = pattern || 'order'; armed = false; return; }
+      }
+      armed = true;
       if (pattern === 'ping'){ beep(880, 0, 0.18, 0.25); return; }
+      if (pattern === 'call'){
+        // phone style double ring, loud enough to hear across the room
+        beep(988, 0.00, 0.22, 0.45); beep(784, 0.25, 0.22, 0.45);
+        beep(988, 0.60, 0.22, 0.45); beep(784, 0.85, 0.22, 0.45);
+        if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
+        return;
+      }
       beep(660, 0.00, 0.16, 0.3);
       beep(880, 0.20, 0.16, 0.3);
       beep(1175, 0.40, 0.30, 0.3);
@@ -53,6 +83,7 @@
       if (enabled) window.ffSound.play('ping');
       return enabled;
     },
-    armed: function(){ return armed; }
+    armed: function(){ return running(); },
+    unlock: unlock
   };
 })();
