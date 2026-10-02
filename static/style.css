@@ -369,3 +369,11 @@ body.assignflash{animation:assignpage 1s ease-in-out infinite}
 
 .paybar{background:#ecfdf3;border:1px solid #b7ebc9;color:#14532d;border-radius:8px;padding:6px 10px;margin:6px 0;font-size:15px}
 .paybar b{font-size:16px}
+
+.drivercard{display:flex;gap:12px;align-items:center;border:1px solid var(--line,#ddd);border-radius:12px;padding:10px 12px;margin:10px 0;background:#f8fafc}
+.dav{width:46px;height:46px;border-radius:50%;background:#1e3a8a;color:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;font-weight:700;flex:none}
+.tmap{height:300px;border-radius:12px;margin:10px 0;border:1px solid var(--line,#ddd)}
+
+.stopmove{display:inline-flex;gap:2px;vertical-align:middle}
+.stopmove .btn.tiny{padding:0 6px;min-width:0}
+.stopmove .btn[disabled]{opacity:.35;cursor:default}

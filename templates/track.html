@@ -6,7 +6,9 @@
 <div class="panel" id="live"></div>
 {% endif %}
 {% endblock %}
-{% block scripts %}{% if order %}<script>
+{% block scripts %}{% if order %}<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
 const CODE = '{{ order.code }}';
 async function tick(){
   const res = await jget('/api/track/'+CODE);
@@ -27,7 +29,8 @@ async function tick(){
     document.getElementById('live').innerHTML =
       '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+
       '<p class="big">Waiting on payment</p>'+
-      '<p>Dispatch will call you to take your card. Your order goes to the kitchen as soon as it is paid.</p>'+
+      '<p>Your order has not gone to the kitchen yet. It goes as soon as your payment is marked paid. '+
+      'Dispatch may call you to take your card. This page updates on its own.</p>'+
       '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
     return;
   }
@@ -43,17 +46,27 @@ async function tick(){
       '<div class="row total"><span>Total so far</span><span>'+o.total+'</span></div>';
     return;
   }
-  const steps = [['Sent to kitchen', o.kitchen_status!=='pending'],
-                 ['Being prepared', o.kitchen_status==='preparing'||o.kitchen_status==='ready'],
-                 ['Ready for pickup', o.kitchen_status==='ready'],
-                 ['With a driver', ['assigned','picked_up','delivered'].includes(o.dispatch_status)],
+  const withDriver = ['assigned','received','at_restaurant','enroute','delivered'].includes(o.dispatch_status);
+  if (o.dispatch_status==='awaiting_payment' || o.kitchen_status==='waiting'){
+    document.getElementById('box').innerHTML = '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+
+      '<p><b>Waiting on payment.</b> Your order has not gone to the kitchen yet. It goes as soon as your payment is marked paid. '+
+      'This page updates on its own.</p>'+
+      '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
+    return;
+  }
+  const sentK = ['pending','preparing','ready'].includes(o.kitchen_status) || o.dispatch_status==='delivered';
+  const steps = [['Sent to kitchen', sentK],
+                 ['Being prepared', o.kitchen_status==='preparing'||o.kitchen_status==='ready'||o.dispatch_status==='delivered'],
+                 ['Ready for pickup', o.kitchen_status==='ready'||o.dispatch_status==='delivered'],
+                 ['With a driver', withDriver],
+                 ['On the way', ['enroute','delivered'].includes(o.dispatch_status)],
                  ['Delivered', o.dispatch_status==='delivered']];
   let html = '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>';
   // each step carries the time it actually happened, so the customer can quote it back
   const at = {};
   (o.timeline||[]).forEach(t=>{ at[t.kind+':'+t.status] = t.time; });
   const stamps = ['kitchen:pending','kitchen:preparing','kitchen:ready',
-                  'dispatch:assigned','dispatch:delivered'];
+                  'dispatch:assigned','dispatch:enroute','dispatch:delivered'];
   html += '<ul class="steps">'+steps.map((s,ix)=>{
     const ts = at[stamps[ix]];
     return '<li class="'+(s[1]?'done':'')+'">'+s[0]+
@@ -68,14 +81,60 @@ async function tick(){
   if (o.queue_position)
     html += '<p class="big">Position in the delivery queue: #'+o.queue_position+
             (o.hold_reason ? ' <span class="muted">('+o.hold_reason+')</span>' : '')+'</p>';
-  if (o.driver) html += '<p class="big">Driver: '+o.driver+' (stop #'+o.stack_seq+' on their run)</p>';
+  const tr = o.track || {};
+  if (tr.driver_name){
+    let sub = tr.phase;
+    if (o.dispatch_status==='enroute'){
+      if (tr.stops_before) sub += ' &middot; '+tr.stops_before+' stop'+(tr.stops_before===1?'':'s')+' before yours';
+      if (tr.eta_min) sub += ' &middot; about '+tr.eta_min+' min away';
+    }
+    html += '<div class="drivercard"><div class="dav">'+tr.driver_name.charAt(0).toUpperCase()+'</div>'+
+      '<div><div class="muted small">Your driver</div><div class="big">'+tr.driver_name+'</div>'+
+      '<div class="small">'+sub+'</div></div></div>';
+  }
+  if (o.dispatch_status!=='delivered' && o.dispatch_status!=='cancelled' && (tr.home_lat!==null || tr.pickup_lat!==null))
+    html += '<div id="tmap" class="tmap"></div>'+
+      (o.dispatch_status==='enroute' && tr.driver_lat===null
+        ? '<p class="muted small">Your driver\'s location shows here when their phone sends it.</p>'
+        : (o.dispatch_status!=='enroute' ? '<p class="muted small">Your driver shows on the map once your food is picked up.</p>'
+           : '<p class="muted small">Driver location as of '+tr.driver_fix+'. Arrival time is an estimate.</p>'));
+  if (tr.dispatch_tel && o.dispatch_status!=='delivered')
+    html += '<p><a class="btn" href="tel:'+tr.dispatch_tel+'">Call dispatch about this order</a></p>';
   html += '<div class="row"><span>Subtotal</span><span>'+o.subtotal+'</span></div>'+
           '<div class="row"><span>Delivery ('+(o.miles===null?'distance confirmed by dispatch':o.miles+' mi')+')</span><span>'+o.fee+'</span></div>'+
           (o.service_cents ? '<div class="row"><span>Service fee</span><span>'+o.service+'</span></div>' : '')+
           '<div class="row"><span>Tax</span><span>'+o.tax+'</span></div>'+
           '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>'+
           '<p><a class="btn" target="_blank" href="'+o.restaurant_nav+'">Navigate to the restaurant</a></p>';
+  const keepMap = document.getElementById('tmap');
+  if (keepMap && document.getElementById('tmap') && MAP) MAP_EL = keepMap;
   document.getElementById('live').innerHTML = html;
+  drawMap(o);
+}
+// ---- live map: restaurant, your door, and the driver once they have your food
+let MAP = null, MAP_EL = null, DRV = null, FIT = false;
+function drawMap(o){
+  const box = document.getElementById('tmap');
+  const tr = o.track || {};
+  if (!box || typeof L === 'undefined'){ MAP = null; return; }
+  if (MAP_EL && MAP){ box.replaceWith(MAP_EL); }
+  else {
+    MAP = L.map(box, {scrollWheelZoom:false});
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19,
+      attribution:'&copy; OpenStreetMap'}).addTo(MAP);
+    MAP_EL = box; DRV = null; FIT = false;
+    const pts = [];
+    if (tr.pickup_lat!==null){ L.marker([tr.pickup_lat,tr.pickup_lng],{title:o.restaurant}).addTo(MAP).bindTooltip(o.restaurant); pts.push([tr.pickup_lat,tr.pickup_lng]); }
+    if (tr.home_lat!==null){ L.circleMarker([tr.home_lat,tr.home_lng],{radius:9,color:'#14532d',fillColor:'#22c55e',fillOpacity:.9}).addTo(MAP).bindTooltip('You'); pts.push([tr.home_lat,tr.home_lng]); }
+    if (pts.length > 1) MAP.fitBounds(pts, {padding:[30,30]}); else if (pts.length) MAP.setView(pts[0], 14);
+  }
+  if (tr.driver_lat!==null){
+    const ll = [tr.driver_lat, tr.driver_lng];
+    if (!DRV) DRV = L.circleMarker(ll,{radius:10,color:'#1e3a8a',fillColor:'#3b82f6',fillOpacity:.95}).addTo(MAP).bindTooltip(tr.driver_name||'Driver');
+    else DRV.setLatLng(ll);
+    if (!FIT && tr.home_lat!==null){ MAP.fitBounds([ll,[tr.home_lat,tr.home_lng]], {padding:[40,40]}); FIT = true; }
+  } else if (DRV){ MAP.removeLayer(DRV); DRV = null; }
+  setTimeout(()=>MAP && MAP.invalidateSize(), 50);
 }
 tick(); setInterval(tick, 4000);
 </script>{% endif %}{% endblock %}

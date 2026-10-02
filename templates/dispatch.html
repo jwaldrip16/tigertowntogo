@@ -228,6 +228,18 @@ async function dropOnDriver(ev, did){
   if(!res.ok){ alert(res.error || 'Could not move that order.'); }
   board();
 }
+// up/down arrows on a driver's run change the order the driver makes the stops
+async function moveStop(did, oid, dir){
+  const drv = (LAST && LAST.drivers || []).find(x=>x.id===did);
+  if(!drv) return;
+  const ids = (drv.on_orders||[]).map(x=>x.id);
+  const i = ids.indexOf(oid), j = i + dir;
+  if(i<0 || j<0 || j>=ids.length) return;
+  ids[i] = ids[j]; ids[j] = oid;
+  const res = await jpost('/api/dispatch/reorder', {driver_id: did, order_ids: ids});
+  if(!res.ok) alert(res.error || 'Could not change the stop order.');
+  board();
+}
 // dragging a stop off a driver and onto the pending column sends it back to the queue
 async function dropOnQueue(ev){
   ev.preventDefault();
@@ -396,9 +408,15 @@ function renderDrivers(list){
       (ord[d.up_next-1] || d.up_next+'th up')+'</span>' :
       (d.status==='online' ? '<span class="pill grey">on a run</span>' : '');
     const run = (d.on_orders||[]).length
-      ? '<div class="runlist" ondragover="allowDrop(event)">'+d.on_orders.map(x=>
+      ? '<div class="runlist" ondragover="allowDrop(event)">'+d.on_orders.map((x,i,arr)=>
           '<div class="runitem" draggable="true" ondragstart="dragOrder(event,'+x.id+')" '+
-          'ondragend="dragEnd()" data-oid="'+x.code+'">#'+x.stop+' '+x.code+
+          'ondragend="dragEnd()" data-oid="'+x.code+'">'+
+          (arr.length>1 ? '<span class="stopmove">'+
+            '<button class="btn tiny" title="Move this stop earlier" '+(i===0?'disabled ':'')+
+            'onclick="event.stopPropagation();moveStop('+d.id+','+x.id+',-1)">&uarr;</button>'+
+            '<button class="btn tiny" title="Move this stop later" '+(i===arr.length-1?'disabled ':'')+
+            'onclick="event.stopPropagation();moveStop('+d.id+','+x.id+',1)">&darr;</button></span> ' : '')+
+          'Stop '+(i+1)+' &middot; '+x.code+
           ' <span class="pill blue">'+x.stage+'</span> <span class="muted small">'+
           x.restaurant+' &rarr; '+x.customer+'</span></div>').join('')+'</div>'
       : '<div class="muted small">no active run</div>';
@@ -850,8 +868,10 @@ function orderCard(o, opts, drivers){
   return '<div class="order'+(o.kitchen_status==='pending' && !['delivered','cancelled'].includes(o.dispatch_status)?' pendingflash':'')+'" draggable="true" ondragstart="dragOrder(event,'+o.id+')" '+
     'ondragend="dragEnd()"><div class="order-head"><span class="grip">&#8942;&#8942;</span><strong>'+o.code+'</strong> '+
     refPill(o)+tokenPill(o)+
-    '<span class="pill '+(o.kitchen_status==='ready'?'green':o.kitchen_status==='preparing'?'amber':'grey')+'">'
-    +o.kitchen_status+'</span> <span class="pill blue">'+o.dispatch_status+'</span> '+timer+' '+q+' '+hold+
+    ((o.dispatch_status==='awaiting_payment' || o.kitchen_status==='waiting')
+      ? '<span class="pill amber">not sent to kitchen</span> <span class="pill blue">waiting on payment</span> '
+      : '<span class="pill '+(o.kitchen_status==='ready'?'green':o.kitchen_status==='preparing'?'amber':'grey')+'">'
+        +(o.kitchen_status==='pending'?'sent to kitchen':o.kitchen_status)+'</span> <span class="pill blue">'+o.dispatch_status+'</span> ')+timer+' '+q+' '+hold+
     ' <span class="pill grey">'+(o.source_label||'Online')+'</span>'+
     payPill(o)+
     (o.placed_by!=='customer' ? ' <span class="pill grey">by '+o.placed_by+'</span>' : '')+'</div>'+

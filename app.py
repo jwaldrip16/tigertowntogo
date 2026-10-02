@@ -767,6 +767,28 @@ def available_drivers():
     return [r for r in rows if r["load"] == 0]
 
 
+def line_positions():
+    """Where each on-shift driver stands for the next order, shown on the driver app and
+    the board. Separate from auto dispatch: a lone driver is always first in line, even
+    though with one driver on shift the dispatcher hands orders out by hand. A driver only
+    drops out of line when other drivers are on shift and they are holding their stack limit."""
+    rows = on_shift_drivers()
+    out = {}
+    if len(rows) == 1:
+        r = rows[0]
+        out[r["id"]] = {"pos": 1, "at_limit": r["load"] >= (r["max_stack"] or 1)}
+        return out
+    n = 0
+    for r in rows:
+        full = r["load"] >= (r["max_stack"] or 1)
+        if full:
+            out[r["id"]] = {"pos": None, "at_limit": True}
+        else:
+            n += 1
+            out[r["id"]] = {"pos": n, "at_limit": False}
+    return out
+
+
 def recompute_queue():
     """Queue = orders with no driver yet, oldest first, with the reason each one is waiting."""
     con = db()
@@ -1968,8 +1990,8 @@ def checkout():
                     "send_note": send_note,
                     "address_ok": bool(address_ok),
                     "message": ("" if address_ok and cash else
-                                "Thanks! Your card is being run now. Your order goes to the "
-                                "kitchen as soon as the payment goes through." if address_ok else
+                                "Thanks! Waiting on payment. Your order has not gone to the "
+                                "kitchen yet. It goes as soon as your payment is marked paid." if address_ok else
                                 "We could not verify that address, so your order is pending "
                                 "dispatch approval. Dispatch will confirm it shortly and your "
                                 "delivery fee may change with the distance.")})
@@ -2011,14 +2033,62 @@ def track(code):
     o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
     if not o:
         return render_template("track.html", order=None, code=code)
-    return render_template("track.html", order=order_dict(o), code=code)
+    return render_template("track.html", order={"code": o["code"]}, code=code)
+
+TRACK_FIELDS = ("code", "dispatch_status", "kitchen_status", "restaurant", "restaurant_nav", "address",
+                "scheduled_label", "needs_address_approval", "timeline", "timer_seconds",
+                "queue_position", "hold_reason", "miles", "subtotal", "fee", "service", "service_cents",
+                "tax", "tip", "total", "delivered_time", "lines")
+TRACK_AVG_MPH = 25.0       # town driving speed used for the customer's rough arrival time
+TRACK_FIX_FRESH_MIN = 10   # an older GPS fix is not shown to the customer
+
+
+def track_payload(o):
+    """What the public tracking page may see. Card, signature, phone and dispatch-only
+    fields stay off it, since anyone with the order code can open this page."""
+    full = order_dict(o)
+    out = {k: full.get(k) for k in TRACK_FIELDS}
+    st = o["dispatch_status"]
+    r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+    pu = pickup_of(o, r)
+    t = {"phase": "", "driver_name": "", "stops_before": 0, "eta_min": None,
+         "driver_lat": None, "driver_lng": None, "driver_fix": "",
+         "home_lat": o["lat"], "home_lng": o["lng"], "pickup_lat": pu["lat"], "pickup_lng": pu["lng"],
+         "dispatch_tel": tel_digits(dispatch_phone())}
+    d = db().execute("SELECT * FROM drivers WHERE id=?", (o["driver_id"],)).fetchone() if o["driver_id"] else None
+    if d and st in ("assigned", "received", "at_restaurant", "enroute", "delivered"):
+        t["driver_name"] = (d["name"] or "").split()[0] if (d["name"] or "").strip() else "Your driver"
+        t["phase"] = {"assigned": "Heading to " + pu["name"], "received": "Heading to " + pu["name"],
+                      "at_restaurant": "At " + pu["name"] + " picking up your order",
+                      "enroute": "On the way to you", "delivered": "Delivered"}[st]
+        if st == "enroute":
+            ahead = db().execute("""SELECT COUNT(*) n FROM orders WHERE driver_id=? AND id<>?
+                                    AND dispatch_status='enroute' AND stack_seq < ?""",
+                                 (d["id"], o["id"], o["stack_seq"] or 0)).fetchone()["n"]
+            t["stops_before"] = ahead
+            fresh = False
+            if d["last_loc_at"] and d["last_lat"] is not None and d["last_lng"] is not None:
+                try:
+                    age = (dt.datetime.now() - dt.datetime.fromisoformat(d["last_loc_at"])).total_seconds() / 60
+                    fresh = age <= TRACK_FIX_FRESH_MIN
+                except ValueError:
+                    fresh = False
+            if fresh:
+                t["driver_lat"], t["driver_lng"] = d["last_lat"], d["last_lng"]
+                t["driver_fix"] = clock(d["last_loc_at"])
+                if o["lat"] is not None and o["lng"] is not None:
+                    mi = haversine_miles(d["last_lat"], d["last_lng"], o["lat"], o["lng"]) * ROAD_FACTOR
+                    t["eta_min"] = max(2, int(round(mi / TRACK_AVG_MPH * 60 + ahead * 5)))
+    out["track"] = t
+    return out
+
 
 @app.get("/api/track/<code>")
 def api_track(code):
     o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
-    return jsonify({"ok": True, "order": order_dict(o)})
+    return jsonify({"ok": True, "order": track_payload(o)})
 
 # ---------------------------------------------------------------- dispatcher
 
@@ -2093,7 +2163,8 @@ def api_board():
     drivers = db().execute("""SELECT d.*, (SELECT COUNT(*) FROM orders o WHERE o.driver_id=d.id
                               AND o.dispatch_status IN ('assigned','received','at_restaurant','enroute')) load
                               FROM drivers d ORDER BY d.name""").fetchall()
-    rotation = {d["id"]: i + 1 for i, d in enumerate(available_drivers())}
+    lines = line_positions()
+    rotation = {k: v["pos"] for k, v in lines.items()}
     unread = {r["driver_id"]: r["c"] for r in db().execute(
         """SELECT driver_id, COUNT(*) c FROM messages
            WHERE sender='driver' AND seen_by_dispatch=0 GROUP BY driver_id""").fetchall()}
@@ -2125,6 +2196,7 @@ def api_board():
                      "pending_request": d["pending_request"], "load": d["load"],
                      "unread": unread.get(d["id"], 0),
                      "max_stack": d["max_stack"], "up_next": rotation.get(d["id"]),
+                     "at_limit": (lines.get(d["id"]) or {}).get("at_limit", False),
                      "roster": d["roster"], "group": driver_group(d),
                      "today_shift": ", ".join(scheduled_today(d["id"])),
                      "availability": availability_for(d["id"]), "location": loc_block(d),
@@ -3622,16 +3694,32 @@ def dispatch_hours_page():
 
 @app.post("/api/dispatch/reorder")
 def api_reorder():
-    """Drag and drop within a driver's run: order_ids in the new stop order."""
+    """Dispatch sets the driver's stop order: order_ids in the new order. Only that
+    driver's live stops are renumbered 1..n, and the driver gets a note with the new order."""
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
-    data = request.get_json(force=True)
-    did = data.get("driver_id")
-    for seq, oid in enumerate(data.get("order_ids", []), start=1):
-        db().execute("""UPDATE orders SET stack_seq=? WHERE id=? AND driver_id=?""",
-                     (seq, oid, did))
+    data = request.get_json(force=True) or {}
+    try:
+        did = int(data.get("driver_id"))
+        want = [int(x) for x in (data.get("order_ids") or [])]
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Bad request."}), 400
+    live = db().execute("""SELECT id, code FROM orders WHERE driver_id=? AND dispatch_status
+                           IN ('assigned','received','at_restaurant','enroute')
+                           ORDER BY stack_seq, id""", (did,)).fetchall()
+    have = [r["id"] for r in live]
+    if sorted(want) != sorted(have):
+        return jsonify({"ok": False, "error": "That run changed. The board will refresh, then try again."}), 409
+    if want == have:
+        return jsonify({"ok": True, "changed": False})
+    codes = {r["id"]: r["code"] for r in live}
+    for seq, oid in enumerate(want, start=1):
+        db().execute("UPDATE orders SET stack_seq=? WHERE id=? AND driver_id=?", (seq, oid, did))
+    db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                 (did, "dispatcher", "Dispatch changed your stop order: " +
+                  ", ".join("#%d %s" % (i, codes[o]) for i, o in enumerate(want, start=1)), now()))
     db().commit()
-    return jsonify({"ok": True})
+    return jsonify({"ok": True, "changed": True})
 
 
 @app.post("/api/order/hold")
@@ -4092,7 +4180,8 @@ def api_driver_state():
     auto_assign()
     d = db().execute("SELECT * FROM drivers WHERE id=?", (did,)).fetchone()
     recompute_queue()
-    rotation = {x["id"]: i + 1 for i, x in enumerate(available_drivers())}
+    lines = line_positions()
+    rotation = {k: v["pos"] for k, v in lines.items()}
     waiting = db().execute("""SELECT COUNT(*) c FROM orders
                               WHERE dispatch_status IN ('queued','held')""").fetchone()["c"]
     mine = db().execute("""SELECT * FROM orders WHERE driver_id=? AND dispatch_status IN
@@ -4114,6 +4203,7 @@ def api_driver_state():
                     "driver": {"name": d["name"], "status": d["status"],
                                "pending_request": d["pending_request"], "max_stack": d["max_stack"],
                                "up_next": rotation.get(d["id"]), "waiting_count": waiting,
+                               "at_limit": (lines.get(d["id"]) or {}).get("at_limit", False),
                                "roster": d["roster"]},
                     "availability": availability_for(did),
                     "stack": [order_dict(o) for o in mine]})
