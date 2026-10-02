@@ -40,7 +40,47 @@
   <input name="order_tokens" value="{{ s['order_tokens'] }}">
   <div class="muted small">The short label dispatch puts on an order and the driver sees on the
     stop, e.g. Online, App, Phone call, Third party.</div>
+  <h2>Customer order data</h2>
+  <label>Delete finished orders after this many days (0 keeps them forever)</label>
+  <input name="order_keep_days" id="keepDays" type="number" min="0" max="3650" value="{{ s['order_keep_days'] or 0 }}">
+  <div class="muted small">Deletes delivered and cancelled orders (customer name, phone, address and items) once they are older than this, checked every few hours. Live and future orders are never touched. 30 days minimum.</div>
   <button class="btn primary">Save</button>
 </form>
+<div class="panel narrow">
+  <h2>Purge old orders now</h2>
+  <p class="muted small">Download the orders first. Deleted orders cannot be brought back.</p>
+  <label>Orders older than this many days</label>
+  <input id="purgeDays" type="number" min="30" max="3650" value="{{ (s['order_keep_days']|int) if (s['order_keep_days'] or '0')|int >= 30 else 90 }}">
+  <div style="display:flex;gap:8px;flex-wrap:wrap;margin-top:10px">
+    <button class="btn" type="button" onclick="purgePreview()">Check how many</button>
+    <a class="btn hidden" id="purgeExport" href="#">Download them to Excel</a>
+    <button class="btn danger hidden" id="purgeBtn" type="button" onclick="purgeNow()">Delete them</button>
+  </div>
+  <p id="purgeMsg" class="small" style="margin-top:8px"></p>
+</div>
 {% endblock %}
-{% block scripts %}<script>attachAddressPicker('bizAddr');</script>{% endblock %}
+{% block scripts %}<script>attachAddressPicker('bizAddr');
+let PURGE = null;
+async function purgePreview(){
+  const d = parseInt(document.getElementById('purgeDays').value||'0',10);
+  const r = await jget('/api/dispatch/purge-preview?days='+d);
+  const msg = document.getElementById('purgeMsg');
+  const ex = document.getElementById('purgeExport'), btn = document.getElementById('purgeBtn');
+  if(!r.ok){ msg.textContent = r.error || 'Could not check.'; ex.classList.add('hidden'); btn.classList.add('hidden'); return; }
+  PURGE = r;
+  msg.textContent = r.count + ' finished order' + (r.count===1?'':'s') + ' placed before ' + r.before + '.';
+  ex.href = r.export_url;
+  ex.classList.toggle('hidden', !r.count); btn.classList.toggle('hidden', !r.count);
+}
+async function purgeNow(){
+  if(!PURGE) return;
+  const typed = prompt('This deletes ' + PURGE.count + ' orders placed before ' + PURGE.before +
+                       ' for good. Download them first. Type PURGE to delete.');
+  if(typed !== 'PURGE') return;
+  const r = await jpost('/api/dispatch/purge-orders', {days: PURGE.days, confirm: 'PURGE'});
+  document.getElementById('purgeMsg').textContent = r.ok ? ('Deleted ' + r.deleted + ' orders.') : (r.error || 'Delete failed.');
+  document.getElementById('purgeBtn').classList.add('hidden');
+  document.getElementById('purgeExport').classList.add('hidden');
+  PURGE = null;
+}
+</script>{% endblock %}

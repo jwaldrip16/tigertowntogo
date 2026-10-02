@@ -218,6 +218,8 @@ def init_db():
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
     con.execute("UPDATE settings SET value='0' WHERE key='assign_on_pending'")
     # Business now starts Closed. Existing databases are closed once, then dispatch opens it.
+    con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('order_keep_days','0')")
+    con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('order_purge_last','')")
     if not con.execute("SELECT 1 FROM settings WHERE key='biz_default_closed_v1'").fetchone():
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('business_open','0')")
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('biz_default_closed_v1','1')")
@@ -1399,6 +1401,53 @@ def api_payment_failed():
     auto_assign()
     return jsonify({"ok": True})
 
+ORDER_KEEP_MIN, ORDER_KEEP_MAX = 30, 3650
+
+def order_purge_cutoff(days):
+    """Orders placed before this date (YYYY-MM-DD, midnight local) are purged."""
+    return (dt.date.today() - dt.timedelta(days=int(days))).isoformat()
+
+def order_purge_ids(days):
+    cut = order_purge_cutoff(days)
+    rows = db().execute("""SELECT id FROM orders WHERE dispatch_status IN ('delivered','cancelled')
+                           AND created_at < ?""", (cut,)).fetchall()
+    return [r["id"] for r in rows], cut
+
+def purge_old_orders(days=None, force=False):
+    """Deletes finished customer orders (delivered or cancelled) placed more than
+    `days` ago, plus their card records, status history and call alerts.
+    Live and future orders are never touched. Returns how many orders went."""
+    if days is None:
+        days = setting("order_keep_days") or 0
+    days = int(days or 0)
+    if days < ORDER_KEEP_MIN:
+        return 0
+    if not force:
+        last = setting("order_purge_last", str) or ""
+        if last and last > (dt.datetime.now() - dt.timedelta(hours=6)).isoformat(timespec="seconds"):
+            return 0
+    ids, _cut = order_purge_ids(days)
+    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('order_purge_last',?)",
+                 (dt.datetime.now().isoformat(timespec="seconds"),))
+    for i in range(0, len(ids), 500):
+        chunk = ids[i:i + 500]
+        q = ",".join("?" * len(chunk))
+        for table in ("card_vault", "status_log", "call_alerts"):
+            db().execute("DELETE FROM " + table + " WHERE order_id IN (" + q + ")", chunk)
+        db().execute("DELETE FROM orders WHERE id IN (" + q + ")", chunk)
+    db().commit()
+    if ids:
+        db().execute("INSERT INTO events(kind,detail,created_at) VALUES('purge',?,?)",
+                     ("%d orders older than %d days" % (len(ids), days),
+                      dt.datetime.now().isoformat(timespec="seconds")))
+        db().commit()
+        try:
+            db().execute("VACUUM")   # hand the freed space back to the volume
+        except Exception:
+            pass
+    return len(ids)
+
+
 def purge_cards():
     """Unpaid cards go after CARD_HOLD_HOURS, paid ones after CARD_KEEP_DAYS,
     and a cancelled order's card right away."""
@@ -1988,6 +2037,10 @@ def api_board():
         return jsonify({"ok": False}), 403
     auto_assign()   # safety net: anything an earlier event missed is placed on the next refresh
     purge_cards()
+    try:
+        purge_old_orders()
+    except Exception:
+        pass
     live = db().execute("""SELECT * FROM orders WHERE dispatch_status NOT IN ('delivered','cancelled','scheduled')
                            ORDER BY created_at ASC""").fetchall()
     future_count = db().execute("SELECT COUNT(*) c FROM orders WHERE dispatch_status='scheduled'").fetchone()["c"]
@@ -3807,6 +3860,15 @@ def dispatch_settings():
         if FUTURE_LEAD_ERR:
             FUTURE_LEAD_ERR.clear()
             errs.append("Check the minutes: future orders take 10 to 240, accept warnings take 0 to 60.")
+        if "order_keep_days" in request.form:
+            try:
+                kd = int((request.form["order_keep_days"] or "0").strip())
+            except ValueError:
+                kd = -1
+            if kd == 0 or ORDER_KEEP_MIN <= kd <= ORDER_KEEP_MAX:
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('order_keep_days',?)", (str(kd),))
+            else:
+                errs.append("Keep orders for 0 (forever) or %d to %d days." % (ORDER_KEEP_MIN, ORDER_KEEP_MAX))
         for field, key, label in (("tax_pct", "tax_rate_bp", "Tax"), ("service_pct", "service_fee_bp", "Service fee")):
             if field in request.form:
                 raw = request.form[field].replace("%", "").strip() or "0"
@@ -4040,6 +4102,38 @@ def _day_range():
     if t < f:
         f, t = t, f
     return f, t
+
+@app.get("/api/dispatch/purge-preview")
+def api_purge_preview():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    try:
+        days = int(request.args.get("days") or setting("order_keep_days") or 0)
+    except ValueError:
+        days = 0
+    if days < ORDER_KEEP_MIN or days > ORDER_KEEP_MAX:
+        return jsonify({"ok": False, "error": "Pick %d to %d days." % (ORDER_KEEP_MIN, ORDER_KEEP_MAX)})
+    ids, cut = order_purge_ids(days)
+    last_day = (dt.date.fromisoformat(cut) - dt.timedelta(days=1)).isoformat()
+    first = db().execute("SELECT MIN(substr(created_at,1,10)) d FROM orders").fetchone()["d"] or last_day
+    return jsonify({"ok": True, "count": len(ids), "days": days, "before": cut,
+                    "export_url": "/dispatch/export/orders.xlsx?from=%s&to=%s" % (first, last_day)})
+
+@app.post("/api/dispatch/purge-orders")
+def api_purge_orders():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(force=True) or {}
+    if data.get("confirm") != "PURGE":
+        return jsonify({"ok": False, "error": "Type PURGE to confirm."}), 400
+    try:
+        days = int(data.get("days") or 0)
+    except ValueError:
+        days = 0
+    if days < ORDER_KEEP_MIN or days > ORDER_KEEP_MAX:
+        return jsonify({"ok": False, "error": "Pick %d to %d days." % (ORDER_KEEP_MIN, ORDER_KEEP_MAX)}), 400
+    n = purge_old_orders(days=days, force=True)
+    return jsonify({"ok": True, "deleted": n})
 
 @app.get("/dispatch/export/orders.xlsx")
 def export_orders():
@@ -4658,9 +4752,25 @@ def api_dispatch_business():
     if not on:
         # end of day: drivers start tomorrow with an empty Completed tab. Dispatch keeps the history.
         db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('driver_done_cleared_at',?)", (now(),))
+    # every open and every close starts chat fresh: driver chats, kitchen chats and mass texts
+    cleared = purge_chats()
     db().commit()
-    log("business", ("opened" if on else "closed") + " by " + (session.get("dispatcher_name") or "dispatch"))
-    return jsonify({"ok": True, "business_open": on})
+    log("business", ("opened" if on else "closed") + " by " + (session.get("dispatcher_name") or "dispatch")
+        + ("; cleared %d chat messages" % cleared if cleared else ""))
+    try:
+        if cleared:
+            db().execute("VACUUM")
+    except Exception:
+        pass
+    return jsonify({"ok": True, "business_open": on, "chats_cleared": cleared})
+
+def purge_chats():
+    """Deletes every driver chat, restaurant chat and mass text. Returns how many went."""
+    n = 0
+    for table in ("messages", "rest_messages", "broadcasts"):
+        n += db().execute("SELECT COUNT(*) c FROM " + table).fetchone()["c"]
+        db().execute("DELETE FROM " + table)
+    return n
 
 def business_is_open():
     try:
