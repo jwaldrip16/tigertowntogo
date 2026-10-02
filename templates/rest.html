@@ -5,7 +5,29 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/static/icons/kitchen-192.png">
-<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/static/sw.js").catch(function(){});}</script>
+<script>
+let LATE_BEEP_AT = 0, LATE_LOUD = false;
+function silenceAlert(){
+  if (LATE_LOUD){ alert('This order is late. The chime stops once you accept it.'); return; }
+  ffSound.stopLoop();
+}
+function drawLate(list, mode){
+  const bar = document.getElementById('lateBar'); if (!bar) return;
+  list = list || [];
+  const loud = list.some(function(x){ return x.loud; });
+  // Past the sound time: chime every few seconds and keep going until the order is accepted.
+  LATE_LOUD = loud;
+  if (loud){ try { ffSound.startLoop(5000); } catch(e) {} }
+  if (!list.length){ bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+  bar.innerHTML = '<b>Not accepted yet</b>' + list.map(function(x){
+    const msg = mode === 'rest'
+      ? 'Order ' + x.code + ' is waiting for you to accept (' + x.minutes + ' min)'
+      : 'Tap Received on order ' + x.code + ' (' + x.minutes + ' min)';
+    return '<div class="lateline' + (x.loud ? ' loud' : '') + '">' + msg + '</div>';
+  }).join('');
+  bar.classList.remove('hidden');
+}
+if("serviceWorker" in navigator){navigator.serviceWorker.register("/static/sw.js").catch(function(){});}</script>
 {% endblock %}
 {% block body %}
 <div id="flash" class="flashbar hidden">New order</div>
@@ -15,6 +37,7 @@
   <button class="btn small" id="h24" onclick="open24()">Open 24 hours</button>
   <a class="btn small" href="/restaurant/account">Account</a>
   <a class="btn small" href="/restaurant/logout">Sign out</a></div></div>
+<div id="lateBar" class="latebar hidden"></div>
 <p class="muted" id="hourline">{{ hours }}</p>
 <div class="row"><span class="muted small" id="soundNote"></span>
   <button class="btn tiny" id="soundBtn" onclick="toggleSound()">Sound</button>
@@ -37,10 +60,17 @@
   <div class="muted small" id="callSaid"></div>
 </section>
 <div id="newalert" class="newalert hidden">New order in. Accept it and start the timer to stop the
-  alert. <button class="btn tiny" onclick="ffSound.stopLoop()">Silence</button></div>
+  alert.</div>
 <div class="tabs">
   <button class="tab on" id="tabActive" onclick="showTab('active')">Active <span id="cntActive"></span></button>
   <button class="tab" id="tabDone" onclick="showTab('done')">Completed <span id="cntDone"></span></button>
+  <button class="tab" id="tabChat" onclick="showTab('chat')">Chat with dispatch <span class="pill red hidden" id="chatBadge"></span></button>
+</div>
+<div id="paneChat" class="hidden panel">
+  <div id="rchat" class="chat tall"></div>
+  <div class="row"><input id="rchatBox" placeholder="Message dispatch" onkeydown="if(event.key==='Enter')sendChat()">
+    <button class="btn" onclick="sendChat()">Send</button></div>
+  <div class="muted small">Dispatch sees this right away on their portal.</div>
 </div>
 <div id="orders"></div>
 <div id="doneTools" class="row hidden"><label class="small">Day
@@ -83,6 +113,10 @@ function clearTicketFlash(){
 }
 let seen = null;
 function toggleSound(){
+  const nb = document.getElementById('newalert');
+  if (ffSound.enabled() && nb && !nb.classList.contains('hidden')){
+    alert('Sound stays on until you accept the waiting order.'); return;
+  }
   const on = ffSound.toggle();
   document.getElementById('soundBtn').textContent = on ? 'Sound on' : 'Sound off';
 }
@@ -100,6 +134,8 @@ async function load(force){
   const dd = (document.getElementById('doneDay')||{}).value || '';
   const res = await jget('/api/restaurant/orders' + (dd ? '?day=' + dd : ''));
   if(!res.ok){ window.location='/restaurant/login'; return; }
+  try { drawLate(res.late || [], 'rest'); } catch(e) {}
+  try { chatCheck(res); } catch(e) { console.log('chat skipped', e); }
   document.getElementById('openpill').textContent =
     res.open_24 ? 'Open 24 hours' : (res.open ? 'Open' : 'Closed');
   document.getElementById('hourline').textContent = res.hours;
@@ -175,6 +211,46 @@ function showTab(which){
   document.getElementById('doneTools').classList.toggle('hidden', which !== 'done');
   document.getElementById('tabActive').classList.toggle('on', which === 'active');
   document.getElementById('tabDone').classList.toggle('on', which === 'done');
+  document.getElementById('paneChat').classList.toggle('hidden', which !== 'chat');
+  document.getElementById('tabChat').classList.toggle('on', which === 'chat');
+  if (which === 'chat') loadChat(true);
+}
+let CHAT_LAST = null;
+function esc(s){ return String(s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+async function loadChat(seen){
+  const res = await jget('/api/restaurant/chat' + (seen ? '?seen=1' : ''));
+  if (!res.ok) return;
+  const c = document.getElementById('rchat');
+  c.innerHTML = res.messages.map(m=>'<div class="msg '+(m.sender==='restaurant'?'driver':'dispatch')+'"><span class="muted small">'+
+    m.at+' '+(m.sender==='restaurant' ? 'you' : 'dispatch'+(m.who?' ('+esc(m.who)+')':''))+'</span><div>'+esc(m.body)+'</div></div>').join('')
+    || '<p class="muted">No messages yet.</p>';
+  c.scrollTop = c.scrollHeight;
+  if (seen) chatBadge(0);
+}
+async function sendChat(){
+  const box = document.getElementById('rchatBox');
+  const body = box.value.trim(); if (!body) return;
+  const res = await jpost('/api/restaurant/chat', {body: body});
+  if (res && res.ok){ box.value=''; loadChat(true); } else alert((res && res.error) || 'Message did not send.');
+}
+function chatBadge(n){
+  const b = document.getElementById('chatBadge');
+  b.textContent = n ? n : ''; b.classList.toggle('hidden', !n);
+}
+function chatCheck(res){
+  const n = res.chat_unread || 0, last = res.chat_last_id || 0;
+  if (TAB === 'chat'){ if (last !== CHAT_LAST) loadChat(true); }
+  else {
+    chatBadge(n);
+    if (CHAT_LAST !== null && last > CHAT_LAST && n){
+      try { ffSound.beep(); } catch(e) {}
+      const f = document.getElementById('flash');
+      if (f){ f.textContent = 'New message from dispatch'; f.classList.remove('hidden');
+        f.onclick = function(){ showTab('chat'); f.classList.add('hidden'); };
+        setTimeout(function(){ f.classList.add('hidden'); f.textContent = 'New order'; f.onclick = null; }, 8000); }
+    }
+  }
+  CHAT_LAST = last;
 }
 let NOTIFIED = null;
 function newTicketAlert(orders){
@@ -188,6 +264,8 @@ function newTicketAlert(orders){
       try { ffNotify.show('New order ' + top.code,
             'For ' + (top.customer || 'a customer') + '. Confirm it and start the timer.', 'ticket'); } catch(e){}
     }
+    // Chimes every 5 seconds until the order is accepted. Sound can't be switched off while one is waiting.
+    try { if (!ffSound.enabled()) { ffSound.toggle(); soundNote(); } } catch(e) {}
     ffSound.startLoop(5000);
   } else {
     if (banner) banner.classList.add('hidden');

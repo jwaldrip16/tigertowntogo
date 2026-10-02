@@ -149,6 +149,13 @@ CREATE TABLE IF NOT EXISTS messages (
   driver_id INTEGER NOT NULL, sender TEXT NOT NULL,
   body TEXT NOT NULL, created_at TEXT NOT NULL);
 
+CREATE TABLE IF NOT EXISTS rest_messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  restaurant_id INTEGER NOT NULL, sender TEXT NOT NULL, who TEXT,
+  body TEXT NOT NULL, created_at TEXT NOT NULL,
+  seen_by_dispatch INTEGER DEFAULT 0, seen_by_rest INTEGER DEFAULT 0);
+CREATE INDEX IF NOT EXISTS ix_rest_messages ON rest_messages(restaurant_id, id);
+
 CREATE TABLE IF NOT EXISTS card_vault (
   order_id INTEGER PRIMARY KEY, blob TEXT NOT NULL, brand TEXT, last4 TEXT,
   created_at TEXT, viewed_at TEXT, viewed_by TEXT);
@@ -200,7 +207,7 @@ def init_db():
         seed(con)
     topup_restaurants(con)
     for k, v in [("base_fee_cents", "399"), ("base_miles", "3"), ("per_mile_cents", "100"),
-                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("max_stack_default", "3"),
+                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("max_stack_default", "3"),
                  ("assign_on_pending", "0"), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
                  ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
                  ("business_name", "Fleet Delivery"),
@@ -332,6 +339,31 @@ def init_db():
     con.execute("CREATE INDEX IF NOT EXISTS ix_driver_log ON driver_log(driver_id, created_at)")
     ensure_column(con, "orders", "ref_code", "TEXT")
     ensure_column(con, "orders", "paged_at", "TEXT")
+    ensure_column(con, "orders", "kitchen_sent_at", "TEXT")
+    ensure_column(con, "orders", "driver_paged_at", "TEXT")
+    # Stamp when the kitchen got the ticket and when a driver got paged, whatever code path did it.
+    _ts = "strftime('%Y-%m-%dT%H:%M:%S','now','localtime')"
+    con.executescript("""
+    CREATE TRIGGER IF NOT EXISTS trg_kitchen_sent_ins AFTER INSERT ON orders
+      WHEN NEW.kitchen_status='pending'
+      BEGIN UPDATE orders SET kitchen_sent_at=""" + _ts + """ WHERE id=NEW.id; END;
+    CREATE TRIGGER IF NOT EXISTS trg_kitchen_sent_upd AFTER UPDATE OF kitchen_status ON orders
+      WHEN NEW.kitchen_status='pending' AND OLD.kitchen_status IS NOT 'pending'
+      BEGIN UPDATE orders SET kitchen_sent_at=""" + _ts + """ WHERE id=NEW.id; END;
+    CREATE TRIGGER IF NOT EXISTS trg_driver_paged_upd AFTER UPDATE OF dispatch_status, driver_id, paged_at ON orders
+      WHEN NEW.dispatch_status='assigned' AND (OLD.dispatch_status IS NOT 'assigned'
+           OR NEW.driver_id IS NOT OLD.driver_id OR NEW.paged_at IS NOT OLD.paged_at)
+      BEGIN UPDATE orders SET driver_paged_at=""" + _ts + """ WHERE id=NEW.id; END;
+    """)
+    con.execute("""UPDATE orders SET kitchen_sent_at=created_at WHERE kitchen_sent_at IS NULL
+                   AND kitchen_status='pending'""")
+    con.execute("""UPDATE orders SET driver_paged_at=COALESCE(paged_at, created_at) WHERE driver_paged_at IS NULL
+                   AND dispatch_status='assigned'""")
+    ensure_column(con, "orders", "scheduled_for", "TEXT")
+    ensure_column(con, "orders", "release_at", "TEXT")
+    ensure_column(con, "orders", "sched_kitchen", "TEXT")
+    ensure_column(con, "orders", "sched_dispatch", "TEXT")
+    ensure_column(con, "orders", "sched_hold", "TEXT")
     ensure_column(con, "orders", "redo_driver_id", "INTEGER")
     ensure_column(con, "orders", "token", "TEXT")
     ensure_column(con, "restaurants", "cuisine", "TEXT")
@@ -781,6 +813,10 @@ def place_redo_orders():
 
 def auto_assign():
     try:
+        release_scheduled()
+    except Exception as e:
+        print("future release skipped:", e)
+    try:
         place_redo_orders()
     except Exception as e:
         print("redo placement skipped:", e)
@@ -930,6 +966,8 @@ def new_code():
 STATUS_WORDS = {
     ("order", "placed"): "Order placed",
     ("kitchen", "waiting"): "Waiting on payment",
+    ("kitchen", "scheduled"): "Scheduled",
+    ("dispatch", "scheduled"): "Future order",
     ("kitchen", "pending"): "Sent to kitchen",
     ("kitchen", "preparing"): "Kitchen started cooking",
     ("kitchen", "ready"): "Food ready",
@@ -1056,7 +1094,9 @@ def order_dict(o):
         eta = int((end - dt.datetime.now()).total_seconds())
     pu = pickup_of(o, r)
     return {
-        "id": o["id"], "code": o["code"], "ref": (o["ref_code"] or ""), "restaurant": pu["name"], "restaurant_address": pu["address"],
+        "id": o["id"], "code": o["code"],
+        "scheduled_for": o["scheduled_for"], "scheduled_label": when_label(o["scheduled_for"]) if o["scheduled_for"] else "",
+        "release_label": when_label(o["release_at"]) if o["release_at"] else "", "ref": (o["ref_code"] or ""), "restaurant": pu["name"], "restaurant_address": pu["address"],
         "restaurant_phone": pu["phone"], "restaurant_tel": "tel:" + digits(pu["phone"]),
         "pickup_listed": pu["listed"],
         "customer_tel": "tel:" + digits(o["customer_phone"] or ""),
@@ -1365,12 +1405,14 @@ def purge_cards():
     hold = (dt.datetime.now() - dt.timedelta(hours=CARD_HOLD_HOURS)).isoformat(timespec="seconds")
     keep = (dt.datetime.now() - dt.timedelta(days=CARD_KEEP_DAYS)).isoformat(timespec="seconds")
     for o in db().execute("""SELECT * FROM orders WHERE dispatch_status='awaiting_payment'
-                             AND created_at < ?""", (hold,)).fetchall():
+                             AND COALESCE(release_at, created_at) < ? AND created_at < ?""", (hold, hold)).fetchall():
         cancel_unpaid(o, "never paid, cancelled after " + str(int(CARD_HOLD_HOURS)) + " hours", "the system")
     db().execute("""DELETE FROM card_vault WHERE
-                    (paid_at IS NULL AND created_at < ?)
+                    (paid_at IS NULL AND created_at < ? AND order_id NOT IN
+                        (SELECT id FROM orders WHERE dispatch_status='scheduled'
+                         OR COALESCE(release_at,'') >= ?))
                     OR (paid_at IS NOT NULL AND paid_at < ?)
-                    OR order_id IN (SELECT id FROM orders WHERE dispatch_status='cancelled')""", (hold, keep))
+                    OR order_id IN (SELECT id FROM orders WHERE dispatch_status='cancelled')""", (hold, hold, keep))
     db().commit()
 
 @app.post("/api/order/card-save")
@@ -1462,6 +1504,198 @@ def add_extra_charge(o, cents, label, ref):
                  (int(cents), json.dumps(rows), o["id"]))
     db().commit()
 
+
+# ---------------------------------------------------------------- future orders
+FUTURE_LEAD_ERR = []
+FUTURE_MIN_AHEAD = 30      # a future order has to be at least this far out
+FUTURE_MAX_DAYS = 14
+
+def future_lead():
+    try:
+        return max(10, min(240, int(setting("future_lead_min") or 45)))
+    except Exception:
+        return 45
+
+def when_label(s):
+    try:
+        w = dt.datetime.fromisoformat(s)
+    except Exception:
+        return s or ""
+    day = w.date()
+    today = dt.date.today()
+    if day == today:
+        d = "Today"
+    elif day == today + dt.timedelta(days=1):
+        d = "Tomorrow"
+    else:
+        d = w.strftime("%a %b ") + str(w.day)
+    return d + " at " + w.strftime("%I:%M %p").lstrip("0")
+
+def parse_future(s):
+    """'2026-10-02T18:30' or '2026-10-02 18:30' -> datetime, or None."""
+    s = (s or "").strip().replace(" ", "T")[:16]
+    if not s:
+        return None
+    try:
+        return dt.datetime.fromisoformat(s).replace(second=0, microsecond=0)
+    except ValueError:
+        return None
+
+def future_slots(r, day):
+    """Delivery times a customer can pick on one day: every 15 minutes the restaurant
+    is open, at least FUTURE_MIN_AHEAD minutes from now."""
+    earliest = dt.datetime.now() + dt.timedelta(minutes=FUTURE_MIN_AHEAD)
+    out = []
+    t = dt.datetime.combine(day, dt.time(0, 0))
+    end = t + dt.timedelta(days=1)
+    while t < end:
+        if t >= earliest and is_open(r, t):
+            out.append(t.strftime("%Y-%m-%dT%H:%M"))
+        t += dt.timedelta(minutes=15)
+    return out
+
+def release_scheduled():
+    """A future order stays off every screen until it is close to its time. Then it goes
+    out exactly like a fresh order: cash to the kitchen, card to dispatch to run."""
+    con = db()
+    rows = con.execute("""SELECT * FROM orders WHERE dispatch_status='scheduled'
+                          AND release_at IS NOT NULL AND release_at <= ?""", (now(),)).fetchall()
+    for o in rows:
+        con.execute("""UPDATE orders SET kitchen_status=?, dispatch_status=?, hold_reason=?,
+                       created_at=? WHERE id=? AND dispatch_status='scheduled'""",
+                    (o["sched_kitchen"] or "pending", o["sched_dispatch"] or "held",
+                     o["sched_hold"] or "waiting on kitchen", now(), o["id"]))
+        con.commit()
+        log("order", o["code"] + " future order for " + when_label(o["scheduled_for"]) +
+            " released to " + ("dispatch to run the card" if (o["sched_dispatch"] == "awaiting_payment")
+                               else "the kitchen"))
+    return len(rows)
+
+
+
+# ---------------------------------------------------------------- dispatch <-> restaurant chat
+def rest_msg_dict(m):
+    try:
+        at = dt.datetime.fromisoformat(m["created_at"]).strftime("%I:%M %p").lstrip("0")
+    except Exception:
+        at = m["created_at"]
+    return {"id": m["id"], "sender": m["sender"], "who": m["who"] or "", "body": m["body"], "at": at}
+
+def rest_chat_rows(rid, limit=200):
+    rows = db().execute("""SELECT * FROM rest_messages WHERE restaurant_id=?
+                           ORDER BY id DESC LIMIT ?""", (rid, limit)).fetchall()
+    return [rest_msg_dict(m) for m in reversed(rows)]
+
+def rest_chat_unread_for_dispatch():
+    n = db().execute("SELECT COUNT(*) c FROM rest_messages WHERE sender='restaurant' AND seen_by_dispatch=0").fetchone()["c"]
+    m = db().execute("""SELECT m.id, m.restaurant_id, m.body, r.name FROM rest_messages m
+                        JOIN restaurants r ON r.id=m.restaurant_id
+                        WHERE m.sender='restaurant' AND m.seen_by_dispatch=0
+                        ORDER BY m.id DESC LIMIT 1""").fetchone()
+    return n, ({"id": m["id"], "restaurant_id": m["restaurant_id"], "name": m["name"], "body": m["body"]} if m else None)
+
+@app.route("/api/restaurant/chat", methods=["GET", "POST"])
+def api_rest_chat():
+    rid = session.get("restaurant_id")
+    if not rid:
+        return jsonify({"ok": False}), 403
+    if request.method == "POST":
+        body = " ".join(((request.get_json(silent=True) or {}).get("body") or "").split())[:1000]
+        if not body:
+            return jsonify({"ok": False, "error": "Type a message first."}), 400
+        db().execute("""INSERT INTO rest_messages(restaurant_id,sender,who,body,created_at,seen_by_rest)
+                        VALUES(?,?,?,?,?,1)""", (rid, "restaurant", session.get("restaurant_name") or "", body, now()))
+        db().commit()
+    elif request.args.get("seen") == "1":
+        db().execute("UPDATE rest_messages SET seen_by_rest=1 WHERE restaurant_id=? AND sender='dispatch'", (rid,))
+        db().commit()
+    return jsonify({"ok": True, "messages": rest_chat_rows(rid)})
+
+@app.get("/api/dispatch/rest-chats")
+def api_dispatch_rest_chats():
+    """Every restaurant for the picker, unread first."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    rows = db().execute("""SELECT r.id, r.name,
+            (SELECT COUNT(*) FROM rest_messages m WHERE m.restaurant_id=r.id AND m.sender='restaurant'
+               AND m.seen_by_dispatch=0) unread,
+            (SELECT MAX(id) FROM rest_messages m WHERE m.restaurant_id=r.id) last_id
+            FROM restaurants r ORDER BY unread DESC, last_id IS NULL, last_id DESC, r.name""").fetchall()
+    return jsonify({"ok": True, "restaurants": [{"id": r["id"], "name": r["name"], "unread": r["unread"]} for r in rows]})
+
+@app.route("/api/dispatch/rest-chat/<int:rid>", methods=["GET", "POST"])
+def api_dispatch_rest_chat(rid):
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    if not db().execute("SELECT 1 FROM restaurants WHERE id=?", (rid,)).fetchone():
+        return jsonify({"ok": False, "error": "Unknown restaurant"}), 404
+    if request.method == "POST":
+        body = " ".join(((request.get_json(silent=True) or {}).get("body") or "").split())[:1000]
+        if not body:
+            return jsonify({"ok": False, "error": "Type a message first."}), 400
+        db().execute("""INSERT INTO rest_messages(restaurant_id,sender,who,body,created_at,seen_by_dispatch)
+                        VALUES(?,?,?,?,?,1)""", (rid, "dispatch", session.get("dispatcher_name") or "Dispatch", body, now()))
+    db().execute("UPDATE rest_messages SET seen_by_dispatch=1 WHERE restaurant_id=? AND sender='restaurant'", (rid,))
+    db().commit()
+    return jsonify({"ok": True, "messages": rest_chat_rows(rid)})
+
+@app.get("/api/future-slots")
+def api_future_slots():
+    r = db().execute("SELECT * FROM restaurants WHERE id=?", (request.args.get("restaurant_id"),)).fetchone()
+    if not r:
+        return jsonify({"ok": False, "error": "Unknown restaurant"}), 404
+    days = []
+    for n in range(FUTURE_MAX_DAYS):
+        day = dt.date.today() + dt.timedelta(days=n)
+        slots = future_slots(r, day)
+        if slots:
+            days.append({"date": day.isoformat(),
+                         "label": when_label(slots[0]).split(" at ")[0],
+                         "slots": [{"value": s, "label": when_label(s).split(" at ")[1]} for s in slots]})
+    return jsonify({"ok": True, "open_now": is_open(r), "days": days, "lead_min": future_lead()})
+
+@app.get("/api/dispatch/future")
+def api_dispatch_future():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    rows = db().execute("""SELECT * FROM orders WHERE dispatch_status='scheduled'
+                           ORDER BY scheduled_for ASC""").fetchall()
+    return jsonify({"ok": True, "lead_min": future_lead(), "orders": [order_dict(o) for o in rows]})
+
+@app.post("/api/dispatch/future-cancel")
+def api_future_cancel():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    if o["dispatch_status"] != "scheduled":
+        return jsonify({"ok": False, "error": o["code"] + " already went out. Cancel it from the board."}), 400
+    why = (b.get("reason") or "").strip()[:160] or "no reason given"
+    who = session.get("dispatcher_name") or "dispatch"
+    db().execute("""UPDATE orders SET dispatch_status='cancelled', kitchen_status='waiting',
+                    hold_reason=?, delivered_at=? WHERE id=?""",
+                 ("future order cancelled by " + who + ": " + why, now(), o["id"]))
+    db().execute("DELETE FROM card_vault WHERE order_id=?", (o["id"],))
+    db().commit()
+    log("cancel", o["code"] + " (future order for " + when_label(o["scheduled_for"]) + ") cancelled by " + who + ": " + why)
+    return jsonify({"ok": True})
+
+@app.post("/api/dispatch/future-release")
+def api_future_release():
+    """Send a future order out now instead of waiting for its time."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
+    if not o or o["dispatch_status"] != "scheduled":
+        return jsonify({"ok": False, "error": "That future order already went out."}), 400
+    db().execute("UPDATE orders SET release_at=? WHERE id=?", (now(), o["id"]))
+    db().commit()
+    auto_assign()
+    return jsonify({"ok": True})
+
 @app.post("/checkout")
 def checkout():
     payload = request.get_json(force=True)
@@ -1469,8 +1703,25 @@ def checkout():
     if not r:
         return jsonify({"ok": False, "error": "Unknown restaurant"}), 400
     placed_by = payload.get("placed_by", "customer")
-    if not is_open(r) and placed_by == "customer":
-        return jsonify({"ok": False, "error": r["name"] + " is closed right now."}), 400
+    sched = None
+    if (payload.get("scheduled_for") or "").strip():
+        sched = parse_future(payload.get("scheduled_for"))
+        if not sched:
+            return jsonify({"ok": False, "error": "Pick a date and time for the future order."}), 400
+        is_disp = bool(dispatcher_required())
+        soonest = dt.datetime.now() + dt.timedelta(minutes=(5 if is_disp else FUTURE_MIN_AHEAD - 1))
+        if sched < soonest:
+            return jsonify({"ok": False, "error": "A future order has to be at least " +
+                            ("5" if is_disp else str(FUTURE_MIN_AHEAD)) + " minutes from now."}), 400
+        if sched > dt.datetime.now() + dt.timedelta(days=FUTURE_MAX_DAYS):
+            return jsonify({"ok": False, "error": "Future orders can be up to " +
+                            str(FUTURE_MAX_DAYS) + " days out."}), 400
+        if not is_disp and not is_open(r, sched):
+            return jsonify({"ok": False, "error": r["name"] + " is not open at " +
+                            when_label(sched.isoformat()) + ". Pick another time."}), 400
+    if not sched and not is_open(r) and placed_by == "customer":
+        return jsonify({"ok": False, "error": r["name"] + " is closed right now. "
+                        "You can still schedule the order for a time they are open."}), 400
     dg = "".join(ch for ch in str(payload.get("customer_phone", "")) if ch.isdigit())
     blocked = db().execute("SELECT * FROM blocked_customers WHERE phone=?", (dg,)).fetchone()
     if blocked and placed_by == "customer":
@@ -1594,6 +1845,23 @@ def checkout():
         db().commit()
         if card:
             store_card(oid, card)
+    future_note = ""
+    if sched:
+        rel = sched - dt.timedelta(minutes=future_lead())
+        cur_o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+        db().execute("UPDATE orders SET scheduled_for=?, release_at=? WHERE id=?",
+                     (sched.isoformat(timespec="seconds"), rel.isoformat(timespec="seconds"), oid))
+        if rel > dt.datetime.now():
+            db().execute("""UPDATE orders SET sched_kitchen=?, sched_dispatch=?, sched_hold=?,
+                            kitchen_status='scheduled', dispatch_status='scheduled', hold_reason=?
+                            WHERE id=?""",
+                         (cur_o["kitchen_status"], cur_o["dispatch_status"], cur_o["hold_reason"],
+                          "future order for " + when_label(sched.isoformat()), oid))
+            log("order", code + " scheduled for " + when_label(sched.isoformat()))
+        db().commit()
+        future_note = "Scheduled for " + when_label(sched.isoformat()) + "."
+        if dispatcher_required() and not is_open(r, sched):
+            future_note += " Heads up: " + r["name"] + " is not normally open then."
     send_note = ""
     if src_id and dispatcher_required() and payload.get("send_to") == "driver":
         srow = db().execute("SELECT driver_id FROM orders WHERE id=?", (src_id,)).fetchone()
@@ -1603,9 +1871,9 @@ def checkout():
             dn = db().execute("SELECT name FROM drivers WHERE id=?", (srow["driver_id"],)).fetchone()
             send_note = "Going to " + (dn["name"] if dn else "the original driver") + \
                         (" once the card is marked paid." if not cash else ".")
-    if address_ok and cash:
+    if address_ok and cash and not (sched and dt.datetime.now() < sched - dt.timedelta(minutes=future_lead())):
         auto_assign()
-    return jsonify({"ok": True, "cash": cash, "code": code, "order_id": oid, "total": money(total),
+    return jsonify({"future_note": future_note, "ok": True, "cash": cash, "code": code, "order_id": oid, "total": money(total),
                     "send_note": send_note,
                     "address_ok": bool(address_ok),
                     "message": ("" if address_ok and cash else
@@ -1720,8 +1988,9 @@ def api_board():
         return jsonify({"ok": False}), 403
     auto_assign()   # safety net: anything an earlier event missed is placed on the next refresh
     purge_cards()
-    live = db().execute("""SELECT * FROM orders WHERE dispatch_status!='delivered'
-                           AND dispatch_status!='cancelled' ORDER BY created_at ASC""").fetchall()
+    live = db().execute("""SELECT * FROM orders WHERE dispatch_status NOT IN ('delivered','cancelled','scheduled')
+                           ORDER BY created_at ASC""").fetchall()
+    future_count = db().execute("SELECT COUNT(*) c FROM orders WHERE dispatch_status='scheduled'").fetchone()["c"]
     done_day = (request.args.get("done_day") or dt.date.today().isoformat())[:10]
     done = db().execute("""SELECT * FROM orders WHERE dispatch_status IN ('delivered','cancelled')
                            AND substr(COALESCE(delivered_at, created_at),1,10)=?
@@ -1746,6 +2015,10 @@ def api_board():
         "alerts": open_call_alerts(),
         "awaiting": awaiting_accept(),
         "business_open": business_is_open(),
+        "future_count": future_count,
+        "late": late_accepts(),
+        "rest_chat_unread": rest_chat_unread_for_dispatch()[0],
+        "rest_chat_latest": rest_chat_unread_for_dispatch()[1],
         "orders": [order_dict(o) for o in live],
         "completed": [order_dict(o) for o in done],
         "done_day": done_day,
@@ -3508,10 +3781,32 @@ def dispatch_settings():
         return redirect(url_for("dispatch_login"))
     saved = False
     if request.method == "POST":
+        for _k in ("kitchen_accept_min", "driver_accept_min", "late_sound_after_min"):
+            if _k in request.form:
+                try:
+                    _v = int(request.form[_k] or 0)
+                except ValueError:
+                    _v = -1
+                if 0 <= _v <= 60:
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, str(_v)))
+                else:
+                    FUTURE_LEAD_ERR.append(2)
+        if "future_lead_min" in request.form:
+            try:
+                lm = int(request.form["future_lead_min"])
+            except ValueError:
+                lm = -1
+            if 10 <= lm <= 240:
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('future_lead_min',?)", (str(lm),))
+            else:
+                FUTURE_LEAD_ERR.append(1)
         for key in ("base_fee_cents", "base_miles", "per_mile_cents", "tax_rate_bp", "auto_assign"):
             if key in request.form:
                 db().execute("UPDATE settings SET value=? WHERE key=?", (request.form[key], key))
         errs = []
+        if FUTURE_LEAD_ERR:
+            FUTURE_LEAD_ERR.clear()
+            errs.append("Check the minutes: future orders take 10 to 240, accept warnings take 0 to 60.")
         for field, key, label in (("tax_pct", "tax_rate_bp", "Tax"), ("service_pct", "service_fee_bp", "Service fee")):
             if field in request.form:
                 raw = request.form[field].replace("%", "").strip() or "0"
@@ -3685,6 +3980,7 @@ def api_driver_state():
     return jsonify({"ok": True,
                     "business_open": business_is_open(),
                     "dispatch_tel": tel_digits(dispatch_phone()),
+                    "late": [x for x in late_accepts() if x["kind"] == "driver" and x["driver_id"] == did],
                     "business_name": (setting("business_name", str) or "Fleet Delivery"),
                     "scheduled": scheduled,
                     "done": [order_dict(o) for o in done],
@@ -3876,18 +4172,26 @@ def api_rest_orders():
     # Active plus anything finished today, so the kitchen's Completed tab has a history.
     # An order leaves Active the moment the driver is en route, and comes straight back
     # if that gets undone (status put back to received or at the restaurant).
+    try:
+        release_scheduled()
+    except Exception as e:
+        print("future release skipped:", e)
     day = (request.args.get("day") or "")[:10]
     if day:
         done_sql, arg = "substr(COALESCE(delivered_at, created_at),1,10)=?", day
     else:
         # finished orders stay on the tablet until dispatch presses Close for the day
         done_sql, arg = "COALESCE(delivered_at, created_at) > ?", (setting("driver_done_cleared_at", str) or "")
-    rows = db().execute("""SELECT * FROM orders WHERE restaurant_id=? AND kitchen_status!='waiting'
-                           AND dispatch_status!='awaiting_payment'
+    rows = db().execute("""SELECT * FROM orders WHERE restaurant_id=? AND kitchen_status NOT IN ('waiting','scheduled')
+                           AND dispatch_status NOT IN ('awaiting_payment','scheduled')
                            AND (dispatch_status NOT IN ('delivered','cancelled') OR """ + done_sql + """)
                            ORDER BY created_at ASC""", (rid, arg)).fetchall()
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (rid,)).fetchone()
-    return jsonify({"ok": True, "orders": [order_dict(o) for o in rows],
+    rc_unread = db().execute("""SELECT COUNT(*) c FROM rest_messages WHERE restaurant_id=?
+                                AND sender='dispatch' AND seen_by_rest=0""", (rid,)).fetchone()["c"]
+    rc_last = db().execute("SELECT MAX(id) m FROM rest_messages WHERE restaurant_id=?", (rid,)).fetchone()["m"] or 0
+    return jsonify({"late": [x for x in late_accepts() if x["kind"] == "kitchen" and x["restaurant_id"] == rid],
+                    "chat_unread": rc_unread, "chat_last_id": rc_last, "ok": True, "orders": [order_dict(o) for o in rows],
                     "open": is_open(r), "open_24": bool(r["open_24"]),
                     "hours": hours_label(r), "prep_default": r["prep_default"]})
 
@@ -4295,6 +4599,44 @@ def open_call_alerts():
                     loc["at"] = clock(d["last_loc_at"])
                 item["location"] = loc
         out.append(item)
+    return out
+
+
+def accept_limit(key, default):
+    try:
+        return max(0, min(60, int(setting(key) or default)))
+    except Exception:
+        return default
+
+def late_accepts():
+    """Tickets the kitchen has not accepted, and pages a driver has not tapped Received on,
+    past the minutes set in Settings. 0 turns a check off."""
+    out = []
+    n = dt.datetime.now()
+    km, dm = accept_limit("kitchen_accept_min", 5), accept_limit("driver_accept_min", 3)
+    if km:
+        cut = (n - dt.timedelta(minutes=km)).isoformat(timespec="seconds")
+        for x in db().execute("""SELECT o.id, o.code, o.restaurant_id, o.kitchen_sent_at, r.name rname FROM orders o
+                                 LEFT JOIN restaurants r ON r.id=o.restaurant_id
+                                 WHERE o.kitchen_status='pending' AND o.kitchen_sent_at IS NOT NULL
+                                   AND o.kitchen_sent_at < ?
+                                   AND o.dispatch_status NOT IN ('scheduled','awaiting_payment','cancelled','delivered')
+                                 ORDER BY o.kitchen_sent_at""", (cut,)).fetchall():
+            mins = int((n - dt.datetime.fromisoformat(x["kitchen_sent_at"])).total_seconds() // 60)
+            out.append({"kind": "kitchen", "id": x["id"], "code": x["code"], "who": x["rname"] or "The kitchen",
+                        "restaurant_id": x["restaurant_id"], "minutes": mins,
+                        "loud": True})
+    if dm:
+        cut = (n - dt.timedelta(minutes=dm)).isoformat(timespec="seconds")
+        for x in db().execute("""SELECT o.id, o.code, o.driver_id, o.driver_paged_at, d.name dname FROM orders o
+                                 JOIN drivers d ON d.id=o.driver_id
+                                 WHERE o.dispatch_status='assigned' AND o.driver_paged_at IS NOT NULL
+                                   AND o.driver_paged_at < ?
+                                 ORDER BY o.driver_paged_at""", (cut,)).fetchall():
+            mins = int((n - dt.datetime.fromisoformat(x["driver_paged_at"])).total_seconds() // 60)
+            out.append({"kind": "driver", "id": x["id"], "code": x["code"], "who": x["dname"],
+                        "driver_id": x["driver_id"], "minutes": mins,
+                        "loud": True})
     return out
 
 def awaiting_accept():

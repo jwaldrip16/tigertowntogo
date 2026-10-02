@@ -12,6 +12,17 @@ async function tick(){
   const res = await jget('/api/track/'+CODE);
   if(!res.ok) return;
   const o = res.order;
+  if(o.dispatch_status === 'scheduled'){
+    document.getElementById('live').innerHTML =
+      '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+
+      '<p class="big">Scheduled for '+o.scheduled_label+'</p>'+
+      '<p>Your order goes to the restaurant shortly before then. This page updates on its own.</p>'+
+      '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
+    return;
+  }
+  if(o.scheduled_label && o.dispatch_status !== 'delivered' && o.dispatch_status !== 'cancelled'){
+    document.getElementById('live').setAttribute('data-when', o.scheduled_label);
+  }
   if(o.dispatch_status === 'awaiting_payment'){
     document.getElementById('live').innerHTML =
       '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+

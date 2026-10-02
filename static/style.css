@@ -282,7 +282,7 @@ pre.code{background:#0f172a;color:#e2e8f0;padding:10px;border-radius:8px;overflo
 .weekgrid td.daycell{cursor:pointer}
 .weekgrid td.daycell:hover{outline:2px solid #2563eb;outline-offset:-2px}
 
-#assignBar{background:#1e58c8;animation:assignpulse 1s steps(1) infinite}
+#assignBar{background:#1e58c8}
 @keyframes assignpulse{0%{background:#1e58c8}50%{background:#0d2f73}100%{background:#1e58c8}}
 body.assignflash{animation:assignpage 1s ease-in-out infinite}
 @keyframes assignpage{0%,100%{box-shadow:inset 0 0 0 0 rgba(30,88,200,0)}50%{box-shadow:inset 0 0 0 6px rgba(30,88,200,.55)}}
@@ -292,3 +292,14 @@ body.assignflash{animation:assignpage 1s ease-in-out infinite}
 .modalback{position:fixed;inset:0;background:rgba(15,23,42,.45);display:flex;align-items:center;justify-content:center;z-index:9999}.modal{max-width:420px;width:92%;display:flex;flex-direction:column;gap:8px}
 
 .btn.disabled{opacity:.5}
+
+.latebar{background:#fff7e6;border:1px solid #f0b429;color:#7a4b00;border-radius:8px;padding:8px 12px;margin:6px 0}
+.latebar .lateline{margin-top:4px}
+.latebar .btn{margin-left:6px}
+.latebar .lateline.loud{color:#b42318;font-weight:600}
+@keyframes lateflash{0%,100%{background:#fff7e6}50%{background:#fde2e1;border-color:#b42318}}
+.latebar.lateflash{animation:lateflash 1s infinite}
+
+/* Quiet banners on dispatch: no pulse until the late time passes (the late bar flashes then). */
+#flash.flashbar{animation:none;background:#c62828}
+#assignBar.flashbar{animation:none;background:#1e58c8}

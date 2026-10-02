@@ -1,6 +1,5 @@
 {% extends "base.html" %}{% block body %}
-<div id="flash" class="flashbar hidden">New pending order
-  <button class="btn tiny" onclick="clearFlash()">Got it</button></div>
+<div id="flash" class="flashbar hidden">New pending order</div>
 <div class="head">
   <h1>Dispatch board</h1>
   <div><a class="btn small primary" href="/dispatch/new-order">Create order</a>
@@ -22,9 +21,11 @@
 <div class="tabbar">
   <button class="tab on" id="tabBoard" onclick="page('board')">Order board</button>
   <button class="tab" id="tabComms" onclick="page('comms')">Driver chat and mass text
-    <span class="pill red hidden" id="chatBadge"></span></button>
+    <span class="pill red hidden" id="chatBadge"></span>
+    <span class="pill amber hidden" id="restBadge"></span></button>
 </div>
 <div id="chatAlert" class="chatalert hidden" onclick="page('comms')"></div>
+<div id="restAlert" class="chatalert hidden"></div>
 
 <div id="pageComms" class="hidden">
   <div class="cols">
@@ -35,6 +36,13 @@
       <div class="row"><input id="chatBox" placeholder="Message the driver"
         onkeydown="if(event.key==='Enter')send()"><button class="btn" onclick="send()">Send</button></div>
       <div id="chatRoster" class="muted small"></div>
+    </section>
+    <section class="panel"><h2>Restaurant chat <span class="pill red hidden" id="restBadge2"></span></h2>
+      <div class="row"><select id="rchatRest" onchange="loadRestChat()"></select></div>
+      <div id="rchat" class="chat tall"></div>
+      <div class="row"><input id="rchatBox" placeholder="Message the restaurant"
+        onkeydown="if(event.key==='Enter')sendRestChat()"><button class="btn" onclick="sendRestChat()">Send</button></div>
+      <div id="rchatRoster" class="muted small"></div>
     </section>
     <aside class="panel"><h2>Mass text</h2>
       <div class="masstext">
@@ -57,6 +65,7 @@
 <div id="pageBoard">
 <div id="callAlerts" class="hidden"></div>
 <div id="assignBar" class="flashbar hidden"></div>
+<div id="lateBar" class="latebar hidden"></div>
 <div class="row" style="margin:6px 0">
   <input id="find" placeholder="Find an order: our number, their number, name or phone"
          oninput="board(true)" style="max-width:420px">
@@ -92,7 +101,9 @@
     <p class="muted small">Already on a driver: assigned, picked up, or on the way.</p>
     <div id="orders"></div>
     <div class="tabs"><button class="tab on" id="tabLive" onclick="tab('live')">Live orders</button>
-      <button class="tab" id="tabDone" onclick="tab('done')">Completed orders</button></div>
+      <button class="tab" id="tabDone" onclick="tab('done')">Completed orders</button>
+      <button class="tab" id="tabFuture" onclick="tab('future')">Future orders <span class="pill amber hidden" id="futureBadge"></span></button></div>
+    <div id="future" class="hidden"></div>
     <div id="doneTools" class="row hidden">
       <label class="small">Day <input type="date" id="doneDay" onchange="board(true)"></label>
       <button class="btn tiny" onclick="shiftDay(-1)">&larr; Previous day</button>
@@ -185,18 +196,14 @@ function chatNotify(res){
 }
 function clearFlash(){
   document.getElementById('flash').classList.add('hidden');
-  document.body.classList.remove('flashing');
-  if (window.ffSound && ffSound.stopLoop) ffSound.stopLoop();
 }
+let PEND_NOTIFIED = 0;
 function flashPending(n){
+  // Quiet banner while the kitchen has not accepted. Flash and chime come from drawLate once the Settings time passes.
   const f = document.getElementById('flash');
-  f.textContent = n + ' pending order' + (n===1?'':'s') + ' waiting on the kitchen ';
-  const b2 = document.createElement('button');
-  b2.className = 'btn tiny'; b2.textContent = 'Got it'; b2.onclick = clearFlash;
-  f.appendChild(b2);
+  f.textContent = n + ' order' + (n===1?'':'s') + ' waiting on the kitchen to accept';
   f.classList.remove('hidden');
-  document.body.classList.add('flashing');
-  if (window.ffSound && ffSound.startLoop) ffSound.startLoop(5000);
+  PEND_NOTIFIED = n;
 }
 function dragOrder(ev, oid){
   DRAGGED = oid;
@@ -247,8 +254,8 @@ async function unblock(p){ await jpost('/api/dispatch/block', {phone:p}); loadBl
 async function editOrder(oid){
   const res = await jget('/api/dispatch/board');
   let o = null;
-  ['pending','queued','running','completed','live','done'].forEach(k=>{
-    (res[k]||[]).forEach(x=>{ if(x.id===oid) o = x; });
+  ['orders','pending','queued','running','completed','live','done'].forEach(k=>{
+    (res[k]||[]).forEach(x=>{ if(!o && x.id===oid) o = x; });
   });
   if(!o){ alert('Order not found.'); return; }
   const items = o.items.map(i=>{
@@ -443,8 +450,6 @@ function drawAwaiting(list){
   if (!bar) return;
   if (!list.length){
     bar.classList.add('hidden'); bar.innerHTML = '';
-    document.body.classList.remove('assignflash');
-    if (ASSIGN_TIMER){ clearInterval(ASSIGN_TIMER); ASSIGN_TIMER = null; }
     ASSIGN_SEEN = '';
     return;
   }
@@ -452,16 +457,7 @@ function drawAwaiting(list){
     (x.restaurant ? ' (' + x.restaurant + ')' : '')).join(', ') + '</span>' +
     '<span class="small">alert stops when the driver taps Received</span>';
   bar.classList.remove('hidden');
-  document.body.classList.add('assignflash');
-  const key = list.map(x => x.id).join(',');
-  if (key !== ASSIGN_SEEN){
-    ASSIGN_SEEN = key;
-    try { ffNotify.show('Order assigned', list[list.length-1].code + ' sent to ' + list[list.length-1].driver, 'assign'); } catch(e){}
-  }
-  if (!ASSIGN_TIMER){
-    try { ffSound.play('order'); } catch(e){}
-    ASSIGN_TIMER = setInterval(function(){ try { ffSound.play('order'); } catch(e){} }, 6000);
-  }
+  // Quiet until the driver accept time in Settings passes; then drawLate flashes and chimes.
 }
 let LAST_DRAW = 0;
 let ALERT_SEEN = 0;
@@ -578,6 +574,9 @@ async function board(force){
   renderCompleted(res);
   try { drawDoneTools(res); } catch(e) { console.log(e); }
   if (res.business_open !== undefined) drawBusiness(res.business_open);
+  try { futureBadge(res.future_count || 0); } catch(e) {}
+  try { restChatNotify(res); } catch(e) { console.log('rest chat skipped', e); }
+  try { drawLate(res.late || []); } catch(e) { console.log('late skipped', e); }
   drawAwaiting(res.awaiting || []);
   LIVE_ORDERS = (res.orders||[]).concat(res.completed||[]);
   LIVE_ORDERS.forEach(o => { TOKENS_LAST[o.id] = o.token || ''; });
@@ -608,9 +607,10 @@ async function board(force){
       res.auto ? 'Auto dispatch on' : 'Auto dispatch off, assign by hand';
   }
   LAST = res;
-  const unconfirmed = res.orders.filter(o=>o.kitchen_status==='pending');
-  if (SEEN_PENDING !== null && unconfirmed.length > SEEN_PENDING) flashPending(unconfirmed.length);
-  if (!unconfirmed.length) clearFlash();
+  const unconfirmed = res.orders.filter(o=>o.kitchen_status==='pending' &&
+    ['awaiting_payment','cancelled','delivered','scheduled'].indexOf(o.dispatch_status) < 0);
+  if (unconfirmed.length) flashPending(unconfirmed.length);
+  else { clearFlash(); PEND_NOTIFIED = 0; }
   SEEN_PENDING = unconfirmed.length;
 
   // An order only leaves Pending once a driver who is actually on shift has it.
@@ -910,14 +910,158 @@ async function send(){
   await jpost('/api/chat/'+id, {sender:'dispatch', body:box.value});
   box.value=''; loadChat(); loadBlocked();
 }
+
+let REST_LAST = null, REST_LIST_AT = 0;
+function escR(s){ return String(s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+async function loadRestList(){
+  const res = await jget('/api/dispatch/rest-chats');
+  if (!res.ok) return;
+  const sel = document.getElementById('rchatRest');
+  const keep = sel.value;
+  sel.innerHTML = res.restaurants.map(r=>'<option value="'+r.id+'">'+escR(r.name)+(r.unread?' ('+r.unread+' new)':'')+'</option>').join('');
+  if (keep && res.restaurants.some(r=>String(r.id)===keep)) sel.value = keep;
+  const waiting = res.restaurants.filter(r=>r.unread);
+  document.getElementById('rchatRoster').innerHTML = waiting.length
+    ? 'Waiting on a reply: ' + waiting.map(r=>'<button class="btn tiny" onclick="openRestChat('+r.id+')">'+escR(r.name)+' ('+r.unread+')</button>').join(' ')
+    : 'No unread restaurant messages.';
+  REST_LIST_AT = Date.now();
+}
+async function loadRestChat(){
+  const id = document.getElementById('rchatRest').value; if (!id) return;
+  const res = await jget('/api/dispatch/rest-chat/' + id);
+  if (!res.ok) return;
+  const c = document.getElementById('rchat');
+  c.innerHTML = res.messages.map(m=>'<div class="msg '+(m.sender==='dispatch'?'dispatch':'driver')+'"><span class="muted small">'+
+    m.at+' '+(m.sender==='dispatch' ? 'dispatch'+(m.who?' ('+escR(m.who)+')':'') : 'restaurant')+'</span><div>'+escR(m.body)+'</div></div>').join('')
+    || '<p class="muted">No messages with this restaurant yet.</p>';
+  c.scrollTop = c.scrollHeight;
+}
+async function sendRestChat(){
+  const id = document.getElementById('rchatRest').value;
+  const box = document.getElementById('rchatBox');
+  if (!id || !box.value.trim()) return;
+  const res = await jpost('/api/dispatch/rest-chat/' + id, {body: box.value});
+  if (res && res.ok){ box.value=''; loadRestChat(); loadRestList(); } else alert((res && res.error) || 'Message did not send.');
+}
+async function openRestChat(rid){
+  page('comms');
+  if (!document.getElementById('rchatRest').options.length) await loadRestList();
+  document.getElementById('rchatRest').value = String(rid);
+  await loadRestChat(); loadRestList();
+  document.getElementById('restAlert').classList.add('hidden');
+}
+function restChatNotify(res){
+  const n = res.rest_chat_unread || 0, m = res.rest_chat_latest;
+  ['restBadge','restBadge2'].forEach(function(id){
+    const el = document.getElementById(id); if (!el) return;
+    el.textContent = n ? (n + (id==='restBadge' ? ' restaurant' : ' new')) : '';
+    el.classList.toggle('hidden', !n);
+  });
+  const lid = m ? m.id : 0;
+  if (PAGE === 'comms'){
+    const sel = document.getElementById('rchatRest');
+    if (!sel.options.length || (lid && lid !== REST_LAST) || Date.now() - REST_LIST_AT > 30000){
+      loadRestList().then(function(){ if (m && sel.value === String(m.restaurant_id)) loadRestChat(); else if (!document.getElementById('rchat').innerHTML) loadRestChat(); });
+    }
+  }
+  if (m && REST_LAST !== null && lid > REST_LAST){
+    try { ffSound.beep(); } catch(e) {}
+    const a = document.getElementById('restAlert');
+    a.textContent = m.name + ': ' + m.body + '  (tap to reply)';
+    a.onclick = function(){ openRestChat(m.restaurant_id); };
+    a.classList.remove('hidden');
+  }
+  if (!n) document.getElementById('restAlert').classList.add('hidden');
+  if (lid) REST_LAST = Math.max(REST_LAST || 0, lid); else if (REST_LAST === null) REST_LAST = 0;
+}
+
+let LATE_BEEP_AT = 0, LATE_TIMER = null, LATE_KEY = '';
+function drawLate(list){
+  const bar = document.getElementById('lateBar'); if (!bar) return;
+  const loud = (list || []).some(function(x){ return x.loud; });
+  // Banner shows quietly first. Past the sound time it flashes and chimes every 5 seconds until accepted.
+  const lkey = (list || []).map(function(x){ return x.kind + x.id; }).join(',');
+  if (loud && lkey !== LATE_KEY){
+    const x = list[list.length-1];
+    try { ffNotify.show('Order not accepted', (x.kind === 'kitchen' ? 'Kitchen: ' : 'Driver: ') + x.who + ', ' + x.code, 'late'); } catch(e) {}
+  }
+  LATE_KEY = lkey;
+  document.body.classList.toggle('assignflash', loud);
+  if (loud){ try { if (!ffSound.enabled()) { ffSound.toggle(); soundLabel(); } } catch(e) {} }
+  if (loud && !LATE_TIMER){
+    try { ffSound.play('order'); } catch(e) {}
+    LATE_TIMER = setInterval(function(){ try { ffSound.play('order'); } catch(e) {} }, 5000);
+  }
+  if (!loud && LATE_TIMER){ clearInterval(LATE_TIMER); LATE_TIMER = null; }
+  bar.classList.toggle('lateflash', loud);
+  if (!list || !list.length){ bar.classList.add('hidden'); bar.innerHTML = ''; return; }
+  bar.innerHTML = '<b>Not accepted yet</b>' + list.map(function(x){
+    const who = escR(x.who);
+    const btn = x.kind === 'kitchen'
+      ? '<button class="btn tiny" onclick="openRestChat('+x.restaurant_id+')">Message kitchen</button>'
+      : '<button class="btn tiny" onclick="openChatWith('+x.driver_id+')">Message driver</button>';
+    return '<div class="lateline'+(x.loud ? ' loud' : '')+'">'+(x.kind === 'kitchen' ? 'Kitchen: ' : 'Driver: ')+who+' has not accepted '+
+      x.code+' ('+x.minutes+' min) '+btn+'</div>';
+  }).join('');
+  bar.classList.remove('hidden');
+}
+let TAB = 'live';
 function tab(which){
-  const live = which==='live';
+  TAB = which;
+  const live = which==='live', done = which==='done', fut = which==='future';
   document.getElementById('orders').classList.toggle('hidden', !live);
-  document.getElementById('completed').classList.toggle('hidden', live);
-  document.getElementById('doneTools').classList.toggle('hidden', live);
-  document.getElementById('exportTools').classList.toggle('hidden', live);
+  document.getElementById('completed').classList.toggle('hidden', !done);
+  document.getElementById('doneTools').classList.toggle('hidden', !done);
+  document.getElementById('exportTools').classList.toggle('hidden', !done);
+  document.getElementById('future').classList.toggle('hidden', !fut);
   document.getElementById('tabLive').classList.toggle('on', live);
-  document.getElementById('tabDone').classList.toggle('on', !live);
+  document.getElementById('tabDone').classList.toggle('on', done);
+  document.getElementById('tabFuture').classList.toggle('on', fut);
+  if (fut) loadFuture();
+}
+function futureBadge(n){
+  const b = document.getElementById('futureBadge');
+  if (!b) return;
+  b.textContent = n || '';
+  b.classList.toggle('hidden', !n);
+  if (TAB === 'future' && n !== FUTURE_N) loadFuture();
+  FUTURE_N = n;
+}
+let FUTURE_N = null;
+async function loadFuture(){
+  const box = document.getElementById('future');
+  const res = await jget('/api/dispatch/future');
+  if (!res.ok){ box.innerHTML = '<p class="muted">Could not load future orders.</p>'; return; }
+  const head = '<p class="muted small">Each one goes to the kitchen ' + res.lead_min +
+    ' minutes before its delivery time. Change that in Settings.</p>';
+  box.innerHTML = head + (res.orders.map(function(o){
+    let items = '';
+    try { items = (o.items||[]).map(function(i){ return (i.qty||1)+' x '+i.name; }).join(', '); } catch(e) {}
+    return '<div class="order"><div class="order-head"><b>'+o.scheduled_label+'</b> &middot; '+o.code+
+      ' <span class="pill amber">Future</span></div>'+
+      '<div>'+o.restaurant+' to <b>'+o.customer+'</b> '+(o.phone||'')+'</div>'+
+      '<div class="muted small">'+o.address+'</div>'+
+      (items ? '<div class="small">'+items+'</div>' : '')+
+      '<div class="small">Total '+o.total+' &middot; '+(o.pay_method==='cash' ? 'cash' : 'card')+
+      ' &middot; goes to the kitchen '+o.release_label+'</div>'+
+      '<div class="order-actions">'+
+      '<button class="btn tiny" onclick="releaseFuture('+o.id+',\''+o.code+'\')">Send now</button>'+
+      '<button class="btn tiny danger" onclick="cancelFuture('+o.id+',\''+o.code+'\')">Cancel order</button>'+
+      '</div></div>';
+  }).join('') || '<p class="muted">No future orders.</p>');
+}
+async function cancelFuture(id, code){
+  const why = prompt('Cancel future order ' + code + '? Type the reason (for example, customer called to cancel).');
+  if (why === null) return;
+  const res = await jpost('/api/dispatch/future-cancel', {order_id: id, reason: why});
+  if (!res.ok){ alert(res.error || 'Could not cancel it.'); }
+  loadFuture(); board(true);
+}
+async function releaseFuture(id, code){
+  if (!confirm('Send ' + code + ' to the kitchen now instead of waiting?')) return;
+  const res = await jpost('/api/dispatch/future-release', {order_id: id});
+  if (!res.ok){ alert(res.error || 'Could not send it.'); }
+  loadFuture(); board(true);
 }
 function soundLabel(){
   var on = true;
@@ -928,6 +1072,8 @@ function soundLabel(){
   if (n) n.textContent = on ? '' : 'alerts are silent';
 }
 function toggleSound(){
+  const busy = !!LATE_TIMER;
+  try { if (busy && ffSound.enabled()){ alert('Sound stays on while an order is past its accept time.'); return; } } catch(e){}
   try { if (window.ffSound) ffSound.toggle(); } catch(e){}
   soundLabel();
 }

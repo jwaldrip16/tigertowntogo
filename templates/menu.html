@@ -20,6 +20,16 @@
     <input id="note" placeholder="Gate code, apartment, door instructions">
     <button class="btn" onclick="validate()">Validate address and price delivery</button>
     <div id="quote" class="quote"></div>
+    <h3>When</h3>
+    <div class="row">
+      <select id="whenMode" onchange="whenToggle()" style="max-width:190px">
+        <option value="now" {{ '' if open else 'disabled' }}>As soon as possible</option>
+        <option value="later" {{ '' if open else 'selected' }}>Schedule for later</option>
+      </select>
+      <select id="whenDay" class="hidden" onchange="drawSlots()" style="max-width:160px"></select>
+      <select id="whenTime" class="hidden" style="max-width:130px"></select>
+    </div>
+    <div class="muted small" id="whenNote">{{ '' if open else r['name'] + ' is closed right now. Pick a time they are open and we will send it to them then.' }}</div>
     <h3>Tip your driver</h3>
     <div class="row" id="tipRow">
       <button class="btn tiny" onclick="setTip(0.15)">15%</button>
@@ -213,15 +223,42 @@ for(const k in CC){
   el.addEventListener('input', ()=>ccCheck(false));
   el.addEventListener('blur', function(){ this.dataset.touched = '1'; ccCheck(false); });
 }
+let SLOTS = [];
+async function loadSlots(){
+  try {
+    const res = await jget('/api/future-slots?restaurant_id=' + RID);
+    SLOTS = (res && res.ok) ? res.days : [];
+  } catch(e) { SLOTS = []; }
+  const day = document.getElementById('whenDay');
+  day.innerHTML = SLOTS.map((d,i)=>'<option value="'+i+'">'+d.label+'</option>').join('');
+  drawSlots();
+}
+function drawSlots(){
+  const d = SLOTS[parseInt(document.getElementById('whenDay').value || '0', 10)];
+  document.getElementById('whenTime').innerHTML = d
+    ? d.slots.map(s=>'<option value="'+s.value+'">'+s.label+'</option>').join('') : '';
+}
+function whenToggle(){
+  const later = document.getElementById('whenMode').value === 'later';
+  document.getElementById('whenDay').classList.toggle('hidden', !later);
+  document.getElementById('whenTime').classList.toggle('hidden', !later);
+  if (later && !SLOTS.length){
+    loadSlots().then(function(){
+      if (!SLOTS.length) document.getElementById('whenNote').textContent = 'No open times in the next two weeks.';
+    });
+  }
+}
 async function placeOrder(){
   const cc = ccCheck(true);
+  if (document.getElementById('whenMode').value === 'later' && !document.getElementById('whenTime').value){ alert('Pick a delivery time.'); return; }
   if(!cc.ok){ document.getElementById('custCard').scrollIntoView({behavior:'smooth'}); alert('Please fix the card details.'); return; }
   const res = await jpost('/checkout', {
     card: ccForm(),
     restaurant_id: RID, customer_name: document.getElementById('name').value,
     customer_phone: document.getElementById('phone').value,
     address: document.getElementById('address').value,
-    note: document.getElementById('note').value, items: cart, tip_cents: tipCents});
+    note: document.getElementById('note').value, items: cart, tip_cents: tipCents,
+    scheduled_for: document.getElementById('whenMode').value === 'later' ? document.getElementById('whenTime').value : ''});
   if(!res.ok){ alert(res.error); return; }
   try{
     const seen = JSON.parse(localStorage.getItem('ffOrders')||'[]');
@@ -233,4 +270,5 @@ async function placeOrder(){
 }
 attachAddressPicker('address', ()=>validate());
 drawMenu();
+whenToggle();
 </script>{% endblock %}

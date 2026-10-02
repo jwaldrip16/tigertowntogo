@@ -12,6 +12,16 @@
   <label>Dispatch phone number</label>
   <input name="dispatch_phone" type="tel" value="{{ s['dispatch_phone'] }}" placeholder="334-209-2844">
   <div class="muted small">The number drivers and restaurants tap to call dispatch, and the one customers see.</div>
+  <h2>Late accept warnings</h2>
+  <label>Flash and chime when a kitchen has not accepted an order after this many minutes (0 for off)</label>
+  <input name="kitchen_accept_min" type="number" min="0" max="60" value="{{ s['kitchen_accept_min'] or 5 }}">
+  <label>Flash and chime when a driver has not tapped Received after this many minutes (0 for off)</label>
+  <input name="driver_accept_min" type="number" min="0" max="60" value="{{ s['driver_accept_min'] or 3 }}">
+  <div class="muted small">Dispatch shows a quiet banner as soon as an order goes to the kitchen or a driver. Once these minutes pass without an accept, dispatch flashes and chimes every 5 seconds until it is accepted.</div>
+  <h2>Future orders</h2>
+  <label>Send a future order to the kitchen this many minutes before its delivery time</label>
+  <input name="future_lead_min" type="number" min="10" max="240" value="{{ s['future_lead_min'] or 45 }}">
+  <div class="muted small">Until then it waits on the Future tab and nobody else sees it.</div>
   <h2>Delivery fees</h2>
   <label>Base fee in cents (first miles)</label>
   <input name="base_fee_cents" value="{{ s['base_fee_cents'] }}">
