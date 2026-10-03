@@ -2878,13 +2878,18 @@ def nearest_address(lat, lng):
         db().commit()
     return addr
 
+ADDR_LOOKUP_AT = {}   # driver id -> last street-address lookup (the pin itself moves every fix)
+ADDR_LOOKUP_GAP = 15  # seconds between address lookups per driver
+
 def update_driver_addr(did, lat, lng, force=False):
-    """Refresh the driver's closest address when they have moved about 30 metres."""
+    """Refresh the driver's closest address when they have moved about 30 metres,
+    at most every 15 seconds. The map pin updates on every fix regardless."""
     d = db().execute("SELECT last_addr,last_addr_lat,last_addr_lng FROM drivers WHERE id=?", (did,)).fetchone()
     if d and d["last_addr"] and not force and d["last_addr_lat"] is not None:
         moved = miles_between(d["last_addr_lat"], d["last_addr_lng"], lat, lng) or 0
-        if moved < 0.025:
+        if moved < 0.025 or time.time() - ADDR_LOOKUP_AT.get(did, 0) < ADDR_LOOKUP_GAP:
             return d["last_addr"]
+    ADDR_LOOKUP_AT[did] = time.time()
     addr = nearest_address(lat, lng)
     if addr:
         db().execute("UPDATE drivers SET last_addr=?,last_addr_lat=?,last_addr_lng=? WHERE id=?",
@@ -2963,7 +2968,7 @@ def miles_between(lat1, lng1, lat2, lng2):
 
 @app.post("/api/driver/ping")
 def api_driver_ping():
-    """The driver app posts a GPS fix every 30 seconds while the driver is signed in."""
+    """The driver app posts a GPS fix every 2-3 seconds while the driver is on shift."""
     did = session.get("driver_id")
     if not did:
         return jsonify({"ok": False}), 403

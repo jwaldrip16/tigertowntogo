@@ -526,7 +526,7 @@ let FAST = false, LAST_POST = 0, ADDR = '';
 function sendFix(now){
   if(!LAST_FIX) return;
   if(MY_STATUS === 'offline') return;              // off shift, phone stays private
-  const gap = FAST ? 8000 : 25000;
+  const gap = FAST ? 2000 : 3000;                  // live: a fresh fix every 2-3 seconds
   if(!now && Date.now() - LAST_POST < gap) return;
   LAST_POST = Date.now();
   jpost('/api/driver/ping', {lat: LAST_FIX.latitude, lng: LAST_FIX.longitude}).then(function(r){
@@ -551,8 +551,22 @@ function startLocation(){
   if(!navigator.geolocation){ locFail(); return; }
   navigator.geolocation.getCurrentPosition(function(p){ LAST_FIX = p.coords; sendFix(true); }, locFail,
     {enableHighAccuracy:true, timeout:15000});
-  navigator.geolocation.watchPosition(pushFix, locFail, {enableHighAccuracy:true, maximumAge:5000});
-  setInterval(function(){ sendFix(false); }, 4000);
+  navigator.geolocation.watchPosition(pushFix, locFail, {enableHighAccuracy:true, maximumAge:0, timeout:20000});
+  setInterval(function(){ sendFix(false); }, 3000);
+  setInterval(keepAwake, 5000);
+  document.addEventListener('visibilitychange', function(){
+    if (document.visibilityState === 'visible'){ WAKE = null; keepAwake(); sendFix(true); }
+  });
+}
+// Phones pause GPS when the screen sleeps, so the screen stays on while the driver is on shift.
+let WAKE = null;
+async function keepAwake(){
+  try {
+    if (MY_STATUS === 'offline'){ if (WAKE){ WAKE.release(); WAKE = null; } return; }
+    if (WAKE || !('wakeLock' in navigator) || document.visibilityState !== 'visible') return;
+    WAKE = await navigator.wakeLock.request('screen');
+    WAKE.addEventListener('release', function(){ WAKE = null; });
+  } catch(e){ WAKE = null; }
 }
 state(); chat(); startLocation();
 setInterval(state,4000); setInterval(chat,4000);

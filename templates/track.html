@@ -132,10 +132,20 @@ function drawMap(o){
   if (tr.driver_lat!==null){
     const ll = [tr.driver_lat, tr.driver_lng];
     if (!DRV) DRV = L.circleMarker(ll,{radius:10,color:'#1e3a8a',fillColor:'#3b82f6',fillOpacity:.95}).addTo(MAP).bindTooltip(tr.driver_name||'Driver');
-    else DRV.setLatLng(ll);
+    else glideTo(DRV, ll, 2500);
     if (!FIT && tr.home_lat!==null){ MAP.fitBounds([ll,[tr.home_lat,tr.home_lng]], {padding:[40,40]}); FIT = true; }
   } else if (DRV){ MAP.removeLayer(DRV); DRV = null; }
   setTimeout(()=>MAP && MAP.invalidateSize(), 50);
 }
-tick(); setInterval(tick, 4000);
+function glideTo(mk, to, ms){
+  const from = mk.getLatLng(), t0 = performance.now();
+  if (mk._ffa) cancelAnimationFrame(mk._ffa);
+  function step(tm){
+    const k = Math.min(1, (tm - t0) / ms);
+    mk.setLatLng([from.lat + (to[0]-from.lat)*k, from.lng + (to[1]-from.lng)*k]);
+    if (k < 1) mk._ffa = requestAnimationFrame(step);
+  }
+  mk._ffa = requestAnimationFrame(step);
+}
+tick(); setInterval(tick, 3000);
 </script>{% endif %}{% endblock %}

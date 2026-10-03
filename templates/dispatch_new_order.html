@@ -18,7 +18,6 @@
       <input id="puAddr" placeholder="Pickup address, street, city, state, ZIP">
       <div class="row gap">
         <input id="puPhone" placeholder="Pickup phone, e.g. 3345551234">
-        <button class="btn small" onclick="validate()">Price it</button>
       </div>
       <p class="muted small">The mileage fee prices off this address, the driver navigates to it
         and calls this number. Add the food as custom items on the right.</p>
@@ -71,7 +70,6 @@
   <select id="source"><option value="call_in">Call-in (phone)</option><option value="dispatch_online">Placed online by dispatch</option></select>
     <textarea id="address" rows="2" placeholder="Street, city, state, ZIP"></textarea>
     <input id="note" placeholder="Gate code, apartment, door instructions">
-    <button class="btn" onclick="validate()">Validate address and price delivery</button>
     <div id="quote" class="quote"></div>
     <div id="omap" class="minimap hidden"></div>
     <div id="omapNote" class="muted small"></div>
@@ -213,7 +211,27 @@ function totals(){
     '<div class="row total"><span>Total</span><span>'+money(sub+feeNow()+ifee+tax+svc+tipCents())+'</span></div>';
   document.getElementById('place').disabled = !cart.length;
 }
+// The address checks and prices itself as dispatch types; no button to press.
+let PRICED_KEY = '', PRICE_T = null;
+function priceKey(){
+  return [(document.getElementById('address').value||'').trim(), document.getElementById('rest').value,
+          (document.getElementById('puAddr').value||'').trim()].join('|');
+}
+function autoPrice(now){
+  clearTimeout(PRICE_T);
+  if ((document.getElementById('address').value||'').trim().length < 8) return;
+  if (priceKey() === PRICED_KEY) return;
+  PRICE_T = setTimeout(function(){ validate(); }, now ? 0 : 900);
+}
+['address','puAddr'].forEach(function(id){
+  const el = document.getElementById(id);
+  el.addEventListener('input', function(){ autoPrice(false); });
+  el.addEventListener('blur', function(){ autoPrice(true); });
+});
+document.getElementById('rest').addEventListener('change', function(){ autoPrice(true); });
 async function validate(){
+  const key = priceKey();
+  document.getElementById('quote').innerHTML = '<span class="muted small">Checking address...</span>';
   const res = await jpost('/api/validate-address', Object.assign(
       {address: document.getElementById('address').value,
        restaurant_id: parseInt(document.getElementById('rest').value,10)}, pickupPayload()));
@@ -222,12 +240,16 @@ async function validate(){
     q.innerHTML = '<span class="pill red">'+(res.error||'Could not validate')+'</span>'+
       '<div class="muted small">You can still place it. It lands on the board as pending address approval.</div>';
     totals(); return; }
+  PRICED_KEY = key;
   geo = res; miles = res.miles; feeCents = res.fee_cents;
   q.innerHTML = '<div>'+res.formatted+'</div><div class="muted small">'+res.miles+' mi &middot; fee '+res.fee+'</div>';
   showOnMap(res);
   totals();
 }
 async function placeOrder(){
+  if ((document.getElementById('address').value||'').trim() && priceKey() !== PRICED_KEY){
+    clearTimeout(PRICE_T); await validate();
+  }
   if (typedPickup()){
     const pn=(document.getElementById('puName').value||'').trim();
     const pa=(document.getElementById('puAddr').value||'').trim();
