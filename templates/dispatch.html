@@ -5,16 +5,18 @@
   <div><a class="btn small primary" href="/dispatch/new-order">Create order</a>
        <a class="btn small" href="/dispatch/restaurants">Restaurant hours</a>
        <a class="btn small" href="/dispatch/schedule">Driver schedule</a>
+       <a class="btn small" href="/dispatch/dispatcher-schedule">Dispatcher schedule</a>
+       <a class="btn small" href="/dispatch/driver-pay">Driver pay</a>
     <a class="btn small" href="/dispatch/hours">Closed days</a>
   <a class="btn small" href="/dispatch/map">Driver map</a>
   <a class="btn small" href="/dispatch/gps-log">GPS log</a>
   <a class="btn small" href="/dispatch/account">Dispatchers</a>
-  <a class="btn small" href="/dispatch/regions">Regions</a>
        <a class="btn small" href="/dispatch/settings">Fees</a>
        <a class="btn small" href="/dispatch/logout">Sign out</a></div>
 </div>
 <div class="row regionbar"><span class="pill blue" id="rgLabel">All regions</span>
   <button class="btn tiny" id="rgAll" onclick="toggleAllRegions()" style="display:none">Show all regions</button>
+  <span id="myRg" class="rgpick"></span>
   <input id="findAny" placeholder="Find any order: code, phone or name" onkeydown="if(event.key==='Enter')findAny()">
   <button class="btn tiny" onclick="findAny()">Find</button></div>
 <div id="findAnyOut"></div>
@@ -288,7 +290,16 @@ async function unblock(p){ await jpost('/api/dispatch/block', {phone:p}); loadBl
 // ---- order editor: same menu cards and choice pop-up as the customer website
 let ED = null;
 function edEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function ownerLocked(oid){
+  const all = ((LAST&&LAST.completed)||[]).concat((LAST&&LAST.orders)||[]).concat(window.SEARCH_HITS||[]);
+  const o = all.find(x=>x.id===oid);
+  if (o && o.dispatch_status==='delivered' && LAST && !LAST.owner){
+    alert('This order was already delivered. Only an owner can edit it now.'); return true;
+  }
+  return false;
+}
 async function editOrder(oid){
+  if (ownerLocked(oid)) return;
   const res = await jget('/api/dispatch/order-edit/'+oid);
   if(!res || !res.ok){ alert((res && res.error) || 'Order not found.'); return; }
   ED = {id:res.id, code:res.code, items:res.items.map(i=>Object.assign({}, i)), menu:res.menu||[]};
@@ -637,6 +648,44 @@ function redoGo(id){
   window.location = '/dispatch/new-order?from='+id+'&redo=1&issue='+encodeURIComponent(why)+
     '&issue_note='+encodeURIComponent(note)+'&send_to='+to;
 }
+function payBlock(o){
+  const p = o.drv_pay; if(!p || o.dispatch_status!=='delivered' || !o.driver_id) return '';
+  let h = '<div class="small" style="margin-top:6px">Driver pay: ';
+  h += p.rows.length ? p.rows.map(r=>'<span class="pill '+(r.status==='SUCCESS'||r.status==='BANK_PAID'?'green':(r.error?'red':'amber'))+'">'+
+        r.amount+' '+fEsc(r.label)+'</span>'+(r.error?' <span class="muted">'+fEsc(r.error)+'</span>':'')).join(' ')
+      : '<span class="pill grey">not paid</span>';
+  h += ' <span class="muted">suggested '+p.suggest+(p.to?' to '+fEsc(p.to):'')+'</span></div><div class="order-actions">';
+  const bankBtn = ' <button class="btn tiny" onclick="bankPay('+o.id+',\''+(p.paid_cents?(p.owed_cents?('$'+(p.owed_cents/100).toFixed(2)):''):p.suggest)+'\',\''+fEsc(o.driver)+'\')">Paid by bank</button>';
+  if (p.open) { h += '<button class="btn tiny" onclick="checkPay('+o.id+')">Check driver pay</button>'; return h + '</div>'; }
+  if (!p.ready) h += '<span class="muted small">Add a PayPal email or Venmo phone for this driver under Restaurants and drivers.</span>';
+  else if (p.open) h += '<button class="btn tiny" onclick="checkPay('+o.id+')">Check driver pay</button>';
+  else if (!p.paid_cents) h += '<button class="btn tiny primary" onclick="payDriver('+o.id+',false,\''+p.suggest+'\',\''+fEsc(o.driver)+'\',\''+fEsc(p.to)+'\')">Pay driver '+p.suggest+'</button>';
+  else h += '<button class="btn tiny" onclick="payDriver('+o.id+',true,\''+(p.owed_cents?('$'+(p.owed_cents/100).toFixed(2)):'')+'\',\''+fEsc(o.driver)+'\',\''+fEsc(p.to)+'\')">Pay extra</button>';
+  return h + bankBtn + '</div>';
+}
+async function payDriver(id, extra, amt, name, to){
+  let a = prompt((extra?'Extra pay for ':'Pay ')+name+' for this trip ($):', String(amt||'').replace('$',''));
+  if (a===null) return; a = a.trim(); if(!a) return;
+  if (!confirm('Send $'+parseFloat(a).toFixed(2)+' to '+name+' ('+to+') from your PayPal balance?')) return;
+  const res = await jpost('/api/dispatch/driver-pay', {order_id:id, amount:a, extra:!!extra});
+  if (!res.ok) alert(res.error||'Payment did not go through.');
+  else alert('Sent '+res.amount+' to '+res.to+'. PayPal says: '+(res.status==='SUCCESS'?'paid':'on its way')+'.');
+  board(true);
+}
+async function bankPay(id, amt, name){
+  let a = prompt('Amount you sent '+name+' from your bank for this trip ($):', String(amt||'').replace('$',''));
+  if (a===null) return; a = a.trim(); if(!a) return;
+  const ref = prompt('Confirmation number from your bank or Zelle (optional):', '') || '';
+  const res = await jpost('/api/dispatch/driver-pay', {order_id:id, amount:a, extra:true, method:'bank', ref:ref});
+  if (!res.ok) alert(res.error||'That did not save.');
+  else alert('Recorded '+res.amount+' bank pay to '+name+'.');
+  board(true);
+}
+async function checkPay(id){
+  const res = await jpost('/api/dispatch/driver-pay', {order_id:id, op:'check'});
+  if (!res.ok) alert(res.error||'Could not check right now.');
+  board(true);
+}
 function renderCompleted(res){
   try {
   document.getElementById('completed').innerHTML = (res.completed||[]).map(o=>
@@ -647,6 +696,7 @@ function renderCompleted(res){
     ' &middot; '+milesLabel(o)+' &middot; fee '+o.fee+' &middot; <strong>tip '+o.tip+'</strong> &middot; total '+o.total+
     (o.driver?' &middot; driver '+o.driver:'')+'</div>'+
     '<div class="order-actions">'+
+      '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>'+
       (!o.driver_id && o.dispatch_status!=='cancelled' ? '<select class="sendsel" id="sd'+o.id+'">'+
         '<option value="">Next up</option>'+ (res.drivers||[]).filter(d=>d.status==='online')
           .map(d=>'<option value="'+d.id+'">'+d.name+'</option>').join('') + '</select>'+
@@ -659,6 +709,7 @@ function renderCompleted(res){
     '<button class="btn tiny primary" onclick="redoDialog('+o.id+')">New order from this</button>'+
     (o.card_on_file ? '<button class="btn tiny" onclick="viewCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">View card &bull;'+o.card_last4+'</button>' : '')+
 
+    payBlock(o)+
     (o.issue ? '<div class="muted small">Redo reason on file: '+o.issue+
       (o.issue_note?' - '+o.issue_note:'')+'</div>' : '')+'</div></div>').join('') ||
     '<p class="muted">Nothing completed yet.</p>';
@@ -673,6 +724,23 @@ function drawRegionBar(res){
   lab.textContent = SHOW_ALL_REGIONS ? 'Showing every region' : 'Your regions: ' + res.regions_label;
   b.textContent = SHOW_ALL_REGIONS ? 'Back to my regions' : 'Show all regions';
 }
+let MYRG = null;
+async function drawMyRegions(){
+  const box = document.getElementById('myRg'); if(!box) return;
+  if (!MYRG){ try { MYRG = await jget('/api/regions-list'); } catch(e){ return; } }
+  if (!MYRG || !MYRG.ok || !MYRG.regions.length){ box.innerHTML = ''; return; }
+  box.innerHTML = '<span class="muted small">I\'m working:</span>' + MYRG.regions.map(r=>
+    '<label class="rgchip"><input type="checkbox" class="myrgbox" value="'+r.id+'"'+(MYRG.mine.includes(r.id)?' checked':'')+
+    ' onchange="saveMyRegions()"> '+fEsc(r.name)+'</label>').join('') +
+    '<span class="muted small">'+(MYRG.mine.length?'':'none checked = every region')+'</span>';
+}
+async function saveMyRegions(){
+  const vals = Array.from(document.querySelectorAll('.myrgbox:checked')).map(b=>+b.value);
+  const r = await jpost('/api/dispatch/regions', {op:'set_self', regions:vals});
+  if (!r.ok){ alert(r.error||'That did not save.'); }
+  MYRG = null; await drawMyRegions(); board(true);
+}
+drawMyRegions();
 function toggleAllRegions(){ SHOW_ALL_REGIONS = !SHOW_ALL_REGIONS; board(true); }
 function fEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function findAny(){
@@ -810,7 +878,7 @@ function ppButtons(o){
   if(!p.enabled) return '';
   let h = '';
   if(p.can_pay)
-    h += '<button class="btn tiny primary" onclick="window.open(\''+p.pay_url+'\',\'_blank\')">Take card / Venmo</button>';
+    h += '<a class="btn tiny primary" href="'+p.pay_url+'" target="_blank" rel="noopener">Take card / Venmo</a>';
   if(p.state === 'authorized'){
     h += '<button class="btn tiny" onclick="ppSettle('+o.id+',\'charge\')">Charge now ('+o.total+')</button>';
     h += '<button class="btn tiny" style="color:#c0392b" onclick="ppSettle('+o.id+',\'void\')">Release hold</button>';
@@ -838,9 +906,11 @@ function payButtons(o){
     h += '<label class="switch tiny" title="Cash order: the driver collects at the door">'+
          '<input type="checkbox" '+(o.cash?'checked':'')+' onchange="setCash('+o.id+',this.checked)"> Cash</label>';
     h += '<button class="btn tiny" onclick="keyed('+o.id+')">Mark paid</button>';
+    h += '<button class="btn tiny" onclick="houseAcct('+o.id+',\''+o.code+'\',\''+o.total+'\')">House account</button>';
     if(!o.cash && o.dispatch_status !== 'cancelled' && o.payment_status !== 'declined')
       h += '<button class="btn tiny" style="color:#c0392b" onclick="payFailed('+o.id+',\''+o.code+'\')">Card failed: cancel</button>';
   }
+  if(o.paid && o.pay_method==='house_account') h += '<span class="pill">House account</span>';
   if(o.paid && o.balance_cents > 0 && !o.cash){
     h += '<button class="btn tiny primary" onclick="cardFor('+o.id+',\''+o.code+'\',\''+o.balance+'\')">Card for '+o.balance+'</button>';
     h += '<button class="btn tiny" onclick="keyed('+o.id+')">Record '+o.balance+' paid</button>';
@@ -877,6 +947,23 @@ async function keyed(id){
   if(ref === null) return;
   const res = await jpost('/api/order/mark-paid', {order_id:id, ref:ref});
   if(!res.ok){ alert(res.error || 'That did not save.'); return; }
+  board(true);
+}
+async function houseAcct(id, code, total){
+  const acct = prompt('Charge '+code+' ('+total+') to a house account.\nAccount name (optional):', '');
+  if(acct === null) return;
+  const res = await jpost('/api/order/mark-paid', {order_id:id, method:'house', account:acct});
+  if(!res.ok){ alert(res.error || 'That did not save.'); return; }
+  board(true);
+}
+function kitchenGo(o){
+  if(!o.can_send_kitchen) return '';
+  return '<span class="pill amber">Not sent to kitchen</span>'+
+    '<button class="btn tiny primary" onclick="sendKitchen('+o.id+')">Send to kitchen</button>';
+}
+async function sendKitchen(id){
+  const res = await jpost('/api/order/send-kitchen', {order_id:id});
+  if(!res.ok){ alert(res.error || 'Could not send it.'); return; }
   board(true);
 }
 async function setCash(id, on){
@@ -983,6 +1070,7 @@ function orderCard(o, opts, drivers){
     trailLine(o)+
     '<div class="order-actions">'+
       payButtons(o)+
+      kitchenGo(o)+
       manualButtons(o)+
       (o.needs_address_approval ? '<button class="btn tiny primary" onclick="approveAddress('+o.id+
         ',\''+o.address.replace(/'/g,"\\'")+'\')">Approve address</button>' : '')+
@@ -1096,6 +1184,7 @@ async function open24(id){ await jpost('/api/restaurant/open24', {restaurant_id:
 async function pauseRest(id){ await jpost('/api/dispatch/pause-restaurant', {restaurant_id:id}); board(true); }
 async function setStatus(id, st){ await jpost('/api/dispatch/driver-status', {driver_id:id, status:st}); board(true); }
 async function reopen(id, code, keep){
+  if (ownerLocked(id)) return;
   if(!confirm('Reopen '+code+'? It goes back on the live board'+
               (keep?' with the same driver.':' and into the queue for assignment.'))) return;
   await jpost('/api/order/reopen', {order_id:id, keep_driver:keep});

@@ -1,0 +1,85 @@
+{% extends "base.html" %}{% block body %}
+<div class="head">
+  <h1>Driver pay</h1>
+  <div><a class="btn small" href="/dispatch">Board</a>
+    <a class="btn small" href="/dispatch/manage">Restaurants and drivers</a></div>
+</div>
+<p class="muted small">Send a driver extra pay, like a bonus or gas money, that is not tied to one trip.
+PayPal and Venmo send the money from your PayPal balance right away. Bank transfer is for money you send from your
+own bank or Zelle: send it there first, then record it here so it shows in the driver's pay history.</p>
+<div class="panel">
+  <div class="row">
+    <select id="xpWho" onchange="xpWhoChanged()"></select>
+    <select id="xpHow">
+      <option value="">Driver's saved way</option>
+      <option value="paypal">PayPal</option>
+      <option value="venmo">Venmo</option>
+      <option value="bank">Bank transfer (record it)</option>
+    </select>
+    <input id="xpAmt" placeholder="Amount, like 25.00" style="max-width:150px" inputmode="decimal">
+  </div>
+  <div class="row">
+    <input id="xpWhy" maxlength="120" placeholder="Reason, like Friday bonus or gas money">
+    <input id="xpRef" maxlength="60" placeholder="Bank or Zelle confirmation # (optional)" style="max-width:260px">
+    <button class="btn primary small" onclick="xpPay()">Pay extra</button>
+  </div>
+  <div class="muted small" id="xpTo"></div>
+</div>
+<h2 class="mt">Pay history</h2>
+<div class="row"><label class="muted small"><input type="checkbox" id="xpOnly" onchange="xpLoad()"> Only the driver picked above</label></div>
+<div id="xpTotals" class="row"></div>
+<div id="xpHist"></div>
+{% endblock %}
+{% block scripts %}<script>
+let XP = null;
+function xEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function xpDraw(res){
+  if(!res || !res.drivers) return;
+  XP = res;
+  const sel = document.getElementById('xpWho'), keep = sel.value;
+  sel.innerHTML = '<option value="">Pick a driver</option>' + res.drivers.map(d=>'<option value="'+d.id+'">'+xEsc(d.name)+'</option>').join('');
+  sel.value = keep;
+  xpWhoChanged();
+  document.getElementById('xpTotals').innerHTML = res.drivers.map(d=>
+    '<span class="pill grey">'+xEsc(d.name)+': '+d.today+' today, '+d.week+' this week</span>').join(' ');
+  document.getElementById('xpHist').innerHTML = res.history.length ? '<table class="weekgrid"><tr><th>When</th><th>Driver</th><th>For</th><th>Amount</th><th>Sent to</th><th>Status</th><th>By</th></tr>' +
+    res.history.map(r=>'<tr><td>'+xEsc(r.at)+'</td><td>'+xEsc(r.driver)+'</td><td>'+xEsc(r.kind)+(r.reason?'<br><span class="muted small">'+xEsc(r.reason)+'</span>':'')+
+      (r.ref?'<br><span class="muted small">Conf # '+xEsc(r.ref)+'</span>':'')+'</td><td>'+r.amount+'</td><td>'+xEsc(r.to)+'</td><td>'+
+      '<span class="pill '+(r.status==='SUCCESS'||r.status==='BANK_PAID'?'green':(r.error?'red':'amber'))+'">'+xEsc(r.label)+'</span>'+
+      (r.error?'<br><span class="muted small">'+xEsc(r.error)+'</span>':'')+
+      (r.open?' <button class="btn tiny" onclick="xpCheck('+r.id+')">Check</button>':'')+'</td><td>'+xEsc(r.by)+'</td></tr>').join('') + '</table>'
+    : '<p class="muted small">No driver pay yet.</p>';
+}
+function xpWhoChanged(){
+  const id = +document.getElementById('xpWho').value;
+  const d = XP && XP.drivers.find(x=>x.id===id);
+  document.getElementById('xpTo').textContent = d ? ('Saved way: ' + (d.to || 'nothing saved yet, pick Bank transfer or add PayPal/Venmo under Restaurants and drivers')) : '';
+}
+async function xpLoad(){
+  const only = document.getElementById('xpOnly').checked;
+  xpDraw(await jpost('/api/dispatch/driver-extra', {op:'list', driver_id: only ? document.getElementById('xpWho').value : ''}));
+}
+async function xpPay(){
+  const id = document.getElementById('xpWho').value;
+  if(!id){ alert('Pick a driver.'); return; }
+  const d = XP.drivers.find(x=>x.id===+id), how = document.getElementById('xpHow').value;
+  const amt = document.getElementById('xpAmt').value.trim();
+  const bank = how==='bank' || (!how && d.wallet==='bank');
+  if(!amt){ alert('Enter an amount.'); return; }
+  if(!confirm(bank ? 'Record $'+parseFloat(amt).toFixed(2)+' you sent '+d.name+' from your bank?'
+                   : 'Send $'+parseFloat(amt).toFixed(2)+' to '+d.name+' from your PayPal balance?')) return;
+  const only = document.getElementById('xpOnly').checked;
+  const res = await jpost('/api/dispatch/driver-extra', {op:'pay', driver_id:id, method:how, amount:amt,
+    reason:document.getElementById('xpWhy').value, ref:document.getElementById('xpRef').value});
+  if(!res.ok){ alert(res.error || 'That did not go through.'); if(res.drivers) xpDraw(res); return; }
+  alert((res.status==='BANK_PAID' ? 'Recorded ' : 'Sent ') + res.amount + ' to ' + d.name + '.');
+  ['xpAmt','xpWhy','xpRef'].forEach(i=>document.getElementById(i).value='');
+  if(only) xpLoad(); else xpDraw(res);
+}
+async function xpCheck(pid){
+  const res = await jpost('/api/dispatch/driver-extra', {op:'check', id:pid});
+  if(!res.ok){ alert(res.error || 'Could not check right now.'); return; }
+  xpLoad();
+}
+xpLoad(); setInterval(()=>{ const a=document.activeElement; if(!a || a.tagName!=='INPUT') xpLoad(); }, 30000);
+</script>{% endblock %}

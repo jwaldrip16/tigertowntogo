@@ -58,6 +58,14 @@ async function setLogo(inp){
     <input type="time" name="any_start" value="{{ any_row.avail_start }}" style="max-width:130px"> to
     <input type="time" name="any_end" value="{{ any_row.avail_end }}" style="max-width:130px">
   </div>
+  <h2>Driver pay per trip</h2>
+  <div class="muted small">When you tap Pay driver on a delivered order, the amount starts at this and you can change it before sending. Money goes from your PayPal balance to the driver's PayPal or Venmo.</div>
+  <label>Share of the delivery fee the driver gets (%)</label>
+  <input name="driver_pay_fee_pct" type="number" min="0" max="100" value="{{ s['driver_pay_fee_pct'] if s['driver_pay_fee_pct'] is not none else 100 }}">
+  <label>Share of the tip the driver gets (%)</label>
+  <input name="driver_pay_tip_pct" type="number" min="0" max="100" value="{{ s['driver_pay_tip_pct'] if s['driver_pay_tip_pct'] is not none else 100 }}">
+  <label>Flat amount added per trip ($)</label>
+  <input name="driver_pay_flat" type="number" step="0.01" min="0" max="500" value="{{ '%.2f' % ((s['driver_pay_flat_cents'] or 0)|int / 100) }}">
   <h2>Late accept warnings</h2>
   <label>Flash and chime when a kitchen has not accepted an order after this many minutes (0 for off)</label>
   <input name="kitchen_accept_min" type="number" min="0" max="60" value="{{ s['kitchen_accept_min'] or 5 }}">
@@ -86,6 +94,8 @@ async function setLogo(inp){
   <div class="muted small">Both apply to the food subtotal on new orders and on orders you edit. Orders already placed keep what they were charged.</div>
   <label>Auto assign to drivers (1 on, 0 off)</label>
   <input name="auto_assign" value="{{ s['auto_assign'] }}">
+  <label>Hold new orders until dispatch taps Send to kitchen (1 on, 0 off)</label>
+  <input name="kitchen_hold" value="{{ s['kitchen_hold'] }}">
   <label>Order tags, comma separated</label>
   <input name="order_tokens" value="{{ s['order_tokens'] }}">
   <div class="muted small">The short label dispatch puts on an order and the driver sees on the

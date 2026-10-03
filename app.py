@@ -204,12 +204,24 @@ def ensure_column(con, table, col, decl):
 def init_db():
     con = dbx.connect(DB_PATH)
     con.executescript(SCHEMA)
+    ensure_column(con, "drivers", "payout_wallet", "TEXT DEFAULT 'paypal'")
+    ensure_column(con, "drivers", "payout_email", "TEXT")
+    ensure_column(con, "drivers", "payout_phone", "TEXT")
+    con.execute("""CREATE TABLE IF NOT EXISTS driver_payouts (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL, driver_id INTEGER NOT NULL,
+        cents INTEGER NOT NULL, wallet TEXT, receiver TEXT, sender_id TEXT, batch_id TEXT, item_id TEXT,
+        status TEXT, error TEXT, created_at TEXT, created_by TEXT, checked_at TEXT)""")
+    ensure_column(con, "driver_payouts", "kind", "TEXT DEFAULT 'trip'")
+    ensure_column(con, "driver_payouts", "reason", "TEXT")
+    ensure_column(con, "driver_payouts", "ref", "TEXT")
+    ensure_column(con, "drivers", "bank_name", "TEXT")
+    ensure_column(con, "drivers", "bank_last4", "TEXT")
     cur = con.execute("SELECT COUNT(*) c FROM restaurants")
     if cur.fetchone()["c"] == 0:
         seed(con)
     topup_restaurants(con)
     for k, v in [("base_fee_cents", "399"), ("base_miles", "3"), ("per_mile_cents", "100"),
-                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("max_stack_default", "3"), ("sched_lead_min", "60"),
+                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("kitchen_hold", "1"), ("max_stack_default", "3"), ("sched_lead_min", "60"),
                  ("assign_on_pending", "0"), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
                  ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
                  ("business_name", "Fleet Delivery"),
@@ -360,6 +372,9 @@ def init_db():
                    dispatcher_id INTEGER NOT NULL, dow INTEGER NOT NULL, start_time TEXT NOT NULL,
                    end_time TEXT NOT NULL, note TEXT, created_by TEXT, created_at TEXT)""")
     ensure_column(con, "dispatcher_availability", "region_ids", "TEXT")
+    ensure_column(con, "dispatcher_availability", "status", "TEXT DEFAULT 'approved'")
+    ensure_column(con, "dispatcher_availability", "decided_by", "TEXT")
+    ensure_column(con, "dispatcher_availability", "decided_at", "TEXT")
     con.execute("""CREATE TABLE IF NOT EXISTS driver_log (id INTEGER PRIMARY KEY AUTOINCREMENT,
                    driver_id INTEGER NOT NULL, lat REAL, lng REAL, address TEXT, status TEXT,
                    event TEXT, created_at TEXT NOT NULL)""")
@@ -378,6 +393,16 @@ def init_db():
     ensure_column(con, "orders", "manual_at", "TEXT")
     ensure_column(con, "orders", "manual_by", "TEXT")
     ensure_column(con, "orders", "driver_paged_at", "TEXT")
+    # Send to kitchen: a new order stays off the kitchen until dispatch taps Send to kitchen,
+    # even after it is paid. kitchen_go=1 means dispatch released it (old orders count as released).
+    ensure_column(con, "orders", "kitchen_go", "INTEGER NOT NULL DEFAULT 1")
+    con.executescript("""
+    CREATE TRIGGER IF NOT EXISTS trg_kitchen_gate AFTER UPDATE OF kitchen_status ON orders
+      WHEN NEW.kitchen_go=0 AND NEW.kitchen_status='pending'
+      BEGIN UPDATE orders SET kitchen_status='waiting', kitchen_sent_at=NULL,
+        hold_reason=CASE WHEN dispatch_status IN ('held','queued') THEN 'tap Send to kitchen' ELSE hold_reason END
+        WHERE id=NEW.id; END;
+    """)
     # Stamp when the kitchen got the ticket and when a driver got paged, whatever code path did it.
     _ts = "strftime('%Y-%m-%dT%H:%M:%S','now','localtime')"
     con.executescript("""
@@ -882,7 +907,7 @@ def dispatcher_work_regions(did):
     nowdt = dt.datetime.now()
     picked = set()
     for s in db().execute("""SELECT * FROM dispatcher_availability WHERE dispatcher_id=?
-                             AND COALESCE(region_ids,'')!=''""", (did,)).fetchall():
+                             AND COALESCE(region_ids,'')!='' AND COALESCE(status,'approved')='approved'""", (did,)).fetchall():
         if _disp_slot_on(s, nowdt):
             picked |= parse_rids(s["region_ids"])
     return picked or dispatcher_region_ids(did)
@@ -1495,6 +1520,10 @@ def order_dict(o):
         "delivered_time": clock(o["delivered_at"]),
         "payment_status": o["payment_status"] or "unpaid",
         "pay_method": o["pay_method"] or "",
+        "kitchen_go": int(o["kitchen_go"] if "kitchen_go" in o.keys() and o["kitchen_go"] is not None else 1),
+        "can_send_kitchen": ("kitchen_go" in o.keys() and o["kitchen_go"] == 0 and o["kitchen_status"] == "waiting"
+                             and o["dispatch_status"] not in ("awaiting_payment", "scheduled", "cancelled", "delivered")
+                             and bool(o["address_ok"])),
         "paid": (o["payment_status"] or "unpaid") in ("paid", "part_refunded", "refunded"),
         "pay_link": o["pay_link"] or "",
         "refunded": money(o["refunded_cents"] or 0),
@@ -1516,6 +1545,7 @@ def order_dict(o):
         "subtotal_cents": int(o["subtotal_cents"] or 0),
         "subtotal": money(o["subtotal_cents"]), "fee": money(o["fee_cents"]),
         "tax": money(o["tax_cents"]), "tip": money(o["tip_cents"]), "total": money(o["total_cents"]),
+        "drv_pay": drv_pay_info(o),
         "service_cents": int(o["service_cents"] or 0) if "service_cents" in o.keys() else 0,
         "service": money((o["service_cents"] or 0) if "service_cents" in o.keys() else 0),
         "miles": (o["miles"] if o["address_ok"] else None), "kitchen_status": o["kitchen_status"],
@@ -1523,7 +1553,7 @@ def order_dict(o):
         "source": o["source"], "source_label": SOURCES.get(o["source"], "Online"),
         "token": (o["token"] or ""),
         "needs_address_approval": not o["address_ok"],
-        "dispatch_status": o["dispatch_status"], "hold_reason": o["hold_reason"],
+        "dispatch_status": o["dispatch_status"], "hold_reason": ("tap Send to kitchen" if ("kitchen_go" in o.keys() and o["kitchen_go"] == 0 and o["kitchen_status"] == "waiting" and o["dispatch_status"] in ("held", "queued") and o["address_ok"]) else o["hold_reason"]),
         "issue": o["issue"] or "", "issue_note": o["issue_note"] or "",
         "cloned_from": o["cloned_from"] or "",
         "driver": d["name"] if d else None, "driver_id": o["driver_id"], "stack_seq": o["stack_seq"],
@@ -2138,6 +2168,13 @@ def api_pp_create():
         db().commit()
     return jsonify({"ok": True, "id": j["id"]})
 
+def delivered_lock(o):
+    """Once an order is delivered, only an owner can change it. Returns an error response or None."""
+    if o and o["dispatch_status"] == "delivered" and session.get("dispatcher_id") and not is_owner():
+        return jsonify({"ok": False, "error": "This order was already delivered. Only an owner can edit it now."}), 403
+    return None
+
+
 @app.post("/api/paypal/approve")
 def api_pp_approve():
     if not pp_enabled():
@@ -2221,6 +2258,9 @@ def api_pp_settle():
     o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
     if not o:
         return jsonify({"ok": False, "error": "Order not found."}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
     res = pp_void(o, "released by dispatch") if b.get("op") == "void" else pp_settle(o, "charged by dispatch")
     return jsonify(res), (200 if res.get("ok") else 400)
 
@@ -2654,6 +2694,12 @@ def checkout():
         ("" if address_ok else " (address not verified, waiting on dispatch approval)") +
         (" (from " + from_code + (": " + issue_label if issue_label else "") + ")" if from_code else ""))
     oid = cur.lastrowid
+    if setting("kitchen_hold"):
+        db().execute("""UPDATE orders SET kitchen_go=0, kitchen_sent_at=NULL,
+            hold_reason=CASE WHEN kitchen_status='pending' THEN 'tap Send to kitchen' ELSE hold_reason END,
+            kitchen_status=CASE WHEN kitchen_status='pending' THEN 'waiting' ELSE kitchen_status END
+            WHERE id=?""", (oid,))
+        db().commit()
     cash = bool(payload.get("cash")) and placed_by == "dispatch" and bool(dispatcher_required())
     if cash:
         db().execute("UPDATE orders SET pay_method='cash', payment_status='cash_due' WHERE id=?", (oid,))
@@ -2719,6 +2765,9 @@ def api_approve_address():
     o = db().execute("SELECT * FROM orders WHERE id=?", (p.get("order_id"),)).fetchone()
     if not o:
         return jsonify({"ok": False, "error": "Order not found."}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
     addr = (p.get("address") or o["address"]).strip()
     g1 = geocode(addr)
@@ -2869,12 +2918,345 @@ def api_clock():
     return jsonify({"ok": True, "now": now(), "tz": APP_TZ,
                     "abbr": time.strftime("%Z"), "utc_offset": time.strftime("%z")})
 
+
+# ---------------- driver pay (PayPal Payouts) ----------------
+# Dispatch pays the driver for each delivered trip from the PayPal business balance,
+# to the driver's PayPal email or Venmo phone. Every send is its own row so a later
+# extra (a tip that came in after) is just another payment.
+PAYOUT_BAD = {"FAILED", "RETURNED", "BLOCKED", "REFUNDED", "REVERSED", "DENIED", "CANCELED", "ERROR"}
+PAYOUT_OPEN = {"SENDING", "UNKNOWN", "PENDING", "PROCESSING", "NEW", "ONHOLD", "UNCLAIMED"}
+PAYOUT_LABEL = {"SUCCESS": "paid", "PENDING": "sending", "PROCESSING": "sending", "NEW": "sending",
+                "SENDING": "sending", "ONHOLD": "on hold at PayPal", "UNCLAIMED": "waiting for driver to claim",
+                "UNKNOWN": "not confirmed yet", "FAILED": "failed", "RETURNED": "returned", "BLOCKED": "blocked",
+                "REFUNDED": "returned", "REVERSED": "reversed", "DENIED": "denied", "CANCELED": "cancelled",
+                "ERROR": "failed", "BANK_PAID": "paid by bank"}
+_payout_last = [0.0]
+
+def _pct_setting(key, default):
+    try:
+        v = int(setting(key, str) or default)
+    except (TypeError, ValueError):
+        v = default
+    return max(0, min(100, v))
+
+def drv_pay_rule():
+    try:
+        flat = int(setting("driver_pay_flat_cents", str) or 0)
+    except (TypeError, ValueError):
+        flat = 0
+    return {"fee_pct": _pct_setting("driver_pay_fee_pct", 100),
+            "tip_pct": _pct_setting("driver_pay_tip_pct", 100),
+            "flat_cents": max(0, min(50000, flat))}
+
+def drv_pay_suggest(o):
+    r = drv_pay_rule()
+    return (r["flat_cents"] + int(o["fee_cents"] or 0) * r["fee_pct"] // 100
+            + int(o["tip_cents"] or 0) * r["tip_pct"] // 100)
+
+def driver_payout_target(d):
+    """(wallet, recipient_type, receiver, label) or None when the driver has nothing on file."""
+    if not d:
+        return None
+    keys = d.keys()
+    wallet = ((d["payout_wallet"] if "payout_wallet" in keys else "") or "paypal").lower()
+    if wallet == "bank":
+        return ("BANK", "BANK", bank_label(d), bank_label(d))
+    if wallet == "venmo":
+        ph = digits((d["payout_phone"] if "payout_phone" in keys else "") or d["phone"] or "")
+        if len(ph) == 11 and ph.startswith("1"):
+            ph = ph[1:]
+        if len(ph) != 10:
+            return None
+        return ("VENMO", "PHONE", "+1" + ph, "Venmo (%s) %s-%s" % (ph[:3], ph[3:6], ph[6:]))
+    em = ((d["payout_email"] if "payout_email" in keys else "") or "").strip()
+    if "@" not in em or "." not in em.split("@")[-1]:
+        return None
+    return ("PAYPAL", "EMAIL", em, "PayPal " + em)
+
+def bank_label(d):
+    keys = d.keys() if d else []
+    nm = ((d["bank_name"] if "bank_name" in keys else "") or "").strip()
+    l4 = ((d["bank_last4"] if "bank_last4" in keys else "") or "").strip()
+    return "Bank transfer" + ((" " + nm) if nm else "") + ((" ending " + l4) if l4 else "")
+
+
+def pay_target_for(d, method):
+    """method: '' / default = the driver's saved way, or paypal / venmo / bank for this one payment."""
+    m = (method or "").lower()
+    if m not in ("paypal", "venmo", "bank") or not d:
+        return driver_payout_target(d)
+    fake = dict(d)
+    fake["payout_wallet"] = m
+
+    class _Row(dict):
+        def keys(self):
+            return list(dict.keys(self))
+    return driver_payout_target(_Row(fake))
+
+
+def parse_cents(v):
+    try:
+        return int(round(float(str(v or "").replace("$", "").replace(",", "").strip()) * 100))
+    except ValueError:
+        return None
+
+
+def drv_pay_info(o):
+    try:
+        rows = db().execute("SELECT * FROM driver_payouts WHERE order_id=? ORDER BY id", (o["id"],)).fetchall()
+    except Exception:
+        rows = []
+    paid = sum(int(r["cents"]) for r in rows if (r["status"] or "") not in PAYOUT_BAD)
+    d = db().execute("SELECT * FROM drivers WHERE id=?", (o["driver_id"],)).fetchone() if o["driver_id"] else None
+    t = driver_payout_target(d)
+    sug = drv_pay_suggest(o)
+    return {"paid_cents": paid, "paid": money(paid), "suggest_cents": sug, "suggest": money(sug),
+            "owed_cents": max(0, sug - paid), "to": t[3] if t else "", "ready": bool(t),
+            "open": any((r["status"] or "") in PAYOUT_OPEN for r in rows),
+            "rows": [{"id": r["id"], "amount": money(r["cents"]), "status": r["status"] or "",
+                      "label": PAYOUT_LABEL.get(r["status"] or "", (r["status"] or "").lower()),
+                      "error": r["error"] or "", "to": r["receiver"] or "", "by": r["created_by"] or "",
+                      "at": (r["created_at"] or "").replace("T", " ")[:16]} for r in rows]}
+
+def _payout_send(row_id):
+    """Send (or safely re-send, same PayPal-Request-Id) one payout row. Returns the row."""
+    r = db().execute("SELECT * FROM driver_payouts WHERE id=?", (row_id,)).fetchone()
+    o = db().execute("SELECT code FROM orders WHERE id=?", (r["order_id"],)).fetchone() if r["order_id"] else None
+    brand = (setting("business_name", str) or "Fleet Delivery")[:60]
+    what = ("Pay for trip " + o["code"]) if o else ("Extra pay" + ((": " + r["reason"]) if r["reason"] else ""))
+    short = (brand + " trip " + o["code"]) if o else (brand + " extra pay" + ((" - " + r["reason"]) if r["reason"] else ""))
+    wallet = "VENMO" if (r["wallet"] or "") == "VENMO" else "PAYPAL"
+    body = {"sender_batch_header": {"sender_batch_id": r["sender_id"],
+                                    "email_subject": "You have a payment from " + brand,
+                                    "email_message": what[:900] + ". Thank you!"},
+            "items": [{"recipient_type": "PHONE" if wallet == "VENMO" else "EMAIL",
+                       "amount": {"value": "%.2f" % (int(r["cents"]) / 100.0), "currency": "USD"},
+                       "receiver": r["receiver"], "note": short[:4000],
+                       "sender_item_id": r["sender_id"], "recipient_wallet": wallet}]}
+    st, j = pp_api("POST", "/v1/payments/payouts", body, request_id=r["sender_id"])
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    if st in (200, 201) and (j.get("batch_header") or {}).get("payout_batch_id"):
+        bh = j["batch_header"]
+        db().execute("UPDATE driver_payouts SET batch_id=?, status=?, error=NULL, checked_at=? WHERE id=?",
+                     (bh["payout_batch_id"], (bh.get("batch_status") or "PENDING").upper(), now, row_id))
+    elif st == 0 or st >= 500:
+        db().execute("UPDATE driver_payouts SET status='UNKNOWN', error=?, checked_at=? WHERE id=?",
+                     ("Could not hear back from PayPal. Tap Check before paying again.", now, row_id))
+    else:
+        msg = pp_err(j, "PayPal did not accept the payment.")
+        name = (j.get("name") or "") if isinstance(j, dict) else ""
+        if name == "INSUFFICIENT_FUNDS":
+            msg = "Your PayPal balance is too low to send this. Add money to PayPal and try again."
+        elif name in ("AUTHORIZATION_ERROR", "NOT_AUTHORIZED", "PERMISSION_DENIED"):
+            msg = "PayPal Payouts is not turned on for your account yet. Ask PayPal to enable Payouts."
+        db().execute("UPDATE driver_payouts SET status='ERROR', error=?, checked_at=? WHERE id=?",
+                     (msg[:300], now, row_id))
+    db().commit()
+    return db().execute("SELECT * FROM driver_payouts WHERE id=?", (row_id,)).fetchone()
+
+def _payout_check(r):
+    if r["status"] == "UNKNOWN" or (r["status"] == "SENDING" and not r["batch_id"]):
+        return _payout_send(r["id"])
+    if not r["batch_id"]:
+        return r
+    st, j = pp_api("GET", "/v1/payments/payouts/" + r["batch_id"])
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    if st == 200:
+        it = (j.get("items") or [{}])[0]
+        status = (it.get("transaction_status") or (j.get("batch_header") or {}).get("batch_status") or r["status"]).upper()
+        err = ((it.get("errors") or {}).get("message") or "") if status in PAYOUT_BAD else ""
+        db().execute("UPDATE driver_payouts SET status=?, item_id=COALESCE(?,item_id), error=?, checked_at=? WHERE id=?",
+                     (status, it.get("payout_item_id"), err[:300] or None, now, r["id"]))
+    else:
+        db().execute("UPDATE driver_payouts SET checked_at=? WHERE id=?", (now, r["id"]))
+    db().commit()
+    return db().execute("SELECT * FROM driver_payouts WHERE id=?", (r["id"],)).fetchone()
+
+def payout_sweep(force=False):
+    if not pp_enabled():
+        return
+    if not force and time.time() - _payout_last[0] < 60:
+        return
+    _payout_last[0] = time.time()
+    cut = (dt.datetime.now() - dt.timedelta(days=30)).isoformat(timespec="seconds")
+    try:
+        for r in db().execute("""SELECT * FROM driver_payouts WHERE status IN
+                                 ('SENDING','UNKNOWN','PENDING','PROCESSING','NEW','ONHOLD','UNCLAIMED')
+                                 AND COALESCE(created_at,'') >= ? ORDER BY id LIMIT 25""", (cut,)).fetchall():
+            if r["status"] in ("SENDING", "UNKNOWN"):
+                continue        # those only go again when someone taps Check
+            _payout_check(r)
+    except Exception as e:
+        print("payout sweep:", e)
+
+@app.post("/api/dispatch/driver-pay")
+def api_driver_pay():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    if b.get("op") == "check":
+        if not pp_enabled():
+            return jsonify({"ok": False, "error": "PayPal keys are not set up yet."}), 400
+        for r in db().execute("""SELECT * FROM driver_payouts WHERE order_id=? AND status IN
+                                 ('SENDING','UNKNOWN','PENDING','PROCESSING','NEW','ONHOLD','UNCLAIMED')""",
+                              (o["id"],)).fetchall():
+            _payout_check(r)
+        return jsonify({"ok": True, "pay": drv_pay_info(db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone())})
+    if o["dispatch_status"] != "delivered" or not o["driver_id"]:
+        return jsonify({"ok": False, "error": "Drivers can be paid once the trip is delivered."}), 400
+    d = db().execute("SELECT * FROM drivers WHERE id=?", (o["driver_id"],)).fetchone()
+    t = pay_target_for(d, b.get("method"))
+    if t and t[0] != "BANK" and not pp_enabled():
+        return jsonify({"ok": False, "error": "PayPal keys are not set up yet, so drivers can't be paid by PayPal or Venmo from here. Use Paid by bank instead."}), 400
+    if not t:
+        return jsonify({"ok": False, "error": (d["name"] if d else "This driver") +
+                        " has no PayPal email or Venmo phone on file. Add it under Restaurants and drivers."}), 400
+    try:
+        cents = int(round(float(str(b.get("amount", "")).replace("$", "").replace(",", "")) * 100))
+    except ValueError:
+        return jsonify({"ok": False, "error": "Enter an amount like 7.50"}), 400
+    if cents < 1 or cents > 50000:
+        return jsonify({"ok": False, "error": "Driver pay must be between $0.01 and $500."}), 400
+    info = drv_pay_info(o)
+    if info["open"]:
+        return jsonify({"ok": False, "error": "A payment for this trip is still going through. Tap Check first."}), 400
+    if info["paid_cents"] and not b.get("extra"):
+        return jsonify({"ok": False, "error": "This trip was already paid " + info["paid"] + ". Use Pay extra to send more."}), 400
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    if t[0] == "BANK":
+        ref = " ".join(str(b.get("ref") or "").split())[:60]
+        db().execute("""INSERT INTO driver_payouts(order_id,driver_id,cents,wallet,receiver,status,created_at,created_by,
+                        kind,ref) VALUES(?,?,?,?,?,'BANK_PAID',?,?,'trip',?)""",
+                     (o["id"], d["id"], cents, "BANK", t[2], now, session.get("dispatcher_name") or "Dispatch", ref or None))
+        db().commit()
+        log("driver pay", (session.get("dispatcher_name") or "Dispatch") + " recorded " + money(cents) +
+            " bank pay to " + d["name"] + " for " + o["code"])
+        fresh = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
+        return jsonify({"ok": True, "status": "BANK_PAID", "to": t[3], "amount": money(cents), "pay": drv_pay_info(fresh)})
+    cur = db().execute("""INSERT INTO driver_payouts(order_id,driver_id,cents,wallet,receiver,status,created_at,created_by)
+                          VALUES(?,?,?,?,?,'SENDING',?,?)""",
+                       (o["id"], d["id"], cents, t[0], t[2], now, session.get("dispatcher_name") or "Dispatch"))
+    pid = cur.lastrowid
+    db().execute("UPDATE driver_payouts SET sender_id=? WHERE id=?", ("FD-%s-%d" % (o["code"], pid), pid))
+    db().commit()
+    r = _payout_send(pid)
+    fresh = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
+    if r["status"] == "ERROR":
+        return jsonify({"ok": False, "error": r["error"], "pay": drv_pay_info(fresh)}), 400
+    return jsonify({"ok": True, "status": r["status"], "to": t[3], "amount": money(cents), "pay": drv_pay_info(fresh)})
+
+def extra_pay_payload(driver_id=None):
+    con = db()
+    today = dt.date.today()
+    wk = (today - dt.timedelta(days=today.weekday())).isoformat()
+    drivers = []
+    for d in con.execute("SELECT * FROM drivers ORDER BY name").fetchall():
+        t = driver_payout_target(d)
+        tot = con.execute("""SELECT COALESCE(SUM(CASE WHEN substr(created_at,1,10)>=? THEN cents END),0) wk,
+                             COALESCE(SUM(CASE WHEN substr(created_at,1,10)=? THEN cents END),0) td
+                             FROM driver_payouts WHERE driver_id=? AND COALESCE(status,'') NOT IN (%s)""" %
+                          ",".join("'%s'" % x for x in PAYOUT_BAD), (wk, today.isoformat(), d["id"])).fetchone()
+        drivers.append({"id": d["id"], "name": d["name"], "to": t[3] if t else "",
+                        "wallet": (d["payout_wallet"] or "paypal"), "ready": bool(t),
+                        "week": money(tot["wk"]), "today": money(tot["td"])})
+    q = """SELECT p.*, d.name driver, o.code FROM driver_payouts p JOIN drivers d ON d.id=p.driver_id
+           LEFT JOIN orders o ON o.id=p.order_id"""
+    args = ()
+    if driver_id:
+        q += " WHERE p.driver_id=?"
+        args = (driver_id,)
+    rows = con.execute(q + " ORDER BY p.id DESC LIMIT 100", args).fetchall()
+    hist = [{"id": r["id"], "driver": r["driver"], "driver_id": r["driver_id"], "amount": money(r["cents"]),
+             "kind": "Trip " + r["code"] if r["code"] else "Extra pay",
+             "reason": r["reason"] or "", "ref": r["ref"] or "", "to": r["receiver"] or r["wallet"] or "",
+             "status": r["status"] or "", "open": (r["status"] or "") in PAYOUT_OPEN,
+             "label": PAYOUT_LABEL.get(r["status"] or "", (r["status"] or "").lower()), "error": r["error"] or "",
+             "by": r["created_by"] or "", "at": (r["created_at"] or "").replace("T", " ")[:16]} for r in rows]
+    return {"ok": True, "paypal_ready": pp_enabled(), "drivers": drivers, "history": hist}
+
+
+@app.get("/dispatch/driver-pay")
+def dispatch_driver_pay_page():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    return render_template("dispatch_driver_pay.html")
+
+
+@app.post("/api/dispatch/driver-extra")
+def api_driver_extra():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    op = b.get("op") or "list"
+    who = session.get("dispatcher_name") or "Dispatch"
+    if op == "list":
+        return jsonify(extra_pay_payload(b.get("driver_id") or None))
+    if op == "check":
+        r = db().execute("SELECT * FROM driver_payouts WHERE id=?", (b.get("id"),)).fetchone()
+        if not r:
+            return jsonify({"ok": False, "error": "That payment is not on file."}), 404
+        if (r["status"] or "") in PAYOUT_OPEN and pp_enabled():
+            _payout_check(r)
+        return jsonify(extra_pay_payload(b.get("driver_id") or None))
+    if op != "pay":
+        return jsonify({"ok": False, "error": "Unknown action."}), 400
+    d = db().execute("SELECT * FROM drivers WHERE id=?", (b.get("driver_id"),)).fetchone()
+    if not d:
+        return jsonify({"ok": False, "error": "Pick a driver."}), 400
+    cents = parse_cents(b.get("amount"))
+    if cents is None:
+        return jsonify({"ok": False, "error": "Enter an amount like 25.00"}), 400
+    if cents < 1 or cents > 50000:
+        return jsonify({"ok": False, "error": "Extra pay must be between $0.01 and $500."}), 400
+    reason = " ".join(str(b.get("reason") or "").split())[:120]
+    if not reason:
+        return jsonify({"ok": False, "error": "Add a reason, like: Friday bonus or gas money."}), 400
+    t = pay_target_for(d, b.get("method"))
+    if not t:
+        return jsonify({"ok": False, "error": d["name"] + " has no PayPal email or Venmo phone on file. "
+                        "Add it under Restaurants and drivers, or pick Bank transfer."}), 400
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    if t[0] == "BANK":
+        ref = " ".join(str(b.get("ref") or "").split())[:60]
+        db().execute("""INSERT INTO driver_payouts(order_id,driver_id,cents,wallet,receiver,status,created_at,created_by,
+                        kind,reason,ref) VALUES(0,?,?,'BANK',?,'BANK_PAID',?,?,'extra',?,?)""",
+                     (d["id"], cents, t[2], now, who, reason, ref or None))
+        db().commit()
+        log("driver pay", who + " recorded " + money(cents) + " extra bank pay to " + d["name"] + " (" + reason + ")")
+        out = extra_pay_payload(b.get("driver_id"))
+        out.update({"status": "BANK_PAID", "amount": money(cents), "to": t[3]})
+        return jsonify(out)
+    if not pp_enabled():
+        return jsonify({"ok": False, "error": "PayPal keys are not set up yet. Pick Bank transfer to record a bank payment."}), 400
+    if db().execute("""SELECT 1 FROM driver_payouts WHERE driver_id=? AND kind='extra' AND status IN
+                       ('SENDING','UNKNOWN') LIMIT 1""", (d["id"],)).fetchone():
+        return jsonify({"ok": False, "error": "An extra payment to " + d["name"] + " is not confirmed yet. Tap Check on it first."}), 400
+    cur = db().execute("""INSERT INTO driver_payouts(order_id,driver_id,cents,wallet,receiver,status,created_at,created_by,
+                          kind,reason) VALUES(0,?,?,?,?,'SENDING',?,?,'extra',?)""",
+                       (d["id"], cents, t[0], t[2], now, who, reason))
+    pid = cur.lastrowid
+    db().execute("UPDATE driver_payouts SET sender_id=? WHERE id=?", ("FD-X-%d" % pid, pid))
+    db().commit()
+    r = _payout_send(pid)
+    log("driver pay", who + " sent " + money(cents) + " extra pay to " + d["name"] + " (" + reason + ")")
+    out = extra_pay_payload(b.get("driver_id"))
+    if r["status"] == "ERROR":
+        out.update({"ok": False, "error": r["error"]})
+        return jsonify(out), 400
+    out.update({"status": r["status"], "amount": money(cents), "to": t[3]})
+    return jsonify(out)
+
+
 @app.get("/api/dispatch/board")
 def api_board():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     auto_assign()   # safety net: anything an earlier event missed is placed on the next refresh
     pp_sweep()      # charge delivered PayPal/Venmo orders once the tip window is over
+    payout_sweep()  # update driver pay that is still going through PayPal
     purge_cards()
     try:
         purge_old_orders()
@@ -2929,6 +3311,7 @@ def api_board():
         "rest_chat_latest": rest_chat_unread_for_dispatch()[1],
         "orders": [order_dict(o) for o in live],
         "completed": [order_dict(o) for o in done],
+        "owner": is_owner(),
         "done_day": done_day,
         "chat_unread": sum(unread.values()),
         "chat_latest": ({"id": newest["id"], "driver_id": newest["driver_id"],
@@ -3038,7 +3421,15 @@ def api_order_status():
     if session.get("driver_id") and not dispatcher_required() and not session.get("restaurant_id"):
         if o["driver_id"] != session["driver_id"]:
             return jsonify({"ok": False, "error": "not your order"}), 403
+    if o["dispatch_status"] == "delivered":
+        if not session.get("dispatcher_id"):
+            return jsonify({"ok": False, "error": "This order was already delivered."}), 403
+        lk = delivered_lock(o)
+        if lk:
+            return lk
     k = data.get("kitchen_status")
+    if k and dispatcher_required():
+        db().execute("UPDATE orders SET kitchen_go=1 WHERE id=?", (o["id"],))
     d = data.get("dispatch_status")
     if k in ("pending", "preparing", "ready") and o["dispatch_status"] == "awaiting_payment":
         return jsonify({"ok": False, "error": "Mark the card paid first. The restaurant gets this "
@@ -3086,6 +3477,9 @@ def api_mark_paid():
     o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
     ref = (data.get("ref") or "").strip()
     if o["payment_status"] == "paid":
         bal = balance_cents(o)
@@ -3095,6 +3489,10 @@ def api_mark_paid():
             return jsonify({"ok": True, "balance_recorded": money(bal)})
         return jsonify({"ok": True, "already": True})
     last4 = "".join(ch for ch in str(data.get("last4") or "") if ch.isdigit())[-4:]
+    if data.get("method") == "house":
+        acct = (data.get("account") or "").strip()[:60]
+        mark_paid(o, method="house_account", ref=("House account " + acct + ((" ref " + ref) if ref else "")).strip()[:80])
+        return jsonify({"ok": True})
     if is_cash(o):
         method = "cash"
     elif data.get("method") == "card_keyed" or last4:
@@ -3103,6 +3501,36 @@ def api_mark_paid():
         method = "recorded"
     note = ("card ending " + last4 if last4 else "") + ((" ref " + ref) if ref else "")
     mark_paid(o, method=method, ref=note.strip()[:80])
+    return jsonify({"ok": True})
+
+@app.post("/api/order/send-kitchen")
+def api_send_kitchen():
+    """Dispatch releases a paid (or cash) order to the kitchen."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
+    if not o:
+        return jsonify({"ok": False}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
+    if o["dispatch_status"] in ("cancelled", "delivered"):
+        return jsonify({"ok": False, "error": "This order is closed."}), 400
+    if o["dispatch_status"] == "awaiting_payment":
+        return jsonify({"ok": False, "error": "Not paid yet. Mark it paid, use House account, or switch it to Cash first."}), 400
+    if o["dispatch_status"] == "scheduled":
+        return jsonify({"ok": False, "error": "This is a future order. It comes to the board for sending at its release time."}), 400
+    if not o["address_ok"]:
+        return jsonify({"ok": False, "error": "Approve the address first."}), 400
+    db().execute("UPDATE orders SET kitchen_go=1 WHERE id=?", (o["id"],))
+    if o["kitchen_status"] == "waiting":
+        db().execute("""UPDATE orders SET kitchen_status='pending',
+                        hold_reason=CASE WHEN dispatch_status IN ('held','queued') THEN 'waiting on kitchen' ELSE hold_reason END
+                        WHERE id=?""", (o["id"],))
+    db().commit()
+    log("order", o["code"] + " sent to the kitchen by " + (session.get("dispatcher_name") or "dispatch"))
+    auto_assign()
     return jsonify({"ok": True})
 
 @app.post("/api/order/cash")
@@ -3114,6 +3542,9 @@ def api_order_cash():
     o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
     if o["payment_status"] == "paid" and not is_cash(o):
         return jsonify({"ok": False, "error": "That order is already paid by card."}), 400
     if data.get("cash"):
@@ -3144,6 +3575,9 @@ def api_refund():
     o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
     paid = int(o["paid_cents"] or 0)
     already = int(o["refunded_cents"] or 0)
     left = paid - already
@@ -3248,6 +3682,9 @@ def api_timer():
     o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
     current = o["prep_minutes"] or 15
     if data.get("minutes") not in (None, ""):
         mins = int(float(data["minutes"]))
@@ -3302,6 +3739,9 @@ def api_order_edit():
     o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
     if "ref" in data:
         db().execute("UPDATE orders SET ref_code=? WHERE id=?", (clean_ref(data.get("ref")), o["id"]))
     if "token" in data:
@@ -4512,11 +4952,15 @@ def dispatcher_avail_payload():
                   "start": s["start_time"], "end": s["end_time"],
                   "label": _ampm(s["start_time"]) + " - " + _ampm(s["end_time"]) +
                            (" (overnight)" if (_hm(s["end_time"]) or 0) <= (_hm(s["start_time"]) or 0) else ""),
-                  "note": s["note"] or "", "on_now": _disp_slot_on(s, nowdt),
+                  "note": s["note"] or "",
+                  "status": (s["status"] or "approved"), "decided_by": s["decided_by"] or "",
+                  "on_now": (s["status"] or "approved") == "approved" and _disp_slot_on(s, nowdt),
                   "regions": sorted(slot_regions(s)),
                   "region_label": (region_names(slot_regions(s)) if slot_regions(s) else "")} for s in rows]
         mins = 0
         for s in rows:
+            if (s["status"] or "approved") != "approved":
+                continue
             a, b = _hm(s["start_time"]), _hm(s["end_time"])
             if a is not None and b is not None:
                 mins += (b - a) if b > a else (1440 - a + b)
@@ -4524,7 +4968,10 @@ def dispatcher_avail_payload():
         out.append({"id": d["id"], "name": d["name"], "me": d["id"] == me, "slots": slots, "phone": ph,
                     "phone_label": ("(%s) %s-%s" % (ph[:3], ph[3:6], ph[6:])) if len(ph) == 10 else ph,
                     "on_now": any(x["on_now"] for x in slots), "hours": round(mins / 60, 1)})
-    return {"ok": True, "me": me, "dispatchers": out}
+    owner = is_owner(me)
+    pend = sum(1 for d in out for x in d["slots"] if x["status"] == "pending")
+    return {"ok": True, "me": me, "owner": owner, "pending": pend,
+            "dispatchers": out if owner else [d for d in out if d["me"]] + [d for d in out if not d["me"]]}
 
 
 @app.get("/api/dispatch/dispatcher-avail")
@@ -4541,7 +4988,25 @@ def api_dispatcher_avail_edit():
     b = request.get_json(force=True) or {}
     con = db()
     who = session.get("dispatcher_name") or "dispatch"
+    me = session.get("dispatcher_id")
+    owner = is_owner(me)
+    if b.get("op") == "decide":
+        if not owner:
+            return jsonify({"ok": False, "error": "Only an owner can approve dispatcher schedules."}), 403
+        s = con.execute("SELECT * FROM dispatcher_availability WHERE id=?", (b.get("id"),)).fetchone()
+        if not s:
+            return jsonify({"ok": False, "error": "That time is already gone."}), 404
+        dec = "approved" if b.get("decision") == "approve" else "denied"
+        con.execute("UPDATE dispatcher_availability SET status=?, decided_by=?, decided_at=? WHERE id=?",
+                    (dec, who, now(), s["id"]))
+        nm = con.execute("SELECT name FROM dispatchers WHERE id=?", (s["dispatcher_id"],)).fetchone()
+        log("availability", who + " " + dec + " " + (nm["name"] if nm else "a dispatcher") + "'s " +
+            DOW_NAMES[s["dow"]] + " " + s["start_time"] + "-" + s["end_time"])
+        con.commit()
+        return jsonify(dispatcher_avail_payload())
     if b.get("op") == "phone":
+        if not owner and str(b.get("dispatcher_id")) != str(me):
+            return jsonify({"ok": False, "error": "You can only change your own phone number."}), 403
         d = con.execute("SELECT id, name FROM dispatchers WHERE id=?", (b.get("dispatcher_id"),)).fetchone()
         if not d:
             return jsonify({"ok": False, "error": "Pick a dispatcher."}), 400
@@ -4558,13 +5023,15 @@ def api_dispatcher_avail_edit():
         s = con.execute("SELECT * FROM dispatcher_availability WHERE id=?", (b.get("id"),)).fetchone()
         if not s:
             return jsonify({"ok": False, "error": "That time is already gone."}), 404
+        if not owner and s["dispatcher_id"] != me:
+            return jsonify({"ok": False, "error": "You can only remove your own times."}), 403
         con.execute("DELETE FROM dispatcher_availability WHERE id=?", (s["id"],))
         nm = con.execute("SELECT name FROM dispatchers WHERE id=?", (s["dispatcher_id"],)).fetchone()
         log("availability", who + " removed " + (nm["name"] if nm else "a dispatcher") + "'s " +
             DOW_NAMES[s["dow"]] + " " + s["start_time"] + "-" + s["end_time"])
         con.commit()
         return jsonify(dispatcher_avail_payload())
-    did = b.get("dispatcher_id") or session.get("dispatcher_id")
+    did = (b.get("dispatcher_id") or me) if owner else me
     d = con.execute("SELECT id, name FROM dispatchers WHERE id=?", (did,)).fetchone()
     if not d:
         return jsonify({"ok": False, "error": "Pick a dispatcher."}), 400
@@ -4584,14 +5051,16 @@ def api_dispatcher_avail_edit():
                           AND start_time=? AND end_time=?""", (d["id"], dow, st, en)).fetchone():
             continue
         con.execute("""INSERT INTO dispatcher_availability(dispatcher_id,dow,start_time,end_time,note,
-                       created_by,created_at,region_ids) VALUES(?,?,?,?,?,?,?,?)""",
-                    (d["id"], dow, st, en, note, who, now(), clean_region_ids(b.get("regions"))))
+                       created_by,created_at,region_ids,status,decided_by,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                    (d["id"], dow, st, en, note, who, now(), clean_region_ids(b.get("regions")),
+                     "approved" if owner else "pending", who if owner else None, now() if owner else None))
         added += 1
     con.commit()
     log("availability", who + " set " + d["name"] + " available " + ", ".join(DOW_NAMES[x] for x in days) +
         " " + st + "-" + en)
     out = dispatcher_avail_payload()
     out["added"] = added
+    out["pending_note"] = "" if owner else "Sent to the owner for approval."
     return jsonify(out)
 
 
@@ -4738,6 +5207,15 @@ def api_regions_edit():
         con.execute("""UPDATE orders SET region_id=? WHERE restaurant_id=? AND COALESCE(pickup_address,'')=''
                        AND dispatch_status NOT IN ('delivered','cancelled')""", (rid, r["id"]))
         log("region", who + " put " + r["name"] + " in " + region_names({rid} if rid else set()).replace("All regions", "no region"))
+    elif op == "set_self":
+        me = session.get("dispatcher_id")
+        if not me:
+            return jsonify({"ok": False, "error": "Sign in again."}), 403
+        chosen = ids(b.get("regions"))
+        con.execute("DELETE FROM dispatcher_regions WHERE dispatcher_id=?", (me,))
+        for x in chosen:
+            con.execute("INSERT INTO dispatcher_regions(dispatcher_id,region_id) VALUES(?,?)", (me, x))
+        log("region", who + " picked " + region_names(chosen) + " for themselves")
     elif op in ("set_driver", "set_dispatcher"):
         table, col = ("driver_regions", "driver_id") if op == "set_driver" else ("dispatcher_regions", "dispatcher_id")
         src = "drivers" if op == "set_driver" else "dispatchers"
@@ -4757,6 +5235,13 @@ def api_regions_edit():
     except Exception as e:
         print("auto assign after region change skipped:", e)
     return jsonify(regions_payload())
+
+
+@app.get("/dispatch/dispatcher-schedule")
+def dispatcher_schedule_page():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    return render_template("dispatch_dispatcher_schedule.html", days=DOW_NAMES)
 
 
 @app.get("/dispatch/schedule")
@@ -4853,6 +5338,9 @@ def api_hold():
     o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
     had = o["driver_id"]
     if had and o["dispatch_status"] == "enroute":
         return jsonify({"ok": False, "error":
@@ -4911,6 +5399,9 @@ def api_send_to_driver():
     o = db().execute("SELECT * FROM orders WHERE id=?", (b["order_id"],)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
     db().execute("""UPDATE orders SET dispatch_status='queued', hold_reason=NULL WHERE id=?""",
                  (o["id"],))
     db().commit()
@@ -4951,6 +5442,9 @@ def api_reopen():
     o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
     keep = bool(data.get("keep_driver")) and o["driver_id"]
     if keep:
         seq = db().execute("""SELECT COALESCE(MAX(stack_seq),0)+1 s FROM orders WHERE driver_id=?
@@ -4985,6 +5479,9 @@ def api_manual_order():
     o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
     if not o:
         return jsonify({"ok": False, "error": "Order not found."}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
     if o["dispatch_status"] in ("delivered", "cancelled"):
         return jsonify({"ok": False, "error": "That order is already finished."}), 400
     if o["dispatch_status"] == "awaiting_payment" or o["kitchen_status"] == "waiting":
@@ -5045,6 +5542,15 @@ def dispatch_restaurants():
                       int(request.form.get("prep_default") or 15), request.form.get("phone", ""), rid))
         db().execute("UPDATE restaurants SET uses_app=? WHERE id=?",
                      (1 if request.form.get("uses_app") else 0, rid))
+        if "region_id" in request.form:
+            try:
+                _rg = int(request.form.get("region_id") or 0)
+            except ValueError:
+                _rg = -1
+            if _rg == 0 or _rg in {g["id"] for g in all_regions()}:
+                db().execute("UPDATE restaurants SET region_id=? WHERE id=?", (_rg, rid))
+                db().execute("""UPDATE orders SET region_id=? WHERE restaurant_id=? AND COALESCE(pickup_address,'')=''
+                                AND dispatch_status NOT IN ('delivered','cancelled')""", (_rg, rid))
         name = (request.form.get("name") or "").strip()
         if name:
             db().execute("UPDATE restaurants SET name=? WHERE id=?", (name, rid))
@@ -5062,7 +5568,9 @@ def dispatch_restaurants():
         saved = True
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
     data = [{"r": r, "hours": json.loads(r["hours"]), "open": is_open(r)} for r in rs]
-    return render_template("dispatch_restaurants.html", data=data, week=WEEK, saved=saved)
+    stamp_regions()
+    return render_template("dispatch_restaurants.html", data=data, week=WEEK, saved=saved,
+                           regions=[{"id": g["id"], "name": g["name"]} for g in all_regions()])
 
 @app.route("/dispatch/restaurants/delete", methods=["POST"])
 def dispatch_delete_restaurant():
@@ -5173,6 +5681,21 @@ def dispatch_settings():
                     db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, str(_v)))
                 else:
                     FUTURE_LEAD_ERR.append(2)
+        for _k in ("driver_pay_fee_pct", "driver_pay_tip_pct"):
+            if _k in request.form:
+                try:
+                    _v = int(request.form[_k] or 0)
+                except ValueError:
+                    _v = -1
+                if 0 <= _v <= 100:
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, str(_v)))
+        if "driver_pay_flat" in request.form:
+            try:
+                _v = int(round(float((request.form["driver_pay_flat"] or "0").replace("$", "")) * 100))
+            except ValueError:
+                _v = -1
+            if 0 <= _v <= 50000:
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('driver_pay_flat_cents',?)", (str(_v),))
         if "sched_lead_min" in request.form:
             try:
                 _v = int(request.form["sched_lead_min"] or 0)
@@ -5191,7 +5714,7 @@ def dispatch_settings():
                 db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('future_lead_min',?)", (str(lm),))
             else:
                 FUTURE_LEAD_ERR.append(1)
-        for key in ("base_fee_cents", "base_miles", "per_mile_cents", "tax_rate_bp", "auto_assign"):
+        for key in ("base_fee_cents", "base_miles", "per_mile_cents", "tax_rate_bp", "auto_assign", "kitchen_hold"):
             if key in request.form:
                 db().execute("UPDATE settings SET value=? WHERE key=?", (request.form[key], key))
         errs = []
@@ -5710,7 +6233,9 @@ def api_catalog():
                       "phone": r["phone"], "prep_default": r["prep_default"],
                       "paused": r["closed_override"], "open_24": r["open_24"], "items": items})
     drivers = [{"id": d["id"], "name": d["name"], "phone": d["phone"], "pin": d["pin"],
-                "status": d["status"],
+                "status": d["status"], "payout_wallet": d["payout_wallet"] or "paypal",
+                "bank_name": d["bank_name"] or "", "bank_last4": d["bank_last4"] or "",
+                "payout_email": d["payout_email"] or "", "payout_phone": d["payout_phone"] or "",
                 "active_orders": db().execute("""SELECT COUNT(*) c FROM orders WHERE driver_id=?
                                    AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
                                               (d["id"],)).fetchone()["c"]}
@@ -5944,6 +6469,24 @@ def api_driver_crud():
         if phone and db().execute("SELECT 1 FROM drivers WHERE phone=? AND id!=?",
                                   (phone, b["driver_id"])).fetchone():
             return jsonify({"ok": False, "error": "Another driver already uses that phone."}), 400
+        if "payout_wallet" in b:
+            w = (b.get("payout_wallet") or "").lower()
+            w = w if w in ("venmo", "bank") else "paypal"
+            bn = " ".join(str(b.get("bank_name") or "").split())[:40]
+            l4 = digits(b.get("bank_last4") or "")
+            if l4 and len(l4) != 4:
+                return jsonify({"ok": False, "error": "For the bank, enter only the last 4 digits of the account."}), 400
+            db().execute("UPDATE drivers SET bank_name=?, bank_last4=? WHERE id=?", (bn or None, l4 or None, b["driver_id"]))
+            em = (b.get("payout_email") or "").strip()[:120]
+            vp = digits(b.get("payout_phone") or "")
+            if len(vp) == 11 and vp.startswith("1"):
+                vp = vp[1:]
+            if em and ("@" not in em or "." not in em.split("@")[-1]):
+                return jsonify({"ok": False, "error": "That PayPal email doesn't look right."}), 400
+            if vp and len(vp) != 10:
+                return jsonify({"ok": False, "error": "The Venmo phone needs 10 digits."}), 400
+            db().execute("UPDATE drivers SET payout_wallet=?, payout_email=?, payout_phone=? WHERE id=?",
+                         (w, em or None, vp or None, b["driver_id"]))
         db().execute("""UPDATE drivers SET name=COALESCE(?,name), phone=COALESCE(?,phone),
                         pin=COALESCE(?,pin) WHERE id=?""",
                      (b.get("name"), phone, (b.get("pin") or "").strip() or None, b["driver_id"]))

@@ -460,3 +460,14 @@ release a hold, and refund (refunds go back to the customer's Venmo, PayPal or c
 Dispatch > Restaurants > "Uses the restaurant app" is off by default. While it is off, orders do not
 go to that restaurant's tablet. Dispatch taps "Ordering in process", places the order on the
 restaurant's website or by phone, then taps "Order placed + start timer".
+
+
+## Paying drivers after each trip (PayPal Payouts)
+
+1. In Restaurants and drivers, give each driver a PayPal email, or pick Venmo and add their Venmo phone (blank uses the driver's own phone).
+2. On a delivered order under Completed orders, tap Pay driver. It starts at the delivery fee plus the tip. Change the amount if you need to, then confirm.
+3. The money comes out of your PayPal balance. Status shows sending, paid, or waiting for driver to claim (no PayPal account on that email yet).
+4. If a tip comes in after you paid, Pay extra fills in the difference.
+5. Settings > Driver pay per trip lets you change the split later (fee %, tip %, flat amount). Defaults: 100% of the fee, 100% of the tip, $0 flat.
+
+Payouts works in sandbox right away. For live money, PayPal has to turn on Payouts for your business account first.

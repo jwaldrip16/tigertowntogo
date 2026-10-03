@@ -116,7 +116,17 @@ async function load(){
     '<div class="row"><input id="dn'+d.id+'" value="'+d.name+'">'+
     '<input id="dp'+d.id+'" value="'+d.phone+'" placeholder="Phone">'+
     '<input id="dk'+d.id+'" value="'+d.pin+'" placeholder="Password / PIN">'+
-    '<button class="btn tiny" onclick="saveDriver('+d.id+')">Save</button></div></div>').join('');
+    '<button class="btn tiny" onclick="saveDriver('+d.id+')">Save</button></div>'+
+    '<div class="row"><span class="muted small">Pay this driver by</span>'+
+    '<select id="dw'+d.id+'"><option value="paypal"'+(d.payout_wallet!=='venmo'&&d.payout_wallet!=='bank'?' selected':'')+'>PayPal</option>'+
+    '<option value="venmo"'+(d.payout_wallet==='venmo'?' selected':'')+'>Venmo</option>'+
+    '<option value="bank"'+(d.payout_wallet==='bank'?' selected':'')+'>Bank transfer</option></select>'+
+    '<input id="de'+d.id+'" value="'+(d.payout_email||'').replace(/"/g,'')+'" placeholder="PayPal email">'+
+    '<input id="dv'+d.id+'" value="'+(d.payout_phone||'')+'" placeholder="Venmo phone (blank = driver phone)"></div>'+
+    '<div class="row"><span class="muted small">Bank (for your records)</span>'+
+    '<input id="dbn'+d.id+'" value="'+(d.bank_name||'').replace(/"/g,'')+'" placeholder="Bank name, like Regions" style="max-width:180px">'+
+    '<input id="dbl'+d.id+'" value="'+(d.bank_last4||'')+'" placeholder="Last 4 of account" maxlength="4" style="max-width:130px">'+
+    '<span class="muted small">Only the last 4. Never save full account or routing numbers here.</span></div></div>').join('');
 }
 
 async function addRest(){
@@ -180,7 +190,12 @@ async function addDriver(){
 async function saveDriver(id){
   const res = await jpost('/api/dispatch/driver', {op:'update', driver_id:id,
     name:document.getElementById('dn'+id).value, phone:document.getElementById('dp'+id).value,
-    pin:document.getElementById('dk'+id).value});
+    pin:document.getElementById('dk'+id).value,
+    payout_wallet:document.getElementById('dw'+id).value,
+    payout_email:document.getElementById('de'+id).value,
+    payout_phone:document.getElementById('dv'+id).value,
+    bank_name:document.getElementById('dbn'+id).value,
+    bank_last4:document.getElementById('dbl'+id).value});
   if(!res.ok) alert(res.error); load();
 }
 async function delDriver(id, name){

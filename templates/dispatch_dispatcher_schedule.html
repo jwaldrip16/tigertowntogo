@@ -1,0 +1,111 @@
+{% extends "base.html" %}{% block body %}
+<div class="head">
+  <h1>Dispatcher schedule</h1>
+  <div><a class="btn small" href="/dispatch">Board</a>
+    <a class="btn small" href="/dispatch/schedule">Driver schedule</a>
+    <a class="btn small" href="/dispatch/account">Dispatchers</a></div>
+</div>
+
+<p class="muted small">When each dispatcher can work. These repeat every week. An end time earlier than the
+start time runs past midnight. Times a dispatcher adds wait for an owner to approve them; times an owner adds are approved right away.
+Only approved times count.</p>
+<div class="row"><span class="pill amber" id="daPend">0 waiting</span>
+  <span class="muted small" id="daWhoNote"></span></div>
+<div class="panel dispav">
+  <div class="row">
+    <select id="daWho" style="max-width:200px"></select>
+    <input type="time" id="daStart" value="09:00" style="max-width:130px"> to
+    <input type="time" id="daEnd" value="17:00" style="max-width:130px">
+  </div>
+  <div class="row dadays">
+    {% for d in days %}<label class="dadays-l"><input type="checkbox" class="daDay" value="{{ loop.index0 }}"> {{ d }}</label>{% endfor %}
+    <button class="btn tiny" type="button" onclick="daPick([0,1,2,3,4])">Weekdays</button>
+    <button class="btn tiny" type="button" onclick="daPick([5,6])">Weekend</button>
+    <button class="btn tiny" type="button" onclick="daPick([0,1,2,3,4,5,6])">Every day</button>
+  </div>
+  <div class="row">
+    <span id="daRg"></span>
+  </div>
+  <div class="row">
+    <input id="daNote" maxlength="80" placeholder="Note (optional), like: phones only">
+    <button class="btn primary small" type="button" onclick="daAdd()">Add availability</button>
+  </div>
+</div>
+<div id="daList"></div>
+{% endblock %}
+{% block scripts %}<script src="/static/regionpick.js"></script>
+<script>
+const DAYS = {{ days|tojson }};
+// ---- dispatcher availability
+function daEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function daPick(list){ document.querySelectorAll('.daDay').forEach(b=>{ b.checked = list.includes(+b.value); }); }
+function daPill(x){
+  const c = x.status==='approved' ? (x.on_now?'green':'grey') : x.status==='denied' ? 'red' : 'amber';
+  return c;
+}
+let DA_OWNER = false;
+function daDraw(res){
+  if(!res || !res.ok) return;
+  DA_OWNER = !!res.owner;
+  document.getElementById('daPend').textContent = res.pending + ' waiting' + (res.owner ? ' on you' : ' on the owner');
+  document.getElementById('daWhoNote').textContent = res.owner
+    ? 'You are an owner: you can add times for anyone and approve or deny requests.'
+    : 'You can send your own times. The owner approves them.';
+  const sel = document.getElementById('daWho'), keep = sel.value;
+  sel.style.display = res.owner ? '' : 'none';
+  sel.innerHTML = res.dispatchers.map(d=>'<option value="'+d.id+'">'+daEsc(d.name)+(d.me?' (you)':'')+'</option>').join('');
+  sel.value = keep || String(res.me || (res.dispatchers[0]||{}).id || '');
+  document.getElementById('daList').innerHTML = res.dispatchers.map(d=>{
+    const byDay = DAYS.map((n,i)=>{
+      const s = d.slots.filter(x=>x.dow===i);
+      return '<tr><td class="daday">'+n+'</td><td>'+(s.length ? s.map(x=>
+        '<span class="pill '+daPill(x)+' daslot">'+x.label+(x.region_label?' &middot; '+daEsc(x.region_label):'')+(x.note?' &middot; '+daEsc(x.note):'')+
+        (x.status!=='approved' ? ' &middot; '+x.status : '')+
+        ((DA_OWNER || d.me) ? ' <button class="linkx" title="Remove" onclick="daDel('+x.id+')">&times;</button>' : '')+'</span>'+
+        (DA_OWNER && x.status!=='approved' ? ' <button class="btn tiny primary" onclick="daDecide('+x.id+',\'approve\')">Approve</button>' : '')+
+        (DA_OWNER && x.status==='pending' ? '<button class="btn tiny danger" onclick="daDecide('+x.id+',\'deny\')">Deny</button>' : '')).join(' ')
+        : '<span class="muted small">Not available</span>')+'</td></tr>';
+    }).join('');
+    return '<div class="panel"><div class="row"><strong>'+daEsc(d.name)+(d.me?' (you)':'')+'</strong>'+
+      '<span class="pill '+(d.on_now?'green':'grey')+'">'+(d.on_now?'Available now':'Not on now')+'</span>'+
+      '<span class="muted small">'+d.hours+' hrs a week</span></div>'+
+      ((DA_OWNER || d.me) ? '<div class="row daphone">' : '<div class="row daphone" style="display:none">')+(d.phone ? '<a class="btn tiny" href="tel:'+d.phone+'">Call '+daEsc(d.phone_label)+'</a>' : '<span class="muted small">No phone number yet</span>')+
+      '<input type="tel" id="daPh'+d.id+'" value="'+daEsc(d.phone_label)+'" placeholder="334-555-0100" style="max-width:160px">'+
+      '<button class="btn tiny" onclick="daPhone('+d.id+')">Save phone</button></div>'+
+      '<table class="datable">'+byDay+'</table></div>';
+  }).join('');
+}
+loadRegions().then(()=>{ const s = document.getElementById('daRg'); if(s) s.innerHTML = regionBoxes('daR', []); });
+async function daLoad(){
+  const a = document.activeElement;
+  if (a && a.id && a.id.startsWith('daPh')) return;
+  daDraw(await jget('/api/dispatch/dispatcher-avail'));
+}
+async function daAdd(){
+  const days = [...document.querySelectorAll('.daDay:checked')].map(b=>+b.value);
+  const res = await jpost('/api/dispatch/dispatcher-avail', {op:'add', dispatcher_id: document.getElementById('daWho').value,
+    days: days, start: document.getElementById('daStart').value, end: document.getElementById('daEnd').value,
+    note: document.getElementById('daNote').value, regions: regionVals('daR')});
+  if(!res.ok){ alert(res.error || 'That did not save.'); return; }
+  if(res.pending_note) alert(res.pending_note);
+  document.getElementById('daNote').value = ''; daPick([]);
+  document.querySelectorAll('.daR').forEach(b=>b.checked=false); daDraw(res);
+}
+async function daPhone(id){
+  const res = await jpost('/api/dispatch/dispatcher-avail', {op:'phone', dispatcher_id:id, phone: document.getElementById('daPh'+id).value});
+  if(!res.ok){ alert(res.error || 'That did not save.'); return; }
+  daDraw(res);
+}
+async function daDel(id){
+  if(!confirm('Remove this time?')) return;
+  const res = await jpost('/api/dispatch/dispatcher-avail', {op:'delete', id:id});
+  if(!res.ok){ alert(res.error || 'That did not delete.'); return; }
+  daDraw(res);
+}
+daLoad(); setInterval(daLoad, 60000);
+async function daDecide(id, decision){
+  const res = await jpost('/api/dispatch/dispatcher-avail', {op:'decide', id:id, decision:decision});
+  if(!res.ok){ alert(res.error || 'That did not save.'); return; }
+  daDraw(res);
+}
+</script>{% endblock %}
