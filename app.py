@@ -753,7 +753,8 @@ def on_shift_drivers():
     waited longest since their last one."""
     return db().execute("""
         SELECT d.*, (SELECT COUNT(*) FROM orders o
-                     WHERE o.driver_id=d.id AND o.dispatch_status IN ('assigned','received','at_restaurant','enroute')) AS load
+                     WHERE o.driver_id=d.id
+                       AND o.dispatch_status NOT IN ('delivered','cancelled')) AS load
         FROM drivers d WHERE d.status='online'
         ORDER BY load ASC,
                  MAX(COALESCE(d.last_completed_at,''), COALESCE(d.last_assigned_at,''),
@@ -897,7 +898,44 @@ def auto_assign():
                      "Order " + o["code"] + " assigned to you (stop #" + str(seq) + ").", now()))
         log("assign", o["code"] + " -> " + d["name"])
         con.commit()
+    rebalance_stacks()
     recompute_queue()
+
+
+def rebalance_stacks():
+    """A second order stacked on a busy driver moves to a free driver once one is on shift.
+    Only orders the driver has not tapped Received on yet, never one a driver placed himself,
+    so nothing already in someone's hands gets pulled away."""
+    con = db()
+    moved = set()
+    while True:
+        free = available_drivers()
+        if not free:
+            break
+        o = con.execute("""SELECT o.* FROM orders o
+                           WHERE o.dispatch_status='assigned' AND o.driver_id IS NOT NULL
+                             AND COALESCE(o.placed_by,'') != 'driver'
+                             AND EXISTS (SELECT 1 FROM orders x
+                                         WHERE x.driver_id=o.driver_id AND x.id!=o.id
+                                           AND x.dispatch_status NOT IN ('delivered','cancelled')
+                                           AND (COALESCE(x.stack_seq,0) < COALESCE(o.stack_seq,0)
+                                                OR (COALESCE(x.stack_seq,0) = COALESCE(o.stack_seq,0) AND x.id < o.id)))
+                           ORDER BY o.created_at ASC LIMIT 1""").fetchone()
+        if not o or o["id"] in moved:
+            break
+        moved.add(o["id"])
+        d = free[0]
+        old = con.execute("SELECT id, name FROM drivers WHERE id=?", (o["driver_id"],)).fetchone()
+        con.execute("""UPDATE orders SET driver_id=?, dispatch_status='assigned', hold_reason=NULL,
+                       stack_seq=1 WHERE id=?""", (d["id"], o["id"]))
+        con.execute("UPDATE drivers SET last_assigned_at=? WHERE id=?", (now(), d["id"]))
+        con.execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                    (d["id"], "system", "Order " + o["code"] + " assigned to you (stop #1).", now()))
+        if old:
+            con.execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                        (old["id"], "system", "Order " + o["code"] + " moved to another driver.", now()))
+        log("assign", o["code"] + " -> " + d["name"] + " (moved off " + (old["name"] if old else "?") + ")")
+        con.commit()
 
 def nav_url(dest, lat=None, lng=None, name=None):
     """Driving directions. Coordinates when we have them, so the pin lands on the door,
