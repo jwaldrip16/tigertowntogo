@@ -32,6 +32,32 @@ async function setLogo(inp){
   <label>Dispatch phone number</label>
   <input name="dispatch_phone" type="tel" value="{{ s['dispatch_phone'] }}" placeholder="334-209-2844">
   <div class="muted small">The number drivers and restaurants tap to call dispatch, and the one customers see.</div>
+  <h2>Business hours</h2>
+  <input type="hidden" name="bh_present" value="1">
+  <label><input type="checkbox" name="bh_on" value="1" {% if bh_on %}checked{% endif %}> Only take customer orders during these hours</label>
+  <div class="muted small">Outside these hours the customer site shows closed and only offers future order times inside them. Dispatch can still create orders, and the Open and Close button works the same as before. A close time earlier than the open time runs past midnight.</div>
+  <table class="bhtable">
+  {% for d in bh %}
+    <tr><td>{{ d.day }}</td>
+      <td><input type="time" name="bh_open_{{ d.k }}" value="{{ d.open }}"></td><td>to</td>
+      <td><input type="time" name="bh_close_{{ d.k }}" value="{{ d.close }}"></td>
+      <td><label class="bhclosed"><input type="checkbox" name="bh_closed_{{ d.k }}" value="1" {% if d.closed %}checked{% endif %}> Closed</label></td></tr>
+  {% endfor %}
+  </table>
+  <h2>Restaurants not listed</h2>
+  <input type="hidden" name="any_present" value="1">
+  <label><input type="checkbox" name="any_on" value="1" {% if any_on %}checked{% endif %}> Let customers order from a restaurant we don't list</label>
+  <div class="muted small">Pick the days and hours customers can use it. No days checked means every day, blank times mean all day. Dispatch can still type in any pickup.</div>
+  {% set ad = (any_row.avail_days or '').split(',') %}
+  <div class="row anydays">
+  {% for d in bh_days %}
+    <label class="bhclosed"><input type="checkbox" name="any_day_{{ loop.index0 }}" value="1" {% if loop.index0|string in ad %}checked{% endif %}> {{ d[:3] }}</label>
+  {% endfor %}
+  </div>
+  <div class="row">
+    <input type="time" name="any_start" value="{{ any_row.avail_start }}" style="max-width:130px"> to
+    <input type="time" name="any_end" value="{{ any_row.avail_end }}" style="max-width:130px">
+  </div>
   <h2>Late accept warnings</h2>
   <label>Flash and chime when a kitchen has not accepted an order after this many minutes (0 for off)</label>
   <input name="kitchen_accept_min" type="number" min="0" max="60" value="{{ s['kitchen_accept_min'] or 5 }}">

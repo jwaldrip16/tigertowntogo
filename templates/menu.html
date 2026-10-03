@@ -1,15 +1,46 @@
 {% extends "base.html" %}{% block body %}
 <a class="back" href="/">All restaurants</a>
+{% if custom %}
+<h1>Order from a restaurant we don't list</h1>
+<p class="muted">Tell us where to pick up and what you want. Your driver orders it for you at the counter.
+  {% if any_rest_label() %}Available {{ any_rest_label() }}.{% endif %}
+  <span class="pill {{ 'green' if open else 'grey' }}">{{ 'Open' if open else 'Closed' }}</span></p>
+{% else %}
 {% if r['image'] %}<img class="hero" src="/media/{{ r['image'] }}" alt="{{ r['name'] }}">{% endif %}
 <h1>{{ r['name'] }}</h1>
 <p class="muted">{{ r['address'] }} &middot; {{ hours }} &middot;
   <span class="pill {{ 'green' if open else 'grey' }}">{{ 'Open' if open else 'Closed' }}</span></p>
+{% endif %}
 
 <div class="cols">
+  {% if custom %}
+  <section class="panel anyrest">
+    <h2>Restaurant</h2>
+    <label>Restaurant name</label>
+    <input id="puName" maxlength="80" placeholder="Example: Waffle House">
+    <label>Restaurant address</label>
+    <textarea id="puAddr" rows="2" maxlength="160" placeholder="Street, city, state, ZIP" oninput="pickupChanged()"></textarea>
+    <label>Restaurant phone (optional)</label>
+    <input id="puPhone" type="tel" maxlength="24" placeholder="334-555-0100">
+    <h2>Add an item</h2>
+    <label>Item</label>
+    <input id="ciName" maxlength="80" placeholder="Example: All-Star Special">
+    <div class="row anyrow">
+      <div><label>Quantity</label><input id="ciQty" type="number" min="1" max="50" value="1"></div>
+      <div><label>Price each</label><input id="ciPrice" type="number" min="0" step="0.01" placeholder="$ 0.00"></div>
+    </div>
+    <label>Details</label>
+    <textarea id="ciNote" rows="2" maxlength="120" placeholder="Size, sides, drink, sauces, how it's cooked, anything to leave off"></textarea>
+    <button class="btn primary" type="button" onclick="addAnyItem()">Add to my order</button>
+    <p class="muted small">Use the price from the restaurant's menu. It's an estimate: if the real price is different,
+      dispatch updates your total before your card is charged.</p>
+  </section>
+  {% else %}
   <section>
     <h2>Menu</h2>
     <div id="menu"></div>
   </section>
+  {% endif %}
 
   <aside class="panel">
     <h2>Your order</h2>
@@ -30,7 +61,7 @@
       <select id="whenDay" class="hidden" onchange="drawSlots()" style="max-width:160px"></select>
       <select id="whenTime" class="hidden" style="max-width:130px"></select>
     </div>
-    <div class="muted small" id="whenNote">{{ '' if open else ('We are closed right now. You can still schedule your order for later.' if not biz_open else r['name'] + ' is closed right now. Pick a time they are open and we will send it to them then.') }}</div>
+    <div class="muted small" id="whenNote">{{ '' if open else ('We are closed right now. You can still schedule your order for later.' if not biz_open else ('Orders from restaurants we don\'t list are taken ' + any_rest_label() + '. Pick a time inside those hours.' if custom else r['name'] + ' is closed right now. Pick a time they are open and we will send it to them then.')) }}</div>
     <h3>Tip your driver</h3>
     <div class="row" id="tipRow">
       <button class="btn tiny" onclick="setTip(0.15)">15%</button>
@@ -41,7 +72,14 @@
       <input id="tipCustom" type="number" min="0" step="0.50" placeholder="$ custom"
              oninput="customTip()" style="max-width:120px">
     </div>
-    <h3>Card</h3>
+    {% if pp_enabled %}
+    <h3>How to pay</h3>
+    <div class="paychoice">
+      <label><input type="radio" name="payMode" value="pp" checked onchange="payMode()"> Venmo, PayPal or card (pay now)</label>
+      <label><input type="radio" name="payMode" value="card" onchange="payMode()"> Card, dispatch runs it</label>
+    </div>
+    {% endif %}
+    <h3 id="cardHead">Card</h3>
     <form id="custCard" autocomplete="off" onsubmit="return false">
       <input id="ccName" placeholder="Name on card" autocomplete="cc-name">
       <div id="ccNameErr" class="small cc-err"></div>
@@ -66,20 +104,61 @@
 {% endblock %}
 {% block scripts %}<script src="/static/cardbox.js"></script>
 <script src="/static/itempick.js"></script>
+<script src="/static/avail.js"></script>
 <style>.cc-err{color:#c0392b;min-height:1em}</style>
 <script>
 const RID = {{ r['id'] }};
+const CUSTOM = {{ 'true' if custom else 'false' }};
+function pickup(){
+  if (!CUSTOM) return {};
+  return {pickup_name: document.getElementById('puName').value.trim(),
+          pickup_address: document.getElementById('puAddr').value.trim(),
+          pickup_phone: document.getElementById('puPhone').value.trim()};
+}
+function pickupChanged(){
+  if (!geo) return;
+  geo = null; feeCents = 0; miles = 0;
+  const q = document.getElementById('quote');
+  q.className = 'quote'; q.textContent = 'The restaurant changed. Validate your address again to price delivery.';
+  totals();
+}
+function addAnyItem(){
+  const name = document.getElementById('ciName').value.trim();
+  const qty = parseInt(document.getElementById('ciQty').value, 10);
+  const price = Math.round(parseFloat(document.getElementById('ciPrice').value) * 100);
+  const note = document.getElementById('ciNote').value.trim();
+  if (!name){ alert('Type the item name.'); return; }
+  if (!(qty >= 1 && qty <= 50)){ alert('Quantity needs to be 1 to 50.'); return; }
+  if (!(price > 0)){ alert('Type the price for one of these, like 8.99.'); return; }
+  cart.push({id:'c'+Date.now(), menu_item_id:null, custom:true, name:name, price_cents:price, qty:qty,
+             options: note ? [{group:'Instructions', name:note, delta_cents:0}] : [], note:note});
+  ['ciName','ciPrice','ciNote'].forEach(i=>document.getElementById(i).value='');
+  document.getElementById('ciQty').value = 1;
+  draw();
+}
 let cart = [], geo = null, feeCents = 0, miles = 0, tipCents = 0, tipPct = null;
 let MENU = [];
 function escH(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function itemCard(it){
-  return '<button type="button" class="mcard" onclick="openItem('+it.id+')">'+
+function custWhen(){
+  const later = document.getElementById('whenMode').value === 'later';
+  return Avail.parts(later ? document.getElementById('whenTime').value : '');
+}
+function itemCard(it, hideLabel){
+  const on = Avail.ok(it, custWhen());
+  return '<button type="button" class="mcard'+(on?'':' off')+'" onclick="openItem('+it.id+')">'+
     (it.image ? '<img class="mimg" loading="lazy" src="'+it.image+'" alt="">' : '')+
     '<div class="mhead"><strong>'+escH(it.name)+'</strong><span class="mprice">'+it.price+'</span></div>'+
-    (it.description ? '<div class="mdesc">'+escH(it.description)+'</div>' : '')+'</button>';
+    (it.description ? '<div class="mdesc">'+escH(it.description)+'</div>' : '')+
+    (it.avail_label && (!hideLabel || !on) ? '<div class="mavail">'+(on?'Available ':'Not available now. Available ')+escH(it.avail_label)+'</div>' : '')+
+    '</button>';
+}
+function secLabel(list){
+  const l = list.length ? (list[0].avail_label||'') : '';
+  return l && list.every(x=>(x.avail_label||'') === l) ? l : '';
 }
 let MTAB = '';
 async function drawMenu(){
+  if (CUSTOM) return;
   const res = await jget('/api/menu/' + RID);
   MENU = res.items || [];
   paintMenu();
@@ -114,8 +193,10 @@ function paintMenu(){
       '</nav>'
     : '';
   el.innerHTML = tabbar + jump + order.map(s=>
-    '<h3 class="sechead" id="'+slug(s)+'">'+escH(s)+'</h3><div class="mgrid">' +
-    groups[s].map(itemCard).join('') + '</div>').join('');
+    '<h3 class="sechead" id="'+slug(s)+'">'+escH(s)+'</h3>' +
+    (secLabel(groups[s]) ? '<div class="secavail">AVAILABLE: '+escH(secLabel(groups[s]).toUpperCase())+'</div>' : '') +
+    '<div class="mgrid">' +
+    groups[s].map(it=>itemCard(it, !!secLabel(groups[s]))).join('') + '</div>').join('');
 }
 function jumpSection(ev, id){
   ev.preventDefault();
@@ -123,7 +204,13 @@ function jumpSection(ev, id){
   if (t) t.scrollIntoView({behavior:'smooth', block:'start'});
 }
 function openItem(id){
-  ItemPick.open(MENU.find(x=>x.id===id), line=>{
+  const it = MENU.find(x=>x.id===id);
+  if (it && !Avail.ok(it, custWhen())){
+    alert(it.name+' is only available '+it.avail_label+'.'+
+      (document.getElementById('whenMode').value === 'later' ? ' Pick a different time to order it.' : ' You can schedule it for a time when it is available.'));
+    return;
+  }
+  ItemPick.open(it, line=>{
     cart.push(Object.assign({id:line.menu_item_id}, line));
     draw();
   });
@@ -182,8 +269,10 @@ async function validate(){
   const addr = document.getElementById('address').value.trim();
   const q = document.getElementById('quote');
   if(!addr){ q.textContent='Enter an address first.'; return; }
+  if (CUSTOM && !(pickup().pickup_name && pickup().pickup_address)){
+    q.className='quote bad'; q.textContent='Add the restaurant name and address first so we can price the trip.'; return; }
   q.textContent = 'Checking that address...';
-  const res = await jpost('/api/quote', {restaurant_id: RID, address: addr});
+  const res = await jpost('/api/quote', Object.assign({restaurant_id: RID, address: addr}, pickup()));
   if(!res.ok){ geo=null; q.className='quote bad';
     q.textContent = res.error + ' You can still place the order: dispatch will approve the address and confirm your delivery fee.';
     totals(); return; }
@@ -242,27 +331,38 @@ function whenToggle(){
     });
   }
 }
+function usePP(){ const r = document.querySelector('input[name=payMode]:checked'); return !!r && r.value === 'pp'; }
+function payMode(){
+  const pp = usePP();
+  document.getElementById('custCard').style.display = pp ? 'none' : '';
+  document.getElementById('cardHead').style.display = pp ? 'none' : '';
+}
 async function placeOrder(){
-  const cc = ccCheck(true);
+  const cc = usePP() ? {ok:true} : ccCheck(true);
   if (document.getElementById('whenMode').value === 'later' && !document.getElementById('whenTime').value){ alert('Pick a delivery time.'); return; }
+  const offItem = cart.map(c=>MENU.find(x=>x.id===(c.menu_item_id||c.id))).find(it=>it && !Avail.ok(it, custWhen()));
+  if (offItem){ alert(offItem.name+' is only available '+offItem.avail_label+'. Take it out of your bag or pick a time when it is available.'); return; }
   if(!cc.ok){ document.getElementById('custCard').scrollIntoView({behavior:'smooth'}); alert('Please fix the card details.'); return; }
-  const res = await jpost('/checkout', {
-    card: ccForm(),
+  if (CUSTOM && !(pickup().pickup_name && pickup().pickup_address)){ alert('Add the restaurant name and address.'); return; }
+  const res = await jpost('/checkout', Object.assign(pickup(), {
+    card: usePP() ? null : ccForm(), paypal: usePP(),
     restaurant_id: RID, customer_name: document.getElementById('name').value,
     customer_phone: document.getElementById('phone').value,
     address: document.getElementById('address').value,
     note: document.getElementById('note').value, items: cart, tip_cents: tipCents,
-    scheduled_for: document.getElementById('whenMode').value === 'later' ? document.getElementById('whenTime').value : ''});
+    scheduled_for: document.getElementById('whenMode').value === 'later' ? document.getElementById('whenTime').value : ''}));
   if(!res.ok){ alert(res.error); return; }
   try{
     const seen = JSON.parse(localStorage.getItem('ffOrders')||'[]');
     seen.unshift(res.code); localStorage.setItem('ffOrders', JSON.stringify(seen.slice(0,10)));
   }catch(e){}
   for(const k in CC) document.getElementById(CC[k]).value = '';
+  if(res.pay_url){ window.location = res.pay_url; return; }
   if(res.message) alert(res.message);
   window.location = '/track/' + res.code;
 }
 attachAddressPicker('address', ()=>validate());
 drawMenu();
 whenToggle();
+try { payMode(); } catch(e) {}
 </script>{% endblock %}

@@ -5,6 +5,7 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/static/icons/driver-192.png">
+<script src="/static/regionpick.js"></script>
 <script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/static/sw.js").catch(function(){});}</script>
 {% endblock %}
 {% block body %}
@@ -89,6 +90,7 @@
       </select>
       <input id="avStart" type="time" value="16:00">
       <input id="avEnd" type="time" value="22:00">
+      <span id="avRg"></span>
       <button class="btn tiny primary" onclick="addAvail()">Request</button>
     </div>
     <div id="avail" class="muted small"></div>
@@ -581,11 +583,11 @@ function renderAvail(av, off){
   document.getElementById('week').innerHTML = DAYS.map((d,i)=>{
     const mine = av.filter(a=>a.dow===i);
     return '<div class="wday"><div class="wname">'+d+'</div>'+
-      (mine.length ? mine.map(a=>'<div class="wslot '+a.status+'">'+a.start+'-'+a.end+'</div>').join('')
+      (mine.length ? mine.map(a=>'<div class="wslot '+a.status+'">'+a.start+'-'+a.end+(a.region_label?'<br><span class="small">'+rgEsc(a.region_label)+'</span>':'')+'</div>').join('')
                    : '<div class="wslot none">off</div>')+'</div>';
   }).join('');
   document.getElementById('avail').innerHTML = av.length ? av.map(a=>
-    '<div class="row between"><span>'+a.day+' '+a.start+'-'+a.end+' '+stPill(a.status)+
+    '<div class="row between"><span>'+a.day+' '+a.start+'-'+a.end+' '+stPill(a.status)+regionTag(a.region_label)+
     (a.reply?' <span class="muted">'+a.reply+'</span>':'')+'</span>'+
     '<button class="btn tiny" onclick="dropAvail('+a.id+')">Remove</button></div>').join('')
     : 'No hours sent to dispatch yet.';
@@ -601,7 +603,8 @@ async function refreshSchedule(){
 }
 async function addAvail(){
   const r = await jpost('/api/driver/availability', {dow:+document.getElementById('avDow').value,
-    start:document.getElementById('avStart').value, end:document.getElementById('avEnd').value});
+    start:document.getElementById('avStart').value, end:document.getElementById('avEnd').value,
+    regions: regionVals('avR')});
   if(!r.ok){ alert(r.error||'Could not send that.'); return; }
   renderAvail(r.availability, r.time_off);
 }
@@ -637,6 +640,8 @@ function loadWeek(start){
     drawWeek();
   });
 }
+loadRegions().then(()=>{ const s = document.getElementById('avRg'); if(s) s.innerHTML = regionBoxes('avR', []);
+  try { if (WEEK && WEEK.days) drawWeek(); } catch(e) {} });
 function drawWeek(){
   const w = WEEK;
   const due = document.getElementById('weekDue');
@@ -669,6 +674,7 @@ function drawWeek(){
         '<input type="time" class="wEnd" data-dow="'+d.dow+'" value="'+(d.end||'22:00')+'"'+
           (d.off||shut?' disabled':'')+'>'+
       '</div>'+
+      '<div class="wrg">'+regionBoxes('wRg'+d.dow, d.regions||[], (d.off||shut?' disabled':''))+'</div>'+
       (d.reply?'<div class="muted small">'+d.reply+'</div>':'')+
     '</div>').join('');
 }
@@ -676,6 +682,7 @@ function toggleDay(dow){
   const on = document.querySelector('.wOn[data-dow="'+dow+'"]').checked;
   document.querySelector('.wStart[data-dow="'+dow+'"]').disabled = !on;
   document.querySelector('.wEnd[data-dow="'+dow+'"]').disabled = !on;
+  document.querySelectorAll('.wRg'+dow).forEach(b=>{ b.disabled = !on; });
   document.querySelectorAll('.wcell')[dow].classList.toggle('offday', !on);
 }
 function readWeek(){
@@ -683,7 +690,8 @@ function readWeek(){
     dow: i,
     off: !document.querySelector('.wOn[data-dow="'+i+'"]').checked,
     start: document.querySelector('.wStart[data-dow="'+i+'"]').value,
-    end: document.querySelector('.wEnd[data-dow="'+i+'"]').value}));
+    end: document.querySelector('.wEnd[data-dow="'+i+'"]').value,
+    regions: regionVals('wRg'+i)}));
 }
 async function saveWeek(){
   const r = await jpost('/api/driver/week', {week_start: WEEK.week_start, days: readWeek()});

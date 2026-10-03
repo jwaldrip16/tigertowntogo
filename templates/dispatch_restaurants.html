@@ -44,6 +44,9 @@
     Force closed (kitchen paused)</label>
   <label><input type="checkbox" name="open_24" {{ 'checked' if d.r['open_24'] }}>
     Open 24 hours (ignores the table above)</label>
+  <label><input type="checkbox" name="uses_app" {{ 'checked' if d.r['uses_app'] }}>
+    Uses the restaurant app (orders go to their tablet). Leave off and dispatch places the order:
+    Ordering in process, then Order placed with a timer.</label>
   <div class="row"><label>Default prep minutes</label>
     <input type="number" name="prep_default" value="{{ d.r['prep_default'] }}" min="1" max="120"></div>
   <div class="row"><label>Phone</label><input name="phone" value="{{ d.r['phone'] }}"></div>

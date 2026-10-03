@@ -11,6 +11,7 @@
 <p class="lede">Pick a restaurant, we validate your address, and the fee is calculated from how far
 the driver actually has to go.</p>
 {% if not biz_open %}<div class="panel" style="border-left:4px solid #b44a22"><b>We are closed right now.</b> You can still place a future order: pick a restaurant and choose Schedule for later.</div>{% endif %}
+{% if business_hours_label() %}<p class="muted small" style="text-align:center">Delivery hours: {{ business_hours_label() }}</p>{% endif %}
 <div class="grid">
   {% for c in cards %}
   <a class="card {{ 'closed' if not c.open else '' }}" href="/r/{{ c.r['slug'] }}">
@@ -21,6 +22,15 @@ the driver actually has to go.</p>
     <span class="pill {{ 'green' if c.open else 'grey' }}">{{ 'Open now' if c.open else 'Closed' }}</span>
   </a>
   {% endfor %}
+  {% if any_on %}
+  <a class="card anycard {{ '' if any_open else 'closed' }}" href="/r/oneoff">
+    <h3>Restaurant not listed?</h3>
+    <p class="muted">Order from any restaurant in the area. Tell us the place, the items, and the prices,
+      and your driver picks it up.</p>
+    {% if any_rest_label() %}<p class="muted">Available {{ any_rest_label() }}</p>{% endif %}
+    <span class="pill {{ 'green' if any_open else 'grey' }}">{{ 'Order from anywhere' if any_open else 'Closed' }}</span>
+  </a>
+  {% endif %}
 </div>
 <p class="muted small">Already ordered? <a href="/track/FF000000">Track an order</a> by putting your
 code in the address bar, e.g. /track/FF123456.</p>

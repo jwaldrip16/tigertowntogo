@@ -307,6 +307,9 @@ def init_db():
     ensure_column(con, "menu_items", "sort", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "menu_items", "image", "TEXT")
     ensure_column(con, "menu_items", "menu_tab", "TEXT")
+    ensure_column(con, "menu_items", "avail_days", "TEXT")
+    ensure_column(con, "menu_items", "avail_start", "TEXT")
+    ensure_column(con, "menu_items", "avail_end", "TEXT")
     ensure_column(con, "restaurants", "image", "TEXT")
     ensure_column(con, "option_groups", "max_each", "INTEGER NOT NULL DEFAULT 1")
     ensure_column(con, "orders", "payment_status", "TEXT NOT NULL DEFAULT 'unpaid'")
@@ -331,6 +334,7 @@ def init_db():
                 "WHERE payment_status IS NULL OR payment_status=''")
     con.execute("UPDATE orders SET refunded_cents=0 WHERE refunded_cents IS NULL")
     ensure_column(con, "dispatchers", "created_at", "TEXT")
+    ensure_column(con, "dispatchers", "phone", "TEXT")
     ensure_column(con, "messages", "dispatcher_id", "INTEGER")
     ensure_column(con, "messages", "sender_name", "TEXT")
     ensure_column(con, "drivers", "last_lat", "REAL")
@@ -341,6 +345,21 @@ def init_db():
     ensure_column(con, "drivers", "last_addr_lat", "REAL")
     ensure_column(con, "drivers", "last_addr_lng", "REAL")
     con.execute("CREATE TABLE IF NOT EXISTS revgeo (k TEXT PRIMARY KEY, address TEXT, created_at TEXT)")
+    con.execute("""CREATE TABLE IF NOT EXISTS regions (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   name TEXT UNIQUE NOT NULL, sort INTEGER DEFAULT 0, created_at TEXT)""")
+    con.execute("""CREATE TABLE IF NOT EXISTS driver_regions (driver_id INTEGER NOT NULL, region_id INTEGER NOT NULL,
+                   PRIMARY KEY(driver_id, region_id))""")
+    con.execute("""CREATE TABLE IF NOT EXISTS dispatcher_regions (dispatcher_id INTEGER NOT NULL,
+                   region_id INTEGER NOT NULL, PRIMARY KEY(dispatcher_id, region_id))""")
+    ensure_column(con, "restaurants", "region_id", "INTEGER")
+    ensure_column(con, "orders", "region_id", "INTEGER")
+    ensure_column(con, "availability", "region_ids", "TEXT")
+    ensure_column(con, "dispatchers", "is_owner", "INTEGER DEFAULT 0")
+    ensure_column(con, "messages", "region_id", "INTEGER")
+    con.execute("""CREATE TABLE IF NOT EXISTS dispatcher_availability (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                   dispatcher_id INTEGER NOT NULL, dow INTEGER NOT NULL, start_time TEXT NOT NULL,
+                   end_time TEXT NOT NULL, note TEXT, created_by TEXT, created_at TEXT)""")
+    ensure_column(con, "dispatcher_availability", "region_ids", "TEXT")
     con.execute("""CREATE TABLE IF NOT EXISTS driver_log (id INTEGER PRIMARY KEY AUTOINCREMENT,
                    driver_id INTEGER NOT NULL, lat REAL, lng REAL, address TEXT, status TEXT,
                    event TEXT, created_at TEXT NOT NULL)""")
@@ -348,6 +367,16 @@ def init_db():
     ensure_column(con, "orders", "ref_code", "TEXT")
     ensure_column(con, "orders", "paged_at", "TEXT")
     ensure_column(con, "orders", "kitchen_sent_at", "TEXT")
+    # Restaurants not on the restaurant app yet: dispatch places the order with them by hand.
+    ensure_column(con, "restaurants", "uses_app", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(con, "orders", "manual_state", "TEXT")
+    # PayPal / Venmo / card through PayPal: hold at checkout, charge after delivery (late tips included)
+    for _c, _d in (("pp_order_id", "TEXT"), ("pp_auth_id", "TEXT"), ("pp_auth_cents", "INTEGER"),
+                   ("pp_state", "TEXT"), ("pp_captured_cents", "INTEGER"), ("pp_source", "TEXT"),
+                   ("pp_error", "TEXT"), ("pp_auth_at", "TEXT")):
+        ensure_column(con, "orders", _c, _d)
+    ensure_column(con, "orders", "manual_at", "TEXT")
+    ensure_column(con, "orders", "manual_by", "TEXT")
     ensure_column(con, "orders", "driver_paged_at", "TEXT")
     # Stamp when the kitchen got the ticket and when a driver got paged, whatever code path did it.
     _ts = "strftime('%Y-%m-%dT%H:%M:%S','now','localtime')"
@@ -748,6 +777,137 @@ def hours_label(restaurant):
 
 # ---------------------------------------------------------------- queue / dispatch
 
+# ---------------------------------------------------------------- regions
+# A restaurant belongs to one region. Drivers and dispatchers can cover several regions;
+# none checked means they cover every region. An order takes its restaurant's region
+# (a typed-in pickup is matched by the town in its address). Region 0 means no region,
+# which every driver and dispatcher sees.
+
+DEFAULT_REGIONS = ("Opelika", "Auburn", "Valley")
+
+
+def all_regions():
+    return db().execute("SELECT id, name FROM regions ORDER BY sort, name").fetchall()
+
+
+def region_match(text):
+    t = " " + re.sub(r"[^a-z0-9]+", " ", (text or "").lower()) + " "
+    for r in all_regions():
+        if " " + re.sub(r"[^a-z0-9]+", " ", r["name"].lower()).strip() + " " in t:
+            return r["id"]
+    return 0
+
+
+def stamp_regions():
+    """Seed the starting regions once, then give any new restaurant or order its region."""
+    con = db()
+    if not con.execute("SELECT 1 FROM regions LIMIT 1").fetchone():
+        if not con.execute("SELECT 1 FROM settings WHERE key='regions_seeded'").fetchone():
+            for i, n in enumerate(DEFAULT_REGIONS):
+                con.execute("INSERT OR IGNORE INTO regions(name,sort,created_at) VALUES(?,?,?)", (n, i, now()))
+            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('regions_seeded','1')")
+    if not con.execute("SELECT 1 FROM dispatchers WHERE is_owner=1").fetchone():
+        con.execute("UPDATE dispatchers SET is_owner=1 WHERE id=(SELECT MIN(id) FROM dispatchers)")
+    for r in con.execute("""SELECT id, address FROM restaurants
+                            WHERE region_id IS NULL AND slug!='oneoff'""").fetchall():
+        con.execute("UPDATE restaurants SET region_id=? WHERE id=?", (region_match(r["address"]), r["id"]))
+    for o in con.execute("""SELECT o.id, o.pickup_address, r.slug, r.region_id FROM orders o
+                            LEFT JOIN restaurants r ON r.id=o.restaurant_id
+                            WHERE o.region_id IS NULL""").fetchall():
+        rg = region_match(o["pickup_address"]) if (o["slug"] == "oneoff" or o["pickup_address"]) else (o["region_id"] or 0)
+        con.execute("UPDATE orders SET region_id=? WHERE id=?", (rg or 0, o["id"]))
+    con.commit()
+
+
+def driver_region_ids(did):
+    return {r["region_id"] for r in db().execute(
+        "SELECT region_id FROM driver_regions WHERE driver_id=?", (did,)).fetchall()}
+
+
+def dispatcher_region_ids(did):
+    return {r["region_id"] for r in db().execute(
+        "SELECT region_id FROM dispatcher_regions WHERE dispatcher_id=?", (did,)).fetchall()} if did else set()
+
+
+def clean_region_ids(lst):
+    """Checked regions from a form -> '1,3'. Blank means the person's usual regions."""
+    valid = {r["id"] for r in all_regions()}
+    out = set()
+    for x in (lst if isinstance(lst, (list, tuple, set)) else str(lst or "").split(",")):
+        try:
+            x = int(x)
+        except (TypeError, ValueError):
+            continue
+        if x in valid:
+            out.add(x)
+    return ",".join(str(x) for x in sorted(out))
+
+
+def parse_rids(s):
+    return {int(x) for x in str(s or "").split(",") if x.strip().isdigit()}
+
+
+def slot_regions(s):
+    try:
+        return parse_rids(s["region_ids"])
+    except (IndexError, KeyError):
+        return set()
+
+
+def driver_work_regions(did):
+    """Regions a driver works right now: the regions picked on the availability they are
+    working at this moment, otherwise their usual regions."""
+    nowdt = dt.datetime.now()
+    today = nowdt.date()
+    hm = nowdt.strftime("%H:%M")
+    picked = set()
+    for s in db().execute("""SELECT * FROM availability WHERE driver_id=? AND status='approved'
+                             AND COALESCE(region_ids,'')!=''""", (did,)).fetchall():
+        if s["week_start"]:
+            try:
+                if dt.date.fromisoformat(s["week_start"]) + dt.timedelta(days=s["dow"]) != today:
+                    continue
+            except ValueError:
+                continue
+        elif s["dow"] != today.weekday():
+            continue
+        if s["start_time"] <= hm < s["end_time"]:
+            picked |= parse_rids(s["region_ids"])
+    return picked or driver_region_ids(did)
+
+
+def dispatcher_work_regions(did):
+    if not did:
+        return set()
+    nowdt = dt.datetime.now()
+    picked = set()
+    for s in db().execute("""SELECT * FROM dispatcher_availability WHERE dispatcher_id=?
+                             AND COALESCE(region_ids,'')!=''""", (did,)).fetchall():
+        if _disp_slot_on(s, nowdt):
+            picked |= parse_rids(s["region_ids"])
+    return picked or dispatcher_region_ids(did)
+
+
+def is_owner(did=None):
+    did = did if did is not None else session.get("dispatcher_id")
+    if not did:
+        return False
+    r = db().execute("SELECT is_owner FROM dispatchers WHERE id=?", (did,)).fetchone()
+    return bool(r and r["is_owner"])
+
+
+def covers(region_ids, order_region):
+    """Does someone covering these regions see an order in this region? No regions = all."""
+    return not region_ids or not order_region or order_region in region_ids
+
+
+def region_names(ids):
+    if not ids:
+        return "All regions"
+    names = [r["name"] for r in all_regions() if r["id"] in ids]
+    return ", ".join(names) or "All regions"
+
+
 def on_shift_drivers():
     """Everyone clocked on, in rotation order: fewest live orders first, then whoever has
     waited longest since their last one."""
@@ -810,24 +970,33 @@ def recompute_queue():
         short = "only one driver on shift, dispatcher to assign"
     else:
         short = "every driver has an order, dispatcher to assign"
+    pool = list(free)
     for i, o in enumerate(waiting):
+        fit = next((fd for fd in pool if covers(driver_work_regions(fd["id"]), o["region_id"])), None)
         if o["address_ok"] == 0:
             status, reason = "held", "address needs dispatch approval"
         elif o["kitchen_status"] not in stages:
             status, reason = "held", "waiting on kitchen"
         elif not auto_on:
             status, reason = "queued", "auto dispatch off, assign by hand"
-        elif i >= len(free):
+        elif fit is None:
             status, reason = "held", short
+            if len(shift) >= 2 and o["region_id"] and not any(
+                    covers(driver_work_regions(sd["id"]), o["region_id"]) for sd in shift):
+                status, reason = "held", "no driver in this region on shift, dispatcher to assign"
         else:
+            pool.remove(fit)
             status, reason = "queued", None
         con.execute("UPDATE orders SET dispatch_status=?, hold_reason=? WHERE id=?",
                     (status, reason, o["id"]))
     con.commit()
 
 def queue_position(order_id):
+    me = db().execute("SELECT region_id FROM orders WHERE id=?", (order_id,)).fetchone()
+    rg = (me["region_id"] if me else 0) or 0
     rows = db().execute("""SELECT id FROM orders WHERE dispatch_status IN ('queued','held')
-                           ORDER BY created_at ASC, id ASC""").fetchall()
+                           AND (? = 0 OR COALESCE(region_id,0) IN (0, ?))
+                           ORDER BY created_at ASC, id ASC""", (rg, rg)).fetchall()
     for i, r in enumerate(rows):
         if r["id"] == order_id:
             return i + 1
@@ -862,6 +1031,10 @@ def place_redo_orders():
 
 def auto_assign():
     try:
+        stamp_regions()
+    except Exception as e:
+        print("region stamp skipped:", e)
+    try:
         release_scheduled()
     except Exception as e:
         print("future release skipped:", e)
@@ -879,14 +1052,22 @@ def auto_assign():
             break
         stages = ("'pending','preparing','ready'" if setting("assign_on_pending")
                   else "'preparing','ready'")
-        o = con.execute("""SELECT * FROM orders
+        waiting = con.execute("""SELECT * FROM orders
                            WHERE driver_id IS NULL AND redo_driver_id IS NULL
                              AND dispatch_status IN ('queued','held')
                              AND kitchen_status IN (""" + stages + """)
-                           ORDER BY created_at ASC LIMIT 1""").fetchone()
-        if not o:
+                           ORDER BY created_at ASC""").fetchall()
+        pick = None
+        for cand in waiting:
+            for fd in free:
+                if covers(driver_work_regions(fd["id"]), cand["region_id"]):
+                    pick = (cand, fd)
+                    break
+            if pick:
+                break
+        if not pick:
             break
-        d = free[0]
+        o, d = pick
         seq = con.execute("""SELECT COALESCE(MAX(stack_seq),0)+1 s FROM orders
                              WHERE driver_id=? AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
                           (d["id"],)).fetchone()["s"]
@@ -912,7 +1093,7 @@ def rebalance_stacks():
         free = available_drivers()
         if not free:
             break
-        o = con.execute("""SELECT o.* FROM orders o
+        cands = con.execute("""SELECT o.* FROM orders o
                            WHERE o.dispatch_status='assigned' AND o.driver_id IS NOT NULL
                              AND COALESCE(o.placed_by,'') != 'driver'
                              AND EXISTS (SELECT 1 FROM orders x
@@ -920,11 +1101,21 @@ def rebalance_stacks():
                                            AND x.dispatch_status NOT IN ('delivered','cancelled')
                                            AND (COALESCE(x.stack_seq,0) < COALESCE(o.stack_seq,0)
                                                 OR (COALESCE(x.stack_seq,0) = COALESCE(o.stack_seq,0) AND x.id < o.id)))
-                           ORDER BY o.created_at ASC LIMIT 1""").fetchone()
-        if not o or o["id"] in moved:
+                           ORDER BY o.created_at ASC""").fetchall()
+        pick = None
+        for cand in cands:
+            if cand["id"] in moved:
+                continue
+            for fd in free:
+                if fd["id"] != cand["driver_id"] and covers(driver_work_regions(fd["id"]), cand["region_id"]):
+                    pick = (cand, fd)
+                    break
+            if pick:
+                break
+        if not pick:
             break
+        o, d = pick
         moved.add(o["id"])
-        d = free[0]
         old = con.execute("SELECT id, name FROM drivers WHERE id=?", (o["driver_id"],)).fetchone()
         con.execute("""UPDATE orders SET driver_id=?, dispatch_status='assigned', hold_reason=NULL,
                        stack_seq=1 WHERE id=?""", (d["id"], o["id"]))
@@ -977,6 +1168,107 @@ def item_options(item_id):
     return groups
 
 
+AV_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+
+def _hm(s):
+    try:
+        h, m = str(s).strip().split(":")[:2]
+        h, m = int(h), int(m[:2])
+        return h * 60 + m if 0 <= h < 24 and 0 <= m < 60 else None
+    except Exception:
+        return None
+
+
+def _ampm(s):
+    v = _hm(s)
+    if v is None:
+        return ""
+    h, m = divmod(v, 60)
+    return "%d:%02d %s" % ((h % 12) or 12, m, "AM" if h < 12 else "PM")
+
+
+def item_avail_days(it):
+    raw = (it["avail_days"] if "avail_days" in it.keys() else "") or ""
+    return sorted({int(x) for x in str(raw).split(",") if x.strip().isdigit() and 0 <= int(x) <= 6})
+
+
+def avail_label(it):
+    """'Mon - Fri: 11:00 AM - 1:30 PM', or '' when the item can be ordered any time."""
+    days = item_avail_days(it)
+    st = (it["avail_start"] if "avail_start" in it.keys() else "") or ""
+    en = (it["avail_end"] if "avail_end" in it.keys() else "") or ""
+    timed = bool(st and en and _hm(st) is not None and _hm(en) is not None)
+    if not days and not timed:
+        return ""
+    if not days or len(days) == 7:
+        dl = "Every day"
+    else:
+        runs, start, prev = [], days[0], days[0]
+        for d in days[1:]:
+            if d == prev + 1:
+                prev = d
+                continue
+            runs.append((start, prev))
+            start = prev = d
+        runs.append((start, prev))
+        parts = []
+        for a, b in runs:
+            if b - a >= 2:
+                parts.append(AV_DAYS[a] + " - " + AV_DAYS[b])
+            else:
+                parts += [AV_DAYS[x] for x in range(a, b + 1)]
+        dl = ", ".join(parts)
+    return dl + (": " + _ampm(st) + " - " + _ampm(en) if timed else "")
+
+
+def item_available(it, when=None):
+    """Can this item be ordered for this moment (now, or a future order's time)?"""
+    when = when or dt.datetime.now()
+    days = item_avail_days(it)
+    if days and when.weekday() not in days:
+        return False
+    s = _hm((it["avail_start"] if "avail_start" in it.keys() else "") or "")
+    e = _hm((it["avail_end"] if "avail_end" in it.keys() else "") or "")
+    if s is None or e is None or s == e:
+        return True
+    m = when.hour * 60 + when.minute
+    return (s <= m < e) if e > s else (m >= s or m < e)
+
+
+def avail_fields(it):
+    return {"avail_days": item_avail_days(it),
+            "avail_start": (it["avail_start"] or "") if "avail_start" in it.keys() else "",
+            "avail_end": (it["avail_end"] or "") if "avail_end" in it.keys() else "",
+            "avail_label": avail_label(it), "available_now": item_available(it)}
+
+
+def clean_avail(b):
+    """Availability sent from the menu editor. None when the request did not touch it."""
+    if not any(k in b for k in ("avail_days", "avail_start", "avail_end")):
+        return None
+    days = set()
+    for x in (b.get("avail_days") or []):
+        try:
+            x = int(x)
+        except (TypeError, ValueError):
+            continue
+        if 0 <= x <= 6:
+            days.add(x)
+    st = str(b.get("avail_start") or "").strip()[:5]
+    en = str(b.get("avail_end") or "").strip()[:5]
+    if bool(st) != bool(en):
+        return {"err": "Set both a start and an end time, or leave both blank."}
+    if st and (_hm(st) is None or _hm(en) is None):
+        return {"err": "Times need to look like 11:00 AM."}
+    if st and _hm(st) == _hm(en):
+        return {"err": "The start and end time cannot be the same."}
+    days = sorted(days)
+    if len(days) == 7:
+        days = []
+    return {"days": ",".join(str(d) for d in days), "st": st, "en": en}
+
+
 def menu_payload(rid):
     """Items in menu order: sections in the order a dispatcher set, items inside them."""
     out = []
@@ -987,7 +1279,7 @@ def menu_payload(rid):
                     "section": (it["section"] or "").strip(),
                     "tab": (it["menu_tab"] or "").strip(),
                     "image": media_url(it["image"]),
-                    "groups": item_options(it["id"])})
+                    "groups": item_options(it["id"]), **avail_fields(it)})
     return out
 
 
@@ -1239,6 +1531,10 @@ def order_dict(o):
         "placed_by": o["placed_by"], "created_at": o["created_at"],
         "delivered_at": o["delivered_at"],
         "queue_position": queue_position(o["id"]),
+        "uses_app": bool(r["uses_app"]) if r is not None and "uses_app" in r.keys() else True,
+        "manual_state": (o["manual_state"] or "") if "manual_state" in o.keys() else "",
+        "manual_by": (o["manual_by"] or "") if "manual_by" in o.keys() else "",
+        "pp": pp_info(o),
     }
 
 # ---------------------------------------------------------------- customer site
@@ -1246,19 +1542,23 @@ def order_dict(o):
 @app.route("/")
 def home():
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
-    biz = business_is_open()
+    biz = business_is_open() and business_in_hours()
     cards = [{"r": r, "open": biz and is_open(r), "hours": hours_label(r)} for r in rs]
-    return render_template("index.html", cards=cards, biz_open=biz)
+    return render_template("index.html", cards=cards, biz_open=biz,
+                           any_on=any_rest_on(), any_open=biz and any_rest_open())
 
 @app.route("/r/<slug>")
 def menu(slug):
     r = db().execute("SELECT * FROM restaurants WHERE slug=?", (slug,)).fetchone()
     if not r:
         return redirect(url_for("home"))
+    if r["slug"] == "oneoff" and not any_rest_on():
+        return redirect(url_for("home"))
     items = db().execute("SELECT * FROM menu_items WHERE restaurant_id=? AND active=1", (r["id"],)).fetchall()
-    biz = business_is_open()
-    return render_template("menu.html", r=r, items=items, open=biz and is_open(r), biz_open=biz,
-                           hours=hours_label(r),
+    biz = business_is_open() and business_in_hours()
+    open_now = biz and (any_rest_open() if r["slug"] == "oneoff" else is_open(r))
+    return render_template("menu.html", r=r, items=items, open=open_now, biz_open=biz,
+                           hours=hours_label(r), custom=(r["slug"] == "oneoff"),
                            base_fee=money(setting("base_fee_cents")),
                            base_miles=setting("base_miles"),
                            per_mile=money(setting("per_mile_cents")))
@@ -1643,6 +1943,323 @@ def add_extra_charge(o, cents, label, ref):
     db().commit()
 
 
+# ---------------------------------------------------------------- PayPal, Venmo and cards through PayPal
+# Set PAYPAL_CLIENT_ID and PAYPAL_SECRET (and PAYPAL_ENV=live when you go live; sandbox otherwise).
+# At checkout the money is only held (authorized). After delivery the site charges the final total,
+# so a tip added after delivery is included. PayPal lets that charge run up to 15% or $75 over the
+# hold, whichever is less; anything past that shows on the tracking page as a small Pay the rest button.
+PAYPAL_CLIENT_ID = os.environ.get("PAYPAL_CLIENT_ID", "").strip()
+PAYPAL_SECRET = os.environ.get("PAYPAL_SECRET", "").strip()
+PAYPAL_ENV = (os.environ.get("PAYPAL_ENV", "sandbox") or "sandbox").strip().lower()
+PP_BASE = "https://api-m.paypal.com" if PAYPAL_ENV == "live" else "https://api-m.sandbox.paypal.com"
+PP_SOURCES = {"venmo": "Venmo", "paypal": "PayPal", "card": "card"}
+_pp_tok = {"t": "", "exp": 0.0}
+_pp_lock = threading.Lock()
+_pp_last_sweep = [0.0]
+
+def pp_enabled():
+    return bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET)
+
+def pp_token():
+    with _pp_lock:
+        if _pp_tok["t"] and time.time() < _pp_tok["exp"] - 60:
+            return _pp_tok["t"]
+        auth = base64.b64encode((PAYPAL_CLIENT_ID + ":" + PAYPAL_SECRET).encode()).decode()
+        req = urllib.request.Request(PP_BASE + "/v1/oauth2/token", data=b"grant_type=client_credentials",
+                                     headers={"Authorization": "Basic " + auth,
+                                              "Content-Type": "application/x-www-form-urlencoded"})
+        j = json.loads(urllib.request.urlopen(req, timeout=15).read())
+        _pp_tok["t"], _pp_tok["exp"] = j["access_token"], time.time() + int(j.get("expires_in", 3000))
+        return _pp_tok["t"]
+
+def pp_api(method, path, body=None, request_id=None):
+    """Returns (http status, json). Never raises."""
+    try:
+        h = {"Authorization": "Bearer " + pp_token(), "Content-Type": "application/json",
+             "Prefer": "return=representation"}
+        if request_id:
+            h["PayPal-Request-Id"] = request_id
+        data = json.dumps(body).encode() if body is not None else (b"" if method == "POST" else None)
+        req = urllib.request.Request(PP_BASE + path, data=data, headers=h, method=method)
+        resp = urllib.request.urlopen(req, timeout=20)
+        raw = resp.read()
+        return resp.status, (json.loads(raw) if raw else {})
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read() or b"{}")
+        except Exception:
+            return e.code, {}
+    except Exception as e:
+        return 0, {"message": str(e)}
+
+def pp_money(cents):
+    return {"currency_code": "USD", "value": "%.2f" % (int(cents) / 100.0)}
+
+def pp_err(j, fallback="PayPal did not accept that."):
+    d = (j.get("details") or [{}])[0] if isinstance(j, dict) else {}
+    issue = d.get("issue") or (j.get("name") if isinstance(j, dict) else "") or ""
+    if issue == "INSTRUMENT_DECLINED":
+        return "That card or account was declined. Try another way to pay."
+    return (d.get("description") or (j.get("message") if isinstance(j, dict) else "") or fallback)
+
+def pp_cap_cents(auth_cents):
+    """Most PayPal lets us charge on a hold: 115% of it or $75 more, whichever is less."""
+    a = int(auth_cents or 0)
+    return min(a * 115 // 100, a + 7500)
+
+def pp_tip_window_min():
+    try:
+        v = int(setting("pp_tip_window_min", str) or 60)
+    except Exception:
+        v = 60
+    return max(0, min(v, 1440))
+
+def pp_settle(o, why="after delivery"):
+    """Charge the held payment for the order's current total (late tip included)."""
+    if (o["pp_state"] or "") != "authorized" or not o["pp_auth_id"]:
+        return {"ok": False, "error": "No PayPal hold on this order."}
+    auth = int(o["pp_auth_cents"] or 0)
+    due = int(o["total_cents"] or 0) - int(o["refunded_cents"] or 0)
+    if due <= 0:
+        return pp_void(o, "nothing owed")
+    amt = min(due, pp_cap_cents(auth))
+    st, j = pp_api("POST", "/v2/payments/authorizations/" + o["pp_auth_id"] + "/capture",
+                   {"amount": pp_money(amt), "final_capture": True, "invoice_id": o["code"]},
+                   request_id="cap-" + o["code"] + "-" + str(amt))
+    if st not in (200, 201) and amt > auth:
+        # Some accounts are not allowed to go over the hold: take the hold, the rest becomes a balance.
+        amt = min(due, auth)
+        st, j = pp_api("POST", "/v2/payments/authorizations/" + o["pp_auth_id"] + "/capture",
+                       {"amount": pp_money(amt), "final_capture": True, "invoice_id": o["code"]},
+                       request_id="cap-" + o["code"] + "-" + str(amt))
+    if st in (200, 201) and (j.get("status") in ("COMPLETED", "PENDING")):
+        db().execute("""UPDATE orders SET pp_state='captured', pp_captured_cents=?, paid_cents=?,
+                        pay_ref=?, pp_error=NULL WHERE id=?""", (amt, amt, j.get("id", ""), o["id"]))
+        db().commit()
+        log("payment", o["code"] + " charged " + money(amt) + " on " +
+            PP_SOURCES.get(o["pp_source"] or "", "PayPal") + " (" + why + ")" +
+            ("" if amt >= due else ", " + money(due - amt) + " left for the customer to pay"))
+        return {"ok": True, "charged": money(amt), "left": money(max(0, due - amt))}
+    msg = pp_err(j, "PayPal would not charge the hold.")
+    db().execute("UPDATE orders SET pp_error=? WHERE id=?", (msg[:300], o["id"]))
+    db().commit()
+    log("payment", o["code"] + " PayPal charge failed: " + msg)
+    return {"ok": False, "error": msg}
+
+def pp_void(o, why="cancelled"):
+    if (o["pp_state"] or "") != "authorized" or not o["pp_auth_id"]:
+        return {"ok": False, "error": "No PayPal hold on this order."}
+    st, j = pp_api("POST", "/v2/payments/authorizations/" + o["pp_auth_id"] + "/void")
+    if st in (200, 204):
+        db().execute("UPDATE orders SET pp_state='voided', paid_cents=0, pp_error=NULL WHERE id=?", (o["id"],))
+        db().commit()
+        log("payment", o["code"] + " PayPal hold released (" + why + ")")
+        return {"ok": True, "voided": True}
+    msg = pp_err(j, "PayPal would not release the hold.")
+    db().execute("UPDATE orders SET pp_error=? WHERE id=?", (msg[:300], o["id"]))
+    db().commit()
+    return {"ok": False, "error": msg}
+
+def pp_sweep(force=False):
+    """Charge delivered orders once the tip window is over; release holds on cancelled ones."""
+    if not pp_enabled():
+        return
+    if not force and time.time() - _pp_last_sweep[0] < 30:
+        return
+    _pp_last_sweep[0] = time.time()
+    cut = (dt.datetime.now() - dt.timedelta(minutes=pp_tip_window_min())).isoformat(timespec="seconds")
+    try:
+        for o in db().execute("""SELECT * FROM orders WHERE pp_state='authorized' AND pp_error IS NULL
+                                 AND ((dispatch_status='delivered' AND COALESCE(delivered_at,'') <= ?)
+                                      OR dispatch_status='cancelled')""", (cut,)).fetchall():
+            if o["dispatch_status"] == "cancelled":
+                pp_void(o)
+            else:
+                pp_settle(o, "tip window over")
+    except Exception as e:
+        print("paypal sweep skipped:", e)
+
+def pp_info(o):
+    """Payment bits the tracking page and the dispatch card need."""
+    st = (o["pp_state"] or "") if "pp_state" in o.keys() else ""
+    owed = balance_cents(o) if st == "captured" else 0
+    return {"enabled": pp_enabled(), "state": st, "source": PP_SOURCES.get(o["pp_source"] or "", ""),
+            "pay_url": "/pay/" + o["code"],
+            "can_pay": pp_enabled() and o["dispatch_status"] == "awaiting_payment" and st != "authorized",
+            "tip_editable": st in ("authorized", "captured") and o["dispatch_status"] != "cancelled",
+            "owed_cents": max(0, owed), "owed": money(max(0, owed)),
+            "held": money(o["pp_auth_cents"] or 0) if st else "",
+            "charged": money(o["pp_captured_cents"] or 0) if st == "captured" else "",
+            "error": (o["pp_error"] or "") if "pp_error" in o.keys() else "",
+            "tip_window_min": pp_tip_window_min()}
+
+@app.route("/pay/<code>")
+def pay_page(code):
+    o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
+    if not o:
+        return render_template("pay.html", order=None, code=code, pp_ready=pp_enabled())
+    r = db().execute("SELECT name FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+    kind = "balance" if request.args.get("kind") == "balance" else "order"
+    info = pp_info(o)
+    amount = info["owed"] if kind == "balance" else money(o["total_cents"])
+    return render_template("pay.html", order=o, code=code, kind=kind, amount=amount, info=info,
+                           rname=(o["pickup_name"] or (r["name"] if r else "")),
+                           pp_ready=pp_enabled(), client_id=PAYPAL_CLIENT_ID,
+                           is_dispatch=bool(dispatcher_required()))
+
+@app.post("/api/paypal/create")
+def api_pp_create():
+    if not pp_enabled():
+        return jsonify({"ok": False, "error": "PayPal is not set up yet."}), 400
+    b = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE code=?", ((b.get("code") or "").strip(),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    kind = "balance" if b.get("kind") == "balance" else "order"
+    if kind == "order":
+        if o["dispatch_status"] != "awaiting_payment" or (o["pp_state"] or "") == "authorized":
+            return jsonify({"ok": False, "error": "This order is already paid."}), 400
+        cents, intent = int(o["total_cents"]), "AUTHORIZE"
+    else:
+        cents, intent = pp_info(o)["owed_cents"], "CAPTURE"
+        if cents <= 0:
+            return jsonify({"ok": False, "error": "Nothing is owed on this order."}), 400
+    st, j = pp_api("POST", "/v2/checkout/orders", {
+        "intent": intent,
+        "purchase_units": [{"reference_id": o["code"], "custom_id": o["code"],
+                            "description": ("Delivery order " if kind == "order" else "Rest of tip, order ") + o["code"],
+                            "amount": pp_money(cents)}],
+        "application_context": {"shipping_preference": "NO_SHIPPING", "user_action": "PAY_NOW",
+                                "brand_name": (setting("business_name", str) or "Fleet Delivery")[:120]}})
+    if st not in (200, 201) or not j.get("id"):
+        return jsonify({"ok": False, "error": pp_err(j, "PayPal could not start the payment.")}), 400
+    if kind == "order":
+        db().execute("UPDATE orders SET pp_order_id=? WHERE id=?", (j["id"], o["id"]))
+        db().commit()
+    return jsonify({"ok": True, "id": j["id"]})
+
+@app.post("/api/paypal/approve")
+def api_pp_approve():
+    if not pp_enabled():
+        return jsonify({"ok": False, "error": "PayPal is not set up yet."}), 400
+    b = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE code=?", ((b.get("code") or "").strip(),)).fetchone()
+    ppid = (b.get("id") or "").strip()
+    if not o or not ppid:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    if b.get("kind") == "balance":
+        st, j = pp_api("POST", "/v2/checkout/orders/" + ppid + "/capture", request_id="bal-" + ppid)
+        cap = (((j.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or [{}])[0]
+        if st not in (200, 201) or cap.get("status") not in ("COMPLETED", "PENDING"):
+            return jsonify({"ok": False, "error": pp_err(j, "The payment did not go through.")}), 400
+        if (((j.get("purchase_units") or [{}])[0]).get("reference_id")) not in (None, o["code"]):
+            return jsonify({"ok": False, "error": "That payment is for a different order."}), 400
+        cents = int(round(float(cap["amount"]["value"]) * 100))
+        src = next(iter(j.get("payment_source") or {"paypal": 1}))
+        add_extra_charge(o, cents, "Rest of tip (" + PP_SOURCES.get(src, "PayPal") + ")", cap.get("id", ""))
+        db().execute("UPDATE orders SET pp_captured_cents=COALESCE(pp_captured_cents,0)+? WHERE id=?", (cents, o["id"]))
+        db().commit()
+        log("payment", o["code"] + " customer paid the rest, " + money(cents))
+        return jsonify({"ok": True, "paid": money(cents)})
+    if ppid != (o["pp_order_id"] or ""):
+        return jsonify({"ok": False, "error": "That payment is for a different order."}), 400
+    if (o["pp_state"] or "") == "authorized":
+        return jsonify({"ok": True, "already": True})
+    st, j = pp_api("POST", "/v2/checkout/orders/" + ppid + "/authorize", request_id="auth-" + ppid)
+    auth = (((j.get("purchase_units") or [{}])[0].get("payments") or {}).get("authorizations") or [{}])[0]
+    if st not in (200, 201) or auth.get("status") not in ("CREATED", "PENDING") or not auth.get("id"):
+        return jsonify({"ok": False, "error": pp_err(j, "The payment did not go through.")}), 400
+    cents = int(round(float(auth["amount"]["value"]) * 100))
+    src = next(iter(j.get("payment_source") or {"paypal": 1}))
+    db().execute("""UPDATE orders SET pp_auth_id=?, pp_auth_cents=?, pp_state='authorized', pp_source=?,
+                    pp_error=NULL, pp_auth_at=? WHERE id=?""", (auth["id"], cents, src, now(), o["id"]))
+    db().commit()
+    o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
+    mark_paid(o, src if src in ("venmo", "paypal") else "card_paypal", auth["id"], cents)
+    return jsonify({"ok": True, "held": money(cents), "source": PP_SOURCES.get(src, "PayPal")})
+
+def pp_refund(o, cents, note=""):
+    """Refund money PayPal already charged, newest-first over the main charge and any
+    Pay the rest charges. Returns (ok, refund ids, error)."""
+    extras = [x for x in json.loads(o["extra_charges"] or "[]") if str(x.get("label", "")).startswith("Rest of tip")]
+    extra_total = sum(int(x["cents"]) for x in extras)
+    main = int(o["pp_captured_cents"] or 0) - extra_total
+    caps = [(o["pay_ref"], main)] + [(x.get("ref"), int(x["cents"])) for x in extras]
+    already = int(o["refunded_cents"] or 0)
+    room = []
+    for cid, amt in caps:            # earlier refunds used up the oldest charges first
+        used = min(already, amt)
+        already -= used
+        if cid and amt - used > 0:
+            room.append((cid, amt - used))
+    refs, want = [], int(cents)
+    for cid, avail in reversed(room):
+        if want <= 0:
+            break
+        take = min(want, avail)
+        body = {"amount": pp_money(take)}
+        if note:
+            body["note_to_payer"] = note[:255]
+        st, j = pp_api("POST", "/v2/payments/captures/" + cid + "/refund", body,
+                       request_id="ref-" + cid + "-" + str(int(o["refunded_cents"] or 0)) + "-" + str(take))
+        if st not in (200, 201) or j.get("status") not in ("COMPLETED", "PENDING"):
+            done = int(cents) - want
+            return False, refs, pp_err(j, "the refund did not go through.") + \
+                (" (" + money(done) + " was already refunded before it stopped)" if done else "")
+        refs.append(j.get("id", ""))
+        want -= take
+    if want > 0:
+        return False, refs, "only " + money(int(cents) - want) + " could be refunded through PayPal."
+    log("payment", o["code"] + " refunded " + money(cents) + " through " + PP_SOURCES.get(o["pp_source"] or "", "PayPal"))
+    return True, refs, ""
+
+@app.post("/api/paypal/settle")
+def api_pp_settle():
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    res = pp_void(o, "released by dispatch") if b.get("op") == "void" else pp_settle(o, "charged by dispatch")
+    return jsonify(res), (200 if res.get("ok") else 400)
+
+@app.post("/api/track/<code>/tip")
+def api_track_tip(code):
+    """Customer adds or changes the tip, before or after delivery."""
+    o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    if not pp_info(o)["tip_editable"]:
+        return jsonify({"ok": False, "error": "Tips can only be changed here on orders paid with Venmo, PayPal or card online."}), 400
+    try:
+        cents = int(round(float(str(request.get_json(force=True).get("tip", "0")).replace("$", "")) * 100))
+    except Exception:
+        return jsonify({"ok": False, "error": "Type a tip amount, like 5.00."}), 400
+    if cents < 0 or cents > 20000:
+        return jsonify({"ok": False, "error": "Tips can be $0.00 to $200.00."}), 400
+    if o["pp_state"] == "captured" and cents < int(o["tip_cents"] or 0):
+        return jsonify({"ok": False, "error": "Your card was already charged, so the tip can only go up. Call dispatch to lower it."}), 400
+    diff = cents - int(o["tip_cents"] or 0)
+    db().execute("UPDATE orders SET tip_cents=?, total_cents=total_cents+? WHERE id=?", (cents, diff, o["id"]))
+    db().commit()
+    log("order", o["code"] + " customer set the tip to " + money(cents))
+    if o["driver_id"] and diff:
+        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                     (o["driver_id"], "system", "Tip on " + o["code"] + " is now " + money(cents) + ".", now()))
+        db().commit()
+    o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
+    out = {"ok": True, "tip": money(cents), "total": money(o["total_cents"])}
+    if o["pp_state"] == "authorized" and o["dispatch_status"] == "delivered":
+        out["charge"] = pp_settle(o, "tip added after delivery")
+    out["pay"] = pp_info(db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone())
+    return jsonify(out)
+
+@app.context_processor
+def inject_paypal():
+    return {"pp_enabled": pp_enabled()}
+
+
 # ---------------------------------------------------------------- future orders
 FUTURE_LEAD_ERR = []
 FUTURE_MIN_AHEAD = 30      # a future order has to be at least this far out
@@ -1687,7 +2304,8 @@ def future_slots(r, day):
     t = dt.datetime.combine(day, dt.time(0, 0))
     end = t + dt.timedelta(days=1)
     while t < end:
-        if t >= earliest and is_open(r, t):
+        if (t >= earliest and is_open(r, t) and business_in_hours(t) and
+                (r["slug"] != "oneoff" or dispatcher_required() or item_available(any_rest_row(), t))):
             out.append(t.strftime("%Y-%m-%dT%H:%M"))
         t += dt.timedelta(minutes=15)
     return out
@@ -1807,6 +2425,8 @@ def api_dispatch_future():
         return jsonify({"ok": False}), 403
     rows = db().execute("""SELECT * FROM orders WHERE dispatch_status='scheduled'
                            ORDER BY scheduled_for ASC""").fetchall()
+    myr = dispatcher_work_regions(session.get("dispatcher_id"))
+    rows = [o for o in rows if covers(myr, o["region_id"])]
     out = []
     for o in rows:
         x = order_dict(o)
@@ -1874,6 +2494,9 @@ def checkout():
         if sched > dt.datetime.now() + dt.timedelta(days=FUTURE_MAX_DAYS):
             return jsonify({"ok": False, "error": "Future orders can be up to " +
                             str(FUTURE_MAX_DAYS) + " days out."}), 400
+        if not is_disp and not business_in_hours(sched):
+            return jsonify({"ok": False, "error": "We are not open at " + when_label(sched.isoformat()) +
+                            ". Our hours are " + business_hours_label() + "."}), 400
         if not is_disp and not is_open(r, sched):
             return jsonify({"ok": False, "error": r["name"] + " is not open at " +
                             when_label(sched.isoformat()) + ". Pick another time."}), 400
@@ -1893,8 +2516,20 @@ def checkout():
     ifee = item_fees(items)
     if subtotal <= 0:
         return jsonify({"ok": False, "error": "Your cart is empty."}), 400
+    # items with set days or hours: customers and drivers cannot order them outside those times.
+    # A dispatcher can still add one by hand for a call-in.
+    if not dispatcher_required():
+        when = sched or dt.datetime.now()
+        for i in items:
+            if not i.get("menu_item_id"):
+                continue
+            row = db().execute("SELECT * FROM menu_items WHERE id=?", (i["menu_item_id"],)).fetchone()
+            if row and not item_available(row, when):
+                return jsonify({"ok": False, "error": row["name"] + " is only available " + avail_label(row) +
+                                ". Take it out of your bag or pick a time when it is available."}), 400
     card = None
-    if placed_by == "customer":
+    use_pp = bool(payload.get("paypal")) and pp_enabled()
+    if placed_by == "customer" and not use_pp:
         card, card_err = check_card(payload.get("card"))
         if not card:
             return jsonify({"ok": False, "error": card_err, "field": "card"}), 400
@@ -1906,11 +2541,30 @@ def checkout():
     pu_addr = (payload.get("pickup_address") or "").strip()[:160]
     pu_phone = (payload.get("pickup_phone") or "").strip()[:24]
     pu_lat = pu_lng = None
+    unlisted = r["slug"] == "oneoff"
+    if unlisted and not dispatcher_required():
+        if not any_rest_on():
+            return jsonify({"ok": False, "error": "We are not taking orders from other restaurants right now."}), 400
+        if not item_available(any_rest_row(), sched or dt.datetime.now()):
+            return jsonify({"ok": False, "error": "Orders from restaurants we don't list are taken " +
+                            any_rest_label() + ". Pick a time inside those hours."}), 400
+    if unlisted and not dispatcher_required() and not (pu_name and pu_addr):
+        return jsonify({"ok": False, "error": "Tell us the restaurant name and its address."}), 400
+    if unlisted and not dispatcher_required():
+        # a customer's own items at a restaurant we do not list: their prices are estimates,
+        # no extra item fees, and every line has to say what it is
+        for i in items:
+            i["fee_cents"] = 0
+            i["custom"] = True
+            i["menu_item_id"] = None
+        if any(not i["name"] or i["name"] == "Custom item" for i in items):
+            return jsonify({"ok": False, "error": "Give every item a name."}), 400
+        ifee = 0
     if pu_name or pu_addr:
         if not (pu_name and pu_addr):
             return jsonify({"ok": False,
                             "error": "A typed-in pickup needs both a name and an address."}), 400
-        if not dispatcher_required():
+        if not dispatcher_required() and not unlisted:
             return jsonify({"ok": False, "error": "Dispatch sign-in required."}), 403
         gp = geocode(pu_addr)
         if gp["ok"]:
@@ -1952,7 +2606,7 @@ def checkout():
                 db().execute("UPDATE orders SET issue=?, issue_note=? WHERE id=?",
                              (issue_label, issue_note, src["id"]))
 
-    if not sched and not business_is_open():
+    if not sched and (not business_is_open() or (not dispatcher_required() and not business_in_hours())):
         # closed business: nothing goes out now, but future orders are still welcome
         msg = ("The business is closed. Open the business first, or schedule this order for later."
                if dispatcher_required() else
@@ -2009,7 +2663,8 @@ def checkout():
         # dispatch runs the card on its own terminal and marks it paid.
         db().execute("""UPDATE orders SET payment_status='unpaid', kitchen_status='waiting',
                         dispatch_status='awaiting_payment', hold_reason=?
-                        WHERE id=?""", ("card on file, run it" if card else "waiting on card", oid))
+                        WHERE id=?""", ("card on file, run it" if card else
+                                       ("waiting on Venmo/PayPal" if use_pp else "waiting on card"), oid))
         db().commit()
         if card:
             store_card(oid, card)
@@ -2041,7 +2696,8 @@ def checkout():
                         (" once the card is marked paid." if not cash else ".")
     if address_ok and cash and not (sched and dt.datetime.now() < sched - dt.timedelta(minutes=future_lead())):
         auto_assign()
-    return jsonify({"future_note": future_note, "ok": True, "cash": cash, "code": code, "order_id": oid, "total": money(total),
+    return jsonify({"pay_url": ("/pay/" + code) if (use_pp and not cash) else "",
+                    "future_note": future_note, "ok": True, "cash": cash, "code": code, "order_id": oid, "total": money(total),
                     "send_note": send_note,
                     "address_ok": bool(address_ok),
                     "message": ("" if address_ok and cash else
@@ -2156,7 +2812,9 @@ def api_track(code):
     o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
-    return jsonify({"ok": True, "order": track_payload(o)})
+    pp_sweep()
+    o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
+    return jsonify({"ok": True, "order": track_payload(o), "pay": pp_info(o)})
 
 # ---------------------------------------------------------------- dispatcher
 
@@ -2216,6 +2874,7 @@ def api_board():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     auto_assign()   # safety net: anything an earlier event missed is placed on the next refresh
+    pp_sweep()      # charge delivered PayPal/Venmo orders once the tip window is over
     purge_cards()
     try:
         purge_old_orders()
@@ -2242,8 +2901,23 @@ def api_board():
            WHERE m.sender='driver' AND m.seen_by_dispatch=0
            ORDER BY m.id DESC LIMIT 1""").fetchone()
     rests = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
+    my_regions = dispatcher_work_regions(session.get("dispatcher_id"))
+    show_all = request.args.get("all") == "1"
+    myr = set() if show_all else my_regions
+    if myr:
+        live = [o for o in live if covers(myr, o["region_id"])]
+        done = [o for o in done if covers(myr, o["region_id"])]
+        future_count = len([1 for o in db().execute(
+            "SELECT region_id FROM orders WHERE dispatch_status='scheduled'").fetchall() if covers(myr, o["region_id"])])
+        # a driver asking for dispatch or with unread messages shows for every dispatcher
+        drivers = [d for d in drivers if not driver_work_regions(d["id"]) or (driver_work_regions(d["id"]) & myr)
+                   or d["pending_request"] or unread.get(d["id"])]
+        rests = [r for r in rests if covers(myr, r["region_id"])]
     return jsonify({
         "ok": True,
+        "regions_label": region_names(my_regions),
+        "region_filtered": bool(my_regions),
+        "showing_all": show_all,
         "auto": bool(setting("auto_assign")),
         "tokens": token_list(),
         "alerts": open_call_alerts(),
@@ -2483,7 +3157,22 @@ def api_refund():
         return jsonify({"ok": False, "error": "That is more than is left to refund (" + money(left) + ")."}), 400
     note = (data.get("note") or "").strip()
     rid = "cash" if is_cash(o) else ""
-    if not is_cash(o):
+    pp_st = (o["pp_state"] or "") if "pp_state" in o.keys() else ""
+    if pp_st == "authorized":
+        # not charged yet: a full refund releases the hold, a partial one lowers what gets charged
+        if cents >= left:
+            r0 = pp_void(o, "refunded by dispatch")
+            if not r0.get("ok"):
+                return jsonify({"ok": False, "error": "PayPal: " + r0.get("error", "could not release the hold.")}), 400
+            rid = "paypal hold released"
+        else:
+            rid = "paypal hold lowered"
+    elif pp_st == "captured":
+        ok, refs, err = pp_refund(o, cents, note)
+        if not ok:
+            return jsonify({"ok": False, "error": "PayPal: " + err}), 400
+        rid = ("paypal " + ",".join(refs))[:60]
+    elif not is_cash(o):
         # refunded on whatever card terminal took the payment; we just record it
         rid = (data.get("ref") or "recorded").strip()[:60]
     total_ref = already + cents
@@ -2780,7 +3469,9 @@ def api_dispatch_users():
         return jsonify({"ok": False}), 403
     rows = db().execute("SELECT * FROM dispatchers ORDER BY name").fetchall()
     return jsonify({"ok": True, "me": session.get("dispatcher_id"),
+                    "i_am_owner": is_owner(),
                     "users": [{"id": r["id"], "name": r["name"], "username": r["username"],
+                               "owner": bool(r["is_owner"]),
                                "created_at": (r["created_at"] or "")[:10]} for r in rows]})
 
 @app.post("/api/dispatch/user")
@@ -2815,6 +3506,16 @@ def api_dispatch_user_save():
                            (name, username, password, now()))
         uid = cur.lastrowid
         log("dispatcher", "created " + username)
+    if "owner" in data:
+        want = bool(data.get("owner"))
+        cur_owner = is_owner(uid)
+        if want != cur_owner:
+            if not is_owner():
+                return jsonify({"ok": False, "error": "Only an owner can make someone an owner."}), 403
+            if not want and db().execute("SELECT COUNT(*) c FROM dispatchers WHERE is_owner=1").fetchone()["c"] <= 1:
+                return jsonify({"ok": False, "error": "Keep at least one owner account."}), 400
+            db().execute("UPDATE dispatchers SET is_owner=? WHERE id=?", (1 if want else 0, uid))
+            log("dispatcher", (session.get("dispatcher_name") or "dispatch") + (" made " if want else " removed owner from ") + username)
     db().commit()
     return jsonify({"ok": True, "id": uid, "name": name, "username": username})
 
@@ -2827,6 +3528,11 @@ def api_dispatch_user_delete():
         return jsonify({"ok": False, "error": "You cannot remove the account you are signed in with."}), 400
     if db().execute("SELECT COUNT(*) c FROM dispatchers").fetchone()["c"] <= 1:
         return jsonify({"ok": False, "error": "Keep at least one dispatcher account."}), 400
+    if is_owner(uid):
+        if not is_owner():
+            return jsonify({"ok": False, "error": "Only an owner can remove an owner account."}), 403
+        if db().execute("SELECT COUNT(*) c FROM dispatchers WHERE is_owner=1").fetchone()["c"] <= 1:
+            return jsonify({"ok": False, "error": "Keep at least one owner account."}), 400
     db().execute("DELETE FROM dispatchers WHERE id=?", (uid,))
     log("dispatcher", "removed id " + str(uid))
     db().commit()
@@ -2837,22 +3543,61 @@ def api_staff_chat():
     """The dispatcher room: every dispatcher on duty sees this thread."""
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
-    rows = db().execute("""SELECT * FROM messages WHERE driver_id=0 ORDER BY id DESC LIMIT 60""").fetchall()
-    return jsonify({"ok": True, "me": session.get("dispatcher_name"),
-                    "messages": [{"sender": r["sender_name"] or r["sender"], "body": r["body"],
-                                  "mine": r["dispatcher_id"] == session.get("dispatcher_id"),
-                                  "at": r["created_at"][11:16]} for r in reversed(rows)]})
+    stamp_regions()
+    me = session.get("dispatcher_id")
+    owner = is_owner(me)
+    myr = dispatcher_region_ids(me)
+    names = {r["id"]: r["name"] for r in all_regions()}
+    room = request.args.get("room", "all")
+    rows = db().execute("""SELECT m.*, COALESCE(d.is_owner,0) AS from_owner FROM messages m
+                           LEFT JOIN dispatchers d ON d.id=m.dispatcher_id
+                           WHERE m.driver_id=0 ORDER BY m.id DESC LIMIT 400""").fetchall()
+    out = []
+    for r in rows:
+        rg = r["region_id"] or 0
+        if not owner and myr and rg and rg not in myr:
+            continue     # another region's room
+        if room not in ("all", "") and str(rg) != room and not (rg == 0 and room.isdigit()):
+            continue
+        out.append({"sender": r["sender_name"] or r["sender"], "body": r["body"],
+                    "mine": r["dispatcher_id"] == me, "owner": bool(r["from_owner"]),
+                    "region": names.get(rg, "All regions") if rg else "All regions",
+                    "at": r["created_at"][11:16]})
+        if len(out) >= 80:
+            break
+    if owner or not myr:
+        rooms = [{"id": 0, "name": "All regions"}] + [{"id": k, "name": v} for k, v in names.items()]
+    else:
+        rooms = [{"id": k, "name": v} for k, v in names.items() if k in myr]
+    return jsonify({"ok": True, "me": session.get("dispatcher_name"), "owner": owner,
+                    "rooms": rooms, "messages": list(reversed(out))})
 
 @app.post("/api/dispatch/staff-chat")
 def api_staff_chat_send():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
-    body = (request.get_json(force=True).get("body") or "").strip()
+    b = request.get_json(force=True) or {}
+    body = (b.get("body") or "").strip()
     if not body:
         return jsonify({"ok": False}), 400
-    db().execute("""INSERT INTO messages(driver_id,sender,sender_name,dispatcher_id,body,created_at)
-                    VALUES(0,'dispatch',?,?,?,?)""",
-                 (session.get("dispatcher_name"), session.get("dispatcher_id"), body, now()))
+    me = session.get("dispatcher_id")
+    myr = dispatcher_region_ids(me)
+    try:
+        rg = int(b.get("room") or 0)
+    except (TypeError, ValueError):
+        rg = 0
+    valid = {r["id"] for r in all_regions()}
+    if rg and rg not in valid:
+        return jsonify({"ok": False, "error": "That region is gone."}), 400
+    if not is_owner(me) and myr:
+        if rg not in myr:
+            if len(myr) == 1:
+                rg = next(iter(myr))
+            else:
+                return jsonify({"ok": False, "error": "Pick one of your regions to send to."}), 400
+    db().execute("""INSERT INTO messages(driver_id,sender,sender_name,dispatcher_id,body,created_at,region_id)
+                    VALUES(0,'dispatch',?,?,?,?,?)""",
+                 (session.get("dispatcher_name"), me, body, now(), rg))
     db().commit()
     return jsonify({"ok": True})
 
@@ -3291,6 +4036,8 @@ def week_block(driver_id, week_start):
             "status": (mine[0]["status"] or "pending") if mine else "",
             "reply": (mine[0]["reply"] or "") if mine else "",
             "id": mine[0]["id"] if mine else None,
+            "regions": sorted(slot_regions(mine[0])) if mine else [],
+            "region_label": region_names(slot_regions(mine[0])) if mine and slot_regions(mine[0]) else "",
             "closed": bool(off_today(driver_id, date.isoformat())),
         })
     due = week_due(week_start)
@@ -3328,6 +4075,8 @@ def availability_for(driver_id, only_approved=False):
              "status": r["status"] or "pending", "reply": r["reply"] or "",
              "decided_by": r["decided_by"] or "",
              "week_start": r["week_start"] or "",
+             "regions": sorted(slot_regions(r)),
+             "region_label": (region_names(slot_regions(r)) if slot_regions(r) else ""),
              "date": ((dt.date.fromisoformat(r["week_start"]) + dt.timedelta(days=r["dow"])).isoformat()
                       if r["week_start"] else ""),
              "date_label": (short_date(dt.date.fromisoformat(r["week_start"]) + dt.timedelta(days=r["dow"]))
@@ -3426,8 +4175,9 @@ def api_driver_availability():
         else:
             _d = dt.date.today() + dt.timedelta(days=(dow - dt.date.today().weekday()) % 7)
         db().execute("""INSERT INTO availability(driver_id,dow,start_time,end_time,note,status,created_at,
-                        week_start) VALUES(?,?,?,?,?,'pending',?,?)""",
-                     (did, dow, start, end, data.get("note", ""), now(), monday_of(_d).isoformat()))
+                        week_start,region_ids) VALUES(?,?,?,?,?,'pending',?,?,?)""",
+                     (did, dow, start, end, data.get("note", ""), now(), monday_of(_d).isoformat(),
+                      clean_region_ids(data.get("regions"))))
         name = db().execute("SELECT name FROM drivers WHERE id=?", (did,)).fetchone()["name"]
         log("availability", name + " asked for " + DOW_NAMES[dow] + " " + start + "-" + end)
     db().commit()
@@ -3477,14 +4227,15 @@ def api_driver_week_save():
         if end <= start:
             return jsonify({"ok": False,
                             "error": DOW_NAMES[int(d.get("dow", 0))] + ": the end time has to be after the start."}), 400
-        clean.append((int(d.get("dow", 0)), start, end, (d.get("note") or "").strip()))
+        clean.append((int(d.get("dow", 0)), start, end, (d.get("note") or "").strip(),
+                      clean_region_ids(d.get("regions"))))
     stamp = now()
     key = ws.isoformat()
     db().execute("DELETE FROM availability WHERE driver_id=? AND week_start=?", (did, key))
-    for dow, start, end, note in clean:
+    for dow, start, end, note, rids in clean:
         db().execute("""INSERT INTO availability(driver_id,dow,start_time,end_time,note,status,
-                        created_at,week_start) VALUES(?,?,?,?,?,'pending',?,?)""",
-                     (did, dow, start, end, note, stamp, key))
+                        created_at,week_start,region_ids) VALUES(?,?,?,?,?,'pending',?,?,?)""",
+                     (did, dow, start, end, note, stamp, key, rids))
     db().execute("""INSERT INTO week_submissions(driver_id,week_start,submitted_at,note)
                     VALUES(?,?,?,?)
                     ON CONFLICT(driver_id,week_start)
@@ -3679,9 +4430,10 @@ def api_dispatch_schedule_edit():
                 db().execute("DELETE FROM availability WHERE driver_id=? AND week_start=? AND dow=?",
                              (did, ws, dow))
             db().execute("""INSERT INTO availability(driver_id,dow,start_time,end_time,note,status,
-                            decided_by,decided_at,created_at,week_start)
-                            VALUES(?,?,?,?,?,'approved',?,?,?,?)""",
-                         (did, dow, start, end, b.get("note", ""), who, now(), now(), ws))
+                            decided_by,decided_at,created_at,week_start,region_ids)
+                            VALUES(?,?,?,?,?,'approved',?,?,?,?,?)""",
+                         (did, dow, start, end, b.get("note", ""), who, now(), now(), ws,
+                          clean_region_ids(b.get("regions"))))
             body = ("Dispatch put you on for " + DOW_NAMES[dow] + " " + short_date(day) + " " +
                     start + "-" + end + ".")
         db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
@@ -3692,8 +4444,9 @@ def api_dispatch_schedule_edit():
         if end <= start:
             return jsonify({"ok": False, "error": "The end time has to be after the start time."}), 400
         db().execute("""INSERT INTO availability(driver_id,dow,start_time,end_time,note,status,
-                        decided_by,decided_at,created_at) VALUES(?,?,?,?,?,'approved',?,?,?)""",
-                     (b["driver_id"], dow, start, end, b.get("note", ""), who, now(), now()))
+                        decided_by,decided_at,created_at,region_ids) VALUES(?,?,?,?,?,'approved',?,?,?,?)""",
+                     (b["driver_id"], dow, start, end, b.get("note", ""), who, now(), now(),
+                      clean_region_ids(b.get("regions"))))
         db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
                      (b["driver_id"], "dispatch", who,
                       "Dispatch put you on for " + DOW_NAMES[dow] + " " + start + "-" + end + ".", now()))
@@ -3732,6 +4485,278 @@ def api_dispatch_schedule_edit():
     db().commit()
     log("schedule", op)
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------- dispatcher availability
+
+def _disp_slot_on(s, when):
+    """Does this weekly slot cover this moment? An end before the start runs past midnight."""
+    st, en = _hm(s["start_time"]), _hm(s["end_time"])
+    if st is None or en is None:
+        return False
+    m = when.hour * 60 + when.minute
+    if en > st:
+        return s["dow"] == when.weekday() and st <= m < en
+    return (s["dow"] == when.weekday() and m >= st) or (s["dow"] == (when.weekday() - 1) % 7 and m < en)
+
+
+def dispatcher_avail_payload():
+    con = db()
+    me = session.get("dispatcher_id")
+    nowdt = dt.datetime.now()
+    out = []
+    for d in con.execute("SELECT id, name, phone FROM dispatchers ORDER BY name").fetchall():
+        rows = con.execute("""SELECT * FROM dispatcher_availability WHERE dispatcher_id=?
+                              ORDER BY dow, start_time""", (d["id"],)).fetchall()
+        slots = [{"id": s["id"], "dow": s["dow"], "day": DOW_NAMES[s["dow"]],
+                  "start": s["start_time"], "end": s["end_time"],
+                  "label": _ampm(s["start_time"]) + " - " + _ampm(s["end_time"]) +
+                           (" (overnight)" if (_hm(s["end_time"]) or 0) <= (_hm(s["start_time"]) or 0) else ""),
+                  "note": s["note"] or "", "on_now": _disp_slot_on(s, nowdt),
+                  "regions": sorted(slot_regions(s)),
+                  "region_label": (region_names(slot_regions(s)) if slot_regions(s) else "")} for s in rows]
+        mins = 0
+        for s in rows:
+            a, b = _hm(s["start_time"]), _hm(s["end_time"])
+            if a is not None and b is not None:
+                mins += (b - a) if b > a else (1440 - a + b)
+        ph = d["phone"] or ""
+        out.append({"id": d["id"], "name": d["name"], "me": d["id"] == me, "slots": slots, "phone": ph,
+                    "phone_label": ("(%s) %s-%s" % (ph[:3], ph[3:6], ph[6:])) if len(ph) == 10 else ph,
+                    "on_now": any(x["on_now"] for x in slots), "hours": round(mins / 60, 1)})
+    return {"ok": True, "me": me, "dispatchers": out}
+
+
+@app.get("/api/dispatch/dispatcher-avail")
+def api_dispatcher_avail():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    return jsonify(dispatcher_avail_payload())
+
+
+@app.post("/api/dispatch/dispatcher-avail")
+def api_dispatcher_avail_edit():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    con = db()
+    who = session.get("dispatcher_name") or "dispatch"
+    if b.get("op") == "phone":
+        d = con.execute("SELECT id, name FROM dispatchers WHERE id=?", (b.get("dispatcher_id"),)).fetchone()
+        if not d:
+            return jsonify({"ok": False, "error": "Pick a dispatcher."}), 400
+        ph = "".join(c for c in str(b.get("phone") or "") if c.isdigit())
+        if len(ph) == 11 and ph.startswith("1"):
+            ph = ph[1:]
+        if ph and len(ph) != 10:
+            return jsonify({"ok": False, "error": "The phone number needs 10 digits, like 334-209-2844."}), 400
+        con.execute("UPDATE dispatchers SET phone=? WHERE id=?", (ph, d["id"]))
+        con.commit()
+        log("availability", who + (" set " if ph else " cleared ") + d["name"] + "'s phone number")
+        return jsonify(dispatcher_avail_payload())
+    if b.get("op") == "delete":
+        s = con.execute("SELECT * FROM dispatcher_availability WHERE id=?", (b.get("id"),)).fetchone()
+        if not s:
+            return jsonify({"ok": False, "error": "That time is already gone."}), 404
+        con.execute("DELETE FROM dispatcher_availability WHERE id=?", (s["id"],))
+        nm = con.execute("SELECT name FROM dispatchers WHERE id=?", (s["dispatcher_id"],)).fetchone()
+        log("availability", who + " removed " + (nm["name"] if nm else "a dispatcher") + "'s " +
+            DOW_NAMES[s["dow"]] + " " + s["start_time"] + "-" + s["end_time"])
+        con.commit()
+        return jsonify(dispatcher_avail_payload())
+    did = b.get("dispatcher_id") or session.get("dispatcher_id")
+    d = con.execute("SELECT id, name FROM dispatchers WHERE id=?", (did,)).fetchone()
+    if not d:
+        return jsonify({"ok": False, "error": "Pick a dispatcher."}), 400
+    days = sorted({int(x) for x in (b.get("days") or []) if str(x).isdigit() and 0 <= int(x) <= 6})
+    if not days:
+        return jsonify({"ok": False, "error": "Check at least one day."}), 400
+    st = str(b.get("start") or "").strip()[:5]
+    en = str(b.get("end") or "").strip()[:5]
+    if _hm(st) is None or _hm(en) is None:
+        return jsonify({"ok": False, "error": "Set a start and an end time."}), 400
+    if _hm(st) == _hm(en):
+        return jsonify({"ok": False, "error": "The start and end time cannot be the same."}), 400
+    note = " ".join(str(b.get("note") or "").split())[:80]
+    added = 0
+    for dow in days:
+        if con.execute("""SELECT 1 FROM dispatcher_availability WHERE dispatcher_id=? AND dow=?
+                          AND start_time=? AND end_time=?""", (d["id"], dow, st, en)).fetchone():
+            continue
+        con.execute("""INSERT INTO dispatcher_availability(dispatcher_id,dow,start_time,end_time,note,
+                       created_by,created_at,region_ids) VALUES(?,?,?,?,?,?,?,?)""",
+                    (d["id"], dow, st, en, note, who, now(), clean_region_ids(b.get("regions"))))
+        added += 1
+    con.commit()
+    log("availability", who + " set " + d["name"] + " available " + ", ".join(DOW_NAMES[x] for x in days) +
+        " " + st + "-" + en)
+    out = dispatcher_avail_payload()
+    out["added"] = added
+    return jsonify(out)
+
+
+# ---------------------------------------------------------------- regions page
+
+def regions_payload():
+    con = db()
+    regs = all_regions()
+    return {"ok": True, "me": session.get("dispatcher_id"),
+            "regions": [{"id": r["id"], "name": r["name"],
+                         "restaurants": con.execute("SELECT COUNT(*) c FROM restaurants WHERE region_id=? AND slug!='oneoff'",
+                                                    (r["id"],)).fetchone()["c"]} for r in regs],
+            "restaurants": [{"id": r["id"], "name": r["name"], "address": r["address"] or "",
+                             "region_id": r["region_id"] or 0}
+                            for r in con.execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()],
+            "drivers": [{"id": d["id"], "name": d["name"], "regions": sorted(driver_region_ids(d["id"]))}
+                        for d in con.execute("SELECT id, name FROM drivers ORDER BY name").fetchall()],
+            "dispatchers": [{"id": d["id"], "name": d["name"], "regions": sorted(dispatcher_region_ids(d["id"]))}
+                            for d in con.execute("SELECT id, name FROM dispatchers ORDER BY name").fetchall()]}
+
+
+@app.get("/api/dispatch/find-order")
+def api_find_order():
+    """Look up any order in any region by code, phone or customer name."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify({"ok": True, "results": []})
+    digits = "".join(c for c in q if c.isdigit())
+    like = "%" + q.lower() + "%"
+    rows = db().execute("""SELECT * FROM orders WHERE lower(code) LIKE ? OR lower(COALESCE(customer_name,'')) LIKE ?
+                           OR (? != '' AND length(?) >= 4 AND replace(replace(replace(replace(COALESCE(customer_phone,''),'-',''),' ',''),'(',''),')','') LIKE ?)
+                           ORDER BY created_at DESC LIMIT 25""",
+                        (like, like, digits, digits, "%" + digits + "%")).fetchall()
+    names = {r["id"]: r["name"] for r in all_regions()}
+    myr = dispatcher_work_regions(session.get("dispatcher_id"))
+    out = []
+    for o in rows:
+        x = order_dict(o)
+        d = db().execute("SELECT name FROM drivers WHERE id=?", (o["driver_id"],)).fetchone() if o["driver_id"] else None
+        out.append({"id": o["id"], "code": o["code"], "customer": x.get("customer") or o["customer_name"],
+                    "restaurant": x.get("restaurant") or "", "status": o["dispatch_status"],
+                    "kitchen": o["kitchen_status"], "hold_reason": o["hold_reason"] or "",
+                    "driver": d["name"] if d else "", "created": (o["created_at"] or "")[:16].replace("T", " "),
+                    "region": names.get(o["region_id"] or 0, "No region"),
+                    "mine": covers(myr, o["region_id"]),
+                    "track": "/track/" + o["code"]})
+    return jsonify({"ok": True, "results": out})
+
+
+@app.get("/api/regions-list")
+def api_regions_list():
+    if not (session.get("dispatcher_id") or session.get("driver_id")):
+        return jsonify({"ok": False}), 403
+    stamp_regions()
+    mine = (driver_region_ids(session["driver_id"]) if session.get("driver_id") and not session.get("dispatcher_id")
+            else dispatcher_region_ids(session.get("dispatcher_id")))
+    return jsonify({"ok": True, "regions": [{"id": r["id"], "name": r["name"]} for r in all_regions()],
+                    "mine": sorted(mine)})
+
+
+@app.get("/dispatch/regions")
+def dispatch_regions_page():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    stamp_regions()
+    return render_template("dispatch_regions.html")
+
+
+@app.get("/api/dispatch/regions")
+def api_regions():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    stamp_regions()
+    return jsonify(regions_payload())
+
+
+@app.post("/api/dispatch/regions")
+def api_regions_edit():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    con = db()
+    op = b.get("op")
+    who = session.get("dispatcher_name") or "dispatch"
+    valid = {r["id"] for r in all_regions()}
+
+    def ids(lst):
+        out = set()
+        for x in lst or []:
+            try:
+                x = int(x)
+            except (TypeError, ValueError):
+                continue
+            if x in valid:
+                out.add(x)
+        return out
+
+    if op in ("add_region", "rename_region"):
+        name = " ".join(str(b.get("name") or "").split())[:40]
+        if not name:
+            return jsonify({"ok": False, "error": "Give the region a name."}), 400
+        clash = con.execute("SELECT id FROM regions WHERE lower(name)=lower(?) AND id IS NOT ?",
+                            (name, b.get("id") if op == "rename_region" else None)).fetchone()
+        if clash:
+            return jsonify({"ok": False, "error": "There is already a region called " + name + "."}), 400
+        if op == "add_region":
+            srt = (con.execute("SELECT COALESCE(MAX(sort),0)+1 s FROM regions").fetchone()["s"])
+            cur = con.execute("INSERT INTO regions(name,sort,created_at) VALUES(?,?,?)", (name, srt, now()))
+            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('regions_seeded','1')")
+            log("region", who + " added region " + name)
+            if b.get("match_towns"):
+                for r in con.execute("""SELECT id, address FROM restaurants WHERE COALESCE(region_id,0)=0
+                                        AND slug!='oneoff'""").fetchall():
+                    if region_match(r["address"]) == cur.lastrowid:
+                        con.execute("UPDATE restaurants SET region_id=? WHERE id=?", (cur.lastrowid, r["id"]))
+        else:
+            if int(b.get("id") or 0) not in valid:
+                return jsonify({"ok": False, "error": "That region is gone."}), 404
+            con.execute("UPDATE regions SET name=? WHERE id=?", (name, b["id"]))
+            log("region", who + " renamed a region to " + name)
+    elif op == "delete_region":
+        rid = int(b.get("id") or 0)
+        if rid not in valid:
+            return jsonify({"ok": False, "error": "That region is gone."}), 404
+        nm = con.execute("SELECT name FROM regions WHERE id=?", (rid,)).fetchone()["name"]
+        con.execute("UPDATE restaurants SET region_id=0 WHERE region_id=?", (rid,))
+        con.execute("UPDATE orders SET region_id=0 WHERE region_id=?", (rid,))
+        con.execute("DELETE FROM driver_regions WHERE region_id=?", (rid,))
+        con.execute("DELETE FROM dispatcher_regions WHERE region_id=?", (rid,))
+        con.execute("DELETE FROM regions WHERE id=?", (rid,))
+        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('regions_seeded','1')")
+        log("region", who + " deleted region " + nm)
+    elif op == "set_restaurant":
+        rid = int(b.get("region_id") or 0)
+        if rid and rid not in valid:
+            return jsonify({"ok": False, "error": "Pick a region."}), 400
+        r = con.execute("SELECT id, name FROM restaurants WHERE id=?", (b.get("restaurant_id"),)).fetchone()
+        if not r:
+            return jsonify({"ok": False, "error": "Restaurant not found."}), 404
+        con.execute("UPDATE restaurants SET region_id=? WHERE id=?", (rid, r["id"]))
+        # orders still on the board follow the restaurant to its new region
+        con.execute("""UPDATE orders SET region_id=? WHERE restaurant_id=? AND COALESCE(pickup_address,'')=''
+                       AND dispatch_status NOT IN ('delivered','cancelled')""", (rid, r["id"]))
+        log("region", who + " put " + r["name"] + " in " + region_names({rid} if rid else set()).replace("All regions", "no region"))
+    elif op in ("set_driver", "set_dispatcher"):
+        table, col = ("driver_regions", "driver_id") if op == "set_driver" else ("dispatcher_regions", "dispatcher_id")
+        src = "drivers" if op == "set_driver" else "dispatchers"
+        p = con.execute("SELECT id, name FROM " + src + " WHERE id=?", (b.get("id"),)).fetchone()
+        if not p:
+            return jsonify({"ok": False, "error": "Not found."}), 404
+        chosen = ids(b.get("regions"))
+        con.execute("DELETE FROM " + table + " WHERE " + col + "=?", (p["id"],))
+        for x in chosen:
+            con.execute("INSERT INTO " + table + "(" + col + ",region_id) VALUES(?,?)", (p["id"], x))
+        log("region", who + " set " + p["name"] + " to " + region_names(chosen))
+    else:
+        return jsonify({"ok": False, "error": "Unknown change."}), 400
+    con.commit()
+    try:
+        auto_assign()
+    except Exception as e:
+        print("auto assign after region change skipped:", e)
+    return jsonify(regions_payload())
 
 
 @app.get("/dispatch/schedule")
@@ -3949,6 +4974,58 @@ def api_reopen():
     return jsonify({"ok": True})
 
 
+@app.post("/api/dispatch/manual-order")
+def api_manual_order():
+    """For restaurants not on the restaurant app: dispatch places the order with the
+    restaurant (on their website or by phone). Ordering in process, then Order placed,
+    which starts the prep timer."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    if o["dispatch_status"] in ("delivered", "cancelled"):
+        return jsonify({"ok": False, "error": "That order is already finished."}), 400
+    if o["dispatch_status"] == "awaiting_payment" or o["kitchen_status"] == "waiting":
+        return jsonify({"ok": False, "error": "Mark the card paid first, then place the order."}), 400
+    who = session.get("dispatcher_name") or "Dispatch"
+    try:
+        drow = db().execute("SELECT name FROM dispatchers WHERE id=?", (session.get("dispatcher_id"),)).fetchone()
+        if drow:
+            who = drow["name"]
+    except Exception:
+        pass
+    op = b.get("op")
+    if op == "ordering":
+        db().execute("UPDATE orders SET manual_state='ordering', manual_at=?, manual_by=? WHERE id=?",
+                     (now(), who, o["id"]))
+    elif op == "placed":
+        try:
+            mins = int(b.get("prep_minutes") or 15)
+        except Exception:
+            mins = 15
+        if mins < 1 or mins > 180:
+            return jsonify({"ok": False, "error": "Set the timer between 1 and 180 minutes."}), 400
+        db().execute("""UPDATE orders SET manual_state='placed', manual_at=?, manual_by=?,
+                        kitchen_status='preparing', prep_minutes=?, prep_started=? WHERE id=?""",
+                     (now(), who, mins, now(), o["id"]))
+    elif op == "reset":
+        db().execute("""UPDATE orders SET manual_state=NULL, manual_at=NULL, manual_by=NULL
+                        WHERE id=? AND kitchen_status='pending'""", (o["id"],))
+    else:
+        return jsonify({"ok": False, "error": "Unknown step."}), 400
+    db().commit()
+    if o["driver_id"]:
+        words = {"ordering": "is ordering", "placed": "placed", "reset": "reset ordering on"}[op]
+        try:
+            log_driver(o["driver_id"], who + " " + words + " " + o["code"])
+        except Exception:
+            pass
+    auto_assign()
+    return jsonify({"ok": True})
+
+
 @app.route("/dispatch/restaurants", methods=["GET", "POST"])
 def dispatch_restaurants():
     if not dispatcher_required():
@@ -3966,6 +5043,8 @@ def dispatch_restaurants():
                      (json.dumps(hours), 1 if request.form.get("closed_override") else 0,
                       1 if request.form.get("open_24") else 0,
                       int(request.form.get("prep_default") or 15), request.form.get("phone", ""), rid))
+        db().execute("UPDATE restaurants SET uses_app=? WHERE id=?",
+                     (1 if request.form.get("uses_app") else 0, rid))
         name = (request.form.get("name") or "").strip()
         if name:
             db().execute("UPDATE restaurants SET name=? WHERE id=?", (name, rid))
@@ -4116,6 +5195,37 @@ def dispatch_settings():
             if key in request.form:
                 db().execute("UPDATE settings SET value=? WHERE key=?", (request.form[key], key))
         errs = []
+        if "any_present" in request.form:
+            st = (request.form.get("any_start") or "").strip()[:5]
+            en = (request.form.get("any_end") or "").strip()[:5]
+            days = ",".join(str(k) for k in range(7) if request.form.get("any_day_%d" % k))
+            if bool(st) != bool(en) or (st and (_hm(st) is None or _hm(en) is None or _hm(st) == _hm(en))):
+                errs.append("Restaurants not listed: set both a start and an end time (not the same), or leave both blank.")
+            else:
+                for k, v in (("any_on", "1" if request.form.get("any_on") else "0"), ("any_days", days),
+                             ("any_start", st), ("any_end", en)):
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, v))
+        if "bh_present" in request.form:
+            if not request.form.get("bh_on"):
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('business_hours','{}')")
+            else:
+                hrs, bad = {}, []
+                for k, name in enumerate(BH_DAYS):
+                    if request.form.get("bh_closed_%d" % k):
+                        hrs[str(k)] = ["", ""]
+                        continue
+                    o = (request.form.get("bh_open_%d" % k) or "").strip()[:5]
+                    c = (request.form.get("bh_close_%d" % k) or "").strip()[:5]
+                    if _hm(o) is None or _hm(c) is None or _hm(o) == _hm(c):
+                        bad.append(name)
+                    else:
+                        hrs[str(k)] = [o, c]
+                if bad:
+                    errs.append("Business hours: give " + ", ".join(bad) +
+                                " an open and a close time, or check Closed.")
+                else:
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('business_hours',?)",
+                                 (json.dumps(hrs),))
         if FUTURE_LEAD_ERR:
             FUTURE_LEAD_ERR.clear()
             errs.append("Check the minutes: future orders take 10 to 240, accept warnings take 0 to 60.")
@@ -4161,14 +5271,16 @@ def dispatch_settings():
             db().commit()
             rows = db().execute("SELECT * FROM settings").fetchall()
             return render_template("dispatch_settings.html", s={r["key"]: r["value"] for r in rows},
-                                   saved=False, errors=errs)
+                                   saved=False, errors=errs, bh=business_hours_rows(),
+                                   bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
         if "order_tokens" in request.form:
             tags = ",".join(t.strip()[:24] for t in request.form["order_tokens"].split(",") if t.strip())
             db().execute("UPDATE settings SET value=? WHERE key='order_tokens'", (tags,))
         db().commit()
         saved = True
     rows = db().execute("SELECT * FROM settings").fetchall()
-    return render_template("dispatch_settings.html", s={r["key"]: r["value"] for r in rows}, saved=saved)
+    return render_template("dispatch_settings.html", s={r["key"]: r["value"] for r in rows}, saved=saved,
+                           bh=business_hours_rows(), bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
 
 # ---------------------------------------------------------------- chat
 
@@ -4288,8 +5400,9 @@ def api_driver_state():
     recompute_queue()
     lines = line_positions()
     rotation = {k: v["pos"] for k, v in lines.items()}
-    waiting = db().execute("""SELECT COUNT(*) c FROM orders
-                              WHERE dispatch_status IN ('queued','held')""").fetchone()["c"]
+    dr = driver_work_regions(did)
+    waiting = len([1 for o in db().execute("""SELECT region_id FROM orders
+                              WHERE dispatch_status IN ('queued','held')""").fetchall() if covers(dr, o["region_id"])])
     mine = db().execute("""SELECT * FROM orders WHERE driver_id=? AND dispatch_status IN
                            ('assigned','received','at_restaurant','enroute')
                            ORDER BY stack_seq ASC""", (did,)).fetchall()
@@ -4542,13 +5655,17 @@ def api_rest_orders():
                            AND (dispatch_status NOT IN ('delivered','cancelled') OR """ + done_sql + """)
                            ORDER BY created_at ASC""", (rid, arg)).fetchall()
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (rid,)).fetchone()
+    dispatch_ordering = not r["uses_app"]
+    if dispatch_ordering:
+        rows = []
     rc_unread = db().execute("""SELECT COUNT(*) c FROM rest_messages WHERE restaurant_id=?
                                 AND sender='dispatch' AND seen_by_rest=0""", (rid,)).fetchone()["c"]
     rc_last = db().execute("SELECT MAX(id) m FROM rest_messages WHERE restaurant_id=?", (rid,)).fetchone()["m"] or 0
     return jsonify({"late": [x for x in late_accepts() if x["kind"] == "kitchen" and x["restaurant_id"] == rid],
                     "chat_unread": rc_unread, "chat_last_id": rc_last, "ok": True, "orders": [order_dict(o) for o in rows],
                     "open": is_open(r), "open_24": bool(r["open_24"]),
-                    "hours": hours_label(r), "prep_default": r["prep_default"]})
+                    "hours": hours_label(r), "prep_default": r["prep_default"],
+                    "dispatch_ordering": dispatch_ordering})
 
 @app.post("/api/restaurant/toggle")
 def api_rest_toggle():
@@ -4679,6 +5796,19 @@ def api_menu_item():
         return jsonify({"ok": False}), 403
     b = request.get_json(force=True)
     op = b.get("op")
+    av = clean_avail(b)
+    if av and av.get("err"):
+        return jsonify({"ok": False, "error": av["err"]}), 400
+    if op == "section_avail":
+        if av is None:
+            return jsonify({"ok": False, "error": "Nothing to set."}), 400
+        n = db().execute("""UPDATE menu_items SET avail_days=?, avail_start=?, avail_end=?
+                            WHERE restaurant_id=? AND TRIM(COALESCE(section,''))=?
+                              AND TRIM(COALESCE(menu_tab,''))=?""",
+                         (av["days"], av["st"], av["en"], b.get("restaurant_id"),
+                          (b.get("section") or "").strip(), (b.get("tab") or "").strip())).rowcount
+        db().commit()
+        return jsonify({"ok": True, "updated": n})
     if op == "create":
         sec = (b.get("section") or "").strip()
         nxt = db().execute("SELECT COALESCE(MAX(sort),0)+1 n FROM menu_items WHERE restaurant_id=?",
@@ -4694,6 +5824,9 @@ def api_menu_item():
                             (b.get("description") or "").strip(), int(b.get("price_cents") or 0),
                             sec, nxt, 0 if b.get("active") in (0, False, "0") else 1,
                             (b.get("tab") or "").strip()[:40]))
+        if av:
+            db().execute("UPDATE menu_items SET avail_days=?, avail_start=?, avail_end=? WHERE id=?",
+                         (av["days"], av["st"], av["en"], cur.lastrowid))
         db().commit()
         return jsonify({"ok": True, "item_id": cur.lastrowid})
     if op == "update":
@@ -4705,6 +5838,9 @@ def api_menu_item():
                       b.get("section"), (1 if b.get("active") else 0) if "active" in b else None,
                       (str(b["tab"]).strip()[:40] if b.get("tab") is not None else None),
                       b["item_id"]))
+        if av:
+            db().execute("UPDATE menu_items SET avail_days=?, avail_start=?, avail_end=? WHERE id=?",
+                         (av["days"], av["st"], av["en"], b["item_id"]))
         db().commit()
         return jsonify({"ok": True})
     if op == "toggle":
@@ -4951,7 +6087,8 @@ def api_menu_full(rid):
                       "price_cents": it["price_cents"], "price": money(it["price_cents"]),
                       "section": (it["section"] or "").strip(), "active": it["active"],
                       "tab": (it["menu_tab"] or "").strip(),
-                      "image": media_url(it["image"]), "groups": item_options(it["id"])})
+                      "image": media_url(it["image"]), "groups": item_options(it["id"]),
+                      **avail_fields(it)})
     return jsonify({"ok": True, "items": items, "restaurant": {
         "id": r["id"], "name": r["name"], "slug": r["slug"], "image": media_url(r["image"])},
         "presets": presets.available_for(r["slug"], r["name"])})
@@ -5234,6 +6371,7 @@ def late_accepts():
         for x in db().execute("""SELECT o.id, o.code, o.restaurant_id, o.kitchen_sent_at, r.name rname FROM orders o
                                  LEFT JOIN restaurants r ON r.id=o.restaurant_id
                                  WHERE o.kitchen_status='pending' AND o.kitchen_sent_at IS NOT NULL
+                                   AND COALESCE(r.uses_app,0)=1
                                    AND o.kitchen_sent_at < ?
                                    AND o.dispatch_status NOT IN ('scheduled','awaiting_payment','cancelled','delivered')
                                  ORDER BY o.kitchen_sent_at""", (cut,)).fetchall():
@@ -5292,6 +6430,101 @@ def purge_chats():
         n += db().execute("SELECT COUNT(*) c FROM " + table).fetchone()["c"]
         db().execute("DELETE FROM " + table)
     return n
+
+BH_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+
+
+def business_hours():
+    """{"0": ["10:00", "22:00"], ...} Monday is 0. Empty means no hours limit is set."""
+    try:
+        h = json.loads(setting("business_hours", str) or "{}")
+    except Exception:
+        h = {}
+    return h if isinstance(h, dict) else {}
+
+
+def business_in_hours(when=None):
+    """Inside the business's operating hours? True when no hours are set."""
+    h = business_hours()
+    if not h:
+        return True
+    when = when or dt.datetime.now()
+    m = when.hour * 60 + when.minute
+    span = h.get(str(when.weekday())) or ["", ""]
+    o, c = _hm(span[0]) if span[0] else None, _hm(span[1]) if span[1] else None
+    if o is not None and c is not None:
+        if c > o and o <= m < c:
+            return True
+        if c <= o and m >= o:
+            return True
+    # the night before running past midnight
+    y = h.get(str((when.weekday() - 1) % 7)) or ["", ""]
+    yo, yc = _hm(y[0]) if y[0] else None, _hm(y[1]) if y[1] else None
+    if yo is not None and yc is not None and yc <= yo and m < yc:
+        return True
+    return False
+
+
+def business_hours_rows():
+    h = business_hours()
+    rows = []
+    for k, name in enumerate(BH_DAYS):
+        span = h.get(str(k))
+        rows.append({"k": k, "day": name,
+                     "open": (span or ["", ""])[0], "close": (span or ["", ""])[1],
+                     "closed": bool(h) and not (span and span[0] and span[1])})
+    return rows
+
+
+def business_hours_label():
+    """'Mon - Fri 10:00 AM - 10:00 PM, Sat 11:00 AM - 11:00 PM, Sun closed'."""
+    h = business_hours()
+    if not h:
+        return ""
+    def one(k):
+        s = h.get(str(k))
+        return (_ampm(s[0]) + " - " + _ampm(s[1])) if s and s[0] and s[1] else "closed"
+    out, k = [], 0
+    while k < 7:
+        j = k
+        while j + 1 < 7 and one(j + 1) == one(k):
+            j += 1
+        short = BH_DAYS[k][:3] + ((" - " + BH_DAYS[j][:3]) if j > k else "")
+        out.append(short + " " + one(k))
+        k = j + 1
+    return ", ".join(out)
+
+
+app.jinja_env.globals["business_hours_label"] = business_hours_label
+
+
+def _set(key, default=""):
+    try:
+        v = setting(key, str)
+    except Exception:
+        v = None
+    return default if v is None else v
+
+
+def any_rest_on():
+    """Is ordering from a restaurant we do not list turned on? On unless dispatch turns it off."""
+    return _set("any_on", "1") == "1"
+
+
+def any_rest_row():
+    return {"avail_days": _set("any_days"), "avail_start": _set("any_start"), "avail_end": _set("any_end")}
+
+
+def any_rest_open(when=None):
+    return any_rest_on() and item_available(any_rest_row(), when)
+
+
+def any_rest_label():
+    return avail_label(any_rest_row())
+
+
+app.jinja_env.globals["any_rest_label"] = any_rest_label
+
 
 def business_is_open():
     try:

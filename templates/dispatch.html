@@ -9,9 +9,15 @@
   <a class="btn small" href="/dispatch/map">Driver map</a>
   <a class="btn small" href="/dispatch/gps-log">GPS log</a>
   <a class="btn small" href="/dispatch/account">Dispatchers</a>
+  <a class="btn small" href="/dispatch/regions">Regions</a>
        <a class="btn small" href="/dispatch/settings">Fees</a>
        <a class="btn small" href="/dispatch/logout">Sign out</a></div>
 </div>
+<div class="row regionbar"><span class="pill blue" id="rgLabel">All regions</span>
+  <button class="btn tiny" id="rgAll" onclick="toggleAllRegions()" style="display:none">Show all regions</button>
+  <input id="findAny" placeholder="Find any order: code, phone or name" onkeydown="if(event.key==='Enter')findAny()">
+  <button class="btn tiny" onclick="findAny()">Find</button></div>
+<div id="findAnyOut"></div>
 <div class="row"><span class="muted small" id="soundNote"></span>
   <button class="btn tiny" id="soundBtn" onclick="toggleSound()">Sound</button>
   <span id="bizState" class="pill grey">checking...</span>
@@ -659,12 +665,45 @@ function renderCompleted(res){
   } catch(e){ console.error('completed list', e);
     document.getElementById('completed').innerHTML = (res.completed||[]).map(o=>'<div class="order"><strong>'+o.code+'</strong> '+o.dispatch_status+'</div>').join('') || '<p class="muted">Nothing completed yet.</p>'; }
 }
+let SHOW_ALL_REGIONS = false;
+function drawRegionBar(res){
+  const lab = document.getElementById('rgLabel'), b = document.getElementById('rgAll');
+  if (!res.region_filtered){ lab.textContent = 'All regions'; b.style.display = 'none'; return; }
+  b.style.display = '';
+  lab.textContent = SHOW_ALL_REGIONS ? 'Showing every region' : 'Your regions: ' + res.regions_label;
+  b.textContent = SHOW_ALL_REGIONS ? 'Back to my regions' : 'Show all regions';
+}
+function toggleAllRegions(){ SHOW_ALL_REGIONS = !SHOW_ALL_REGIONS; board(true); }
+function fEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+async function findAny(){
+  const q = document.getElementById('findAny').value.trim();
+  const out = document.getElementById('findAnyOut');
+  if (q.length < 2){ out.innerHTML = ''; return; }
+  const r = await jget('/api/dispatch/find-order?q=' + encodeURIComponent(q));
+  if (!r.ok){ out.innerHTML = '<p class="muted small">Search did not work. Try again.</p>'; return; }
+  out.innerHTML = (r.results.length ? r.results.map(o=>
+    '<div class="findres'+(o.mine?'':' other')+'"><div class="row between"><span><strong>'+fEsc(o.code)+'</strong> '+
+    fEsc(o.customer)+' &middot; '+fEsc(o.restaurant)+' <span class="pill blue">'+fEsc(o.region)+'</span>'+
+    (o.mine?'':' <span class="pill amber">outside your regions</span>')+'</span>'+
+    '<span class="muted small">'+fEsc(o.created)+'</span></div>'+
+    '<div class="small">Status: <strong>'+fEsc(o.status)+'</strong> &middot; kitchen '+fEsc(o.kitchen)+
+    (o.driver?' &middot; driver '+fEsc(o.driver):' &middot; no driver yet')+
+    (o.hold_reason?' &middot; '+fEsc(o.hold_reason):'')+'</div>'+
+    '<div class="row"><button class="btn tiny primary" onclick="editOrder('+o.id+')">Edit order</button>'+
+    '<a class="btn tiny" target="_blank" href="'+o.track+'">Tracking page</a></div></div>').join('')
+    : '<p class="muted small">No orders match that.</p>') +
+    '<button class="btn tiny" onclick="document.getElementById(\'findAnyOut\').innerHTML=\'\';document.getElementById(\'findAny\').value=\'\'">Close</button>';
+}
 async function board(force){
   if (editing() && !force) return;
   LAST_DRAW = Date.now();
   const dd = (document.getElementById('doneDay')||{}).value || '';
-  const res = await jget('/api/dispatch/board' + (dd ? '?done_day=' + dd : ''));
+  const qs = [];
+  if (dd) qs.push('done_day=' + dd);
+  if (SHOW_ALL_REGIONS) qs.push('all=1');
+  const res = await jget('/api/dispatch/board' + (qs.length ? '?' + qs.join('&') : ''));
   if(!res.ok){ window.location='/dispatch/login'; return; }
+  try { drawRegionBar(res); } catch(e) { console.log('region bar skipped', e); }
   DRIVERS = res.drivers;
   BOARD_TOKENS = res.tokens || [];
   applyFind(res);
@@ -704,7 +743,7 @@ async function board(force){
       res.auto ? 'Auto dispatch on' : 'Auto dispatch off, assign by hand';
   }
   LAST = res;
-  const unconfirmed = res.orders.filter(o=>o.kitchen_status==='pending' &&
+  const unconfirmed = res.orders.filter(o=>o.kitchen_status==='pending' && o.manual_state!=='ordering' &&
     ['awaiting_payment','cancelled','delivered','scheduled'].indexOf(o.dispatch_status) < 0);
   if (unconfirmed.length) flashPending(unconfirmed.length);
   else { clearFlash(); PEND_NOTIFIED = 0; }
@@ -758,13 +797,37 @@ function payPill(o){
   if(o.balance_cents > 0) s += ' <span class="pill red">balance due '+o.balance+'</span>';
   else if(o.balance_cents < 0) s += ' <span class="pill amber">overcharged '+o.balance+'</span>';
   if(o.tip_sig) s += ' <span class="pill green">tip signed</span>';
+  if(o.pp && o.pp.state === 'authorized') s += ' <span class="pill amber">'+o.pp.held+' held on '+(o.pp.source||'PayPal')+', charges after delivery</span>';
+  if(o.pp && o.pp.state === 'captured') s += ' <span class="pill green">charged '+o.pp.charged+'</span>';
+  if(o.pp && o.pp.error) s += ' <span class="pill red">PayPal: '+esc(o.pp.error)+'</span>';
   return s ? ' '+s : '';
 }
 async function payFailed(id, code){
   if(await window.ffFailPay(id, code)) board(true);
 }
-function payButtons(o){
+function ppButtons(o){
+  const p = o.pp || {};
+  if(!p.enabled) return '';
   let h = '';
+  if(p.can_pay)
+    h += '<button class="btn tiny primary" onclick="window.open(\''+p.pay_url+'\',\'_blank\')">Take card / Venmo</button>';
+  if(p.state === 'authorized'){
+    h += '<button class="btn tiny" onclick="ppSettle('+o.id+',\'charge\')">Charge now ('+o.total+')</button>';
+    h += '<button class="btn tiny" style="color:#c0392b" onclick="ppSettle('+o.id+',\'void\')">Release hold</button>';
+  }
+  return h;
+}
+async function ppSettle(id, op){
+  const o = (LAST && LAST.orders || []).find(x=>x.id===id) || {};
+  if(op === 'void' && !confirm('Release the hold on '+(o.code||'this order')+'? The customer is not charged.')) return;
+  if(op !== 'void' && !confirm('Charge '+(o.total||'')+' now for '+(o.code||'this order')+'? Any tip added after this is paid separately.')) return;
+  const r = await jpost('/api/paypal/settle', {order_id:id, op:op});
+  if(!r || !r.ok){ alert((r && r.error) || 'PayPal did not accept that.'); board(true); return; }
+  alert(r.voided ? 'Hold released.' : 'Charged '+r.charged+(r.left && r.left !== '$0.00' ? '. '+r.left+' is left for the customer to pay from their tracking page.' : '.'));
+  board(true);
+}
+function payButtons(o){
+  let h = ppButtons(o);
   if(!o.paid){
     if(o.card_on_file && o.payment_status==='paid')
       h += '<button class="btn tiny" onclick="viewCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">View card '+(o.card_brand||'')+' &bull;'+o.card_last4+'</button>';
@@ -826,11 +889,20 @@ async function refund(id, total, suggest){
                      '.\nEnter dollars, or leave blank to refund all of it.', suggest ? (suggest/100).toFixed(2) : '');
   if(amt === null) return;
   const note = prompt('Why? (kept on the order)', '') || '';
-  const ref = prompt('Refund reference from your card terminal (optional). Run the refund there too.', '') || '';
+  const od = (LAST && LAST.orders || []).find(x=>x.id===id) || {};
+  const viaPP = od.pp && (od.pp.state === 'authorized' || od.pp.state === 'captured');
+  const ref = viaPP ? '' : (prompt('Refund reference from your card terminal (optional). Run the refund there too.', '') || '');
   const body = {order_id:id, note:note, ref:ref};
   if(amt.trim() !== '') body.cents = Math.round(parseFloat(amt)*100);
   const res = await jpost('/api/order/refund', body);
   if(!res.ok){ alert(res.error); return; }
+  if(viaPP){
+    alert(od.pp.state === 'authorized'
+      ? (res.cancelled ? 'Hold released, the customer is not charged. The order is cancelled.'
+                       : 'Done. '+res.refunded+' comes off what gets charged after delivery.')
+      : 'Refunded '+res.refunded+' to the customer\'s '+(od.pp.source||'PayPal')+'.'+(res.cancelled ? ' The order is cancelled.' : ''));
+    board(true); return;
+  }
   alert(res.cancelled
     ? 'Refunded in full ('+res.refunded+'). The order is cancelled and moved to completed orders. Make sure the refund also ran on your card terminal.'
     : 'Recorded '+res.refunded+' refunded, '+res.left+' still collected. Make sure the refund also ran on your card terminal.');
@@ -888,13 +960,13 @@ function orderCard(o, opts, drivers){
     ? '<span class="pill amber">'+Math.max(0,Math.ceil(o.timer_seconds/60))+' min</span>' : '';
   const q = o.queue_position ? '<span class="pill blue">Queue #'+o.queue_position+'</span>' : '';
   const hold = o.hold_reason ? '<span class="pill grey">'+o.hold_reason+'</span>' : '';
-  return '<div class="order'+(o.kitchen_status==='pending' && !['delivered','cancelled'].includes(o.dispatch_status)?' pendingflash':'')+'" draggable="true" ondragstart="dragOrder(event,'+o.id+')" '+
+  return '<div class="order'+(o.kitchen_status==='pending' && o.manual_state!=='ordering' && !['delivered','cancelled'].includes(o.dispatch_status)?' pendingflash':'')+'" draggable="true" ondragstart="dragOrder(event,'+o.id+')" '+
     'ondragend="dragEnd()"><div class="order-head"><span class="grip">&#8942;&#8942;</span><strong>'+o.code+'</strong> '+
     refPill(o)+tokenPill(o)+
     ((o.dispatch_status==='awaiting_payment' || o.kitchen_status==='waiting')
       ? '<span class="pill amber">not sent to kitchen</span> <span class="pill blue">waiting on payment</span> '
       : '<span class="pill '+(o.kitchen_status==='ready'?'green':o.kitchen_status==='preparing'?'amber':'grey')+'">'
-        +(o.kitchen_status==='pending'?'sent to kitchen':o.kitchen_status)+'</span> <span class="pill blue">'+o.dispatch_status+'</span> ')+timer+' '+q+' '+hold+
+        +(o.kitchen_status==='pending'?(o.uses_app?'sent to kitchen':(o.manual_state==='ordering'?'ordering in process':'needs ordering')):o.kitchen_status)+'</span> <span class="pill blue">'+o.dispatch_status+'</span> ')+timer+' '+q+' '+hold+
     ' <span class="pill grey">'+(o.source_label||'Online')+'</span>'+
     payPill(o)+
     (o.placed_by!=='customer' ? ' <span class="pill grey">by '+o.placed_by+'</span>' : '')+'</div>'+
@@ -911,6 +983,7 @@ function orderCard(o, opts, drivers){
     trailLine(o)+
     '<div class="order-actions">'+
       payButtons(o)+
+      manualButtons(o)+
       (o.needs_address_approval ? '<button class="btn tiny primary" onclick="approveAddress('+o.id+
         ',\''+o.address.replace(/'/g,"\\'")+'\')">Approve address</button>' : '')+
       '<button class="btn tiny" onclick="nudge('+o.id+',-5)">-5</button>'+
@@ -947,6 +1020,22 @@ async function changeFee(id){
   if(o.payment_status==='paid' || o.payment_status==='part_refunded')
     msg += '\nThis order was already paid, so the customer now owes or is owed the difference. Check the payment pill.';
   alert(msg);
+  board(true);
+}
+// Restaurants not on the restaurant app: dispatch places the order by hand.
+function manualButtons(o){
+  if(o.uses_app || o.kitchen_status!=='pending' || o.dispatch_status==='awaiting_payment'
+     || ['delivered','cancelled'].includes(o.dispatch_status)) return '';
+  const by = o.manual_state==='ordering' && o.manual_by ? ' ('+esc(o.manual_by)+')' : '';
+  return (o.manual_state==='ordering'
+      ? '<button class="btn tiny" disabled>Ordering in process'+by+'</button>'
+      : '<button class="btn tiny primary" onclick="manualStep('+o.id+',\'ordering\')">Ordering in process</button>')+
+    '<button class="btn tiny primary" onclick="manualStep('+o.id+',\'placed\')">Order placed + start timer</button>';
+}
+async function manualStep(id, op){
+  const box = document.getElementById('m'+id);
+  const res = await jpost('/api/dispatch/manual-order', {order_id:id, op:op, prep_minutes: box ? box.value : 15});
+  if(!res || !res.ok){ alert((res && res.error) || 'Could not save that.'); return; }
   board(true);
 }
 async function kitchen(id, st){

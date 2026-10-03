@@ -442,3 +442,21 @@ Drivers and restaurants each have a Completed tab. Finished orders stay there un
 - Export this day to Excel, or pick From/To and Export range. The workbook has Orders, Summary and By driver sheets.
 - Dispatch > GPS log: pick a driver and dates. Shows every status the driver marks (requests, Received, At restaurant, On the way, Delivered), every status dispatch sets, and GPS points about once a minute while online or on break, each with the address and a Maps link. Route in Maps draws the day's path. Export to Excel from the same page. Kept 90 days (env GPS_LOG_KEEP_DAYS).
 - requirements.txt now includes openpyxl. Render/Railway install it on the next deploy.
+
+
+## Venmo, PayPal and cards (PayPal Checkout)
+Add these Railway variables to turn it on (leave them out and the site works the old way):
+- PAYPAL_CLIENT_ID and PAYPAL_SECRET: from developer.paypal.com > Apps & Credentials (Sandbox first, then Live)
+- PAYPAL_ENV: sandbox while testing, live when you take real money
+
+How it works: the customer picks "Venmo, PayPal or card" at checkout and pays on /pay/<order code>.
+The money is only held. After delivery the site charges the final total, so a tip added on the
+tracking page after delivery is included (60 minute window, setting pp_tip_window_min). PayPal allows
+the charge to run up to 15% or $75 over the hold, whichever is less; past that the customer gets a
+Pay the rest button. Dispatch can take a card for phone orders with "Take card / Venmo", charge now,
+release a hold, and refund (refunds go back to the customer's Venmo, PayPal or card automatically).
+
+## Restaurants not on the restaurant app
+Dispatch > Restaurants > "Uses the restaurant app" is off by default. While it is off, orders do not
+go to that restaurant's tablet. Dispatch taps "Ordering in process", places the order on the
+restaurant's website or by phone, then taps "Order placed + start timer".

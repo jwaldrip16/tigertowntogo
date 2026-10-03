@@ -34,8 +34,34 @@ until you approve them, and anything you add or change is approved straight away
 <h2 class="mt">Hours by date</h2>
 <p class="muted small">Shows the week picked above. Hours you add here are for that one date and do not repeat.</p>
 <div id="sched"></div>
+
+<h2 class="mt">Dispatcher availability</h2>
+<p class="muted small">When each dispatcher can work. These repeat every week. A end time earlier than the
+start time runs past midnight.</p>
+<div class="panel dispav">
+  <div class="row">
+    <select id="daWho" style="max-width:200px"></select>
+    <input type="time" id="daStart" value="09:00" style="max-width:130px"> to
+    <input type="time" id="daEnd" value="17:00" style="max-width:130px">
+  </div>
+  <div class="row dadays">
+    {% for d in days %}<label class="dadays-l"><input type="checkbox" class="daDay" value="{{ loop.index0 }}"> {{ d }}</label>{% endfor %}
+    <button class="btn tiny" type="button" onclick="daPick([0,1,2,3,4])">Weekdays</button>
+    <button class="btn tiny" type="button" onclick="daPick([5,6])">Weekend</button>
+    <button class="btn tiny" type="button" onclick="daPick([0,1,2,3,4,5,6])">Every day</button>
+  </div>
+  <div class="row">
+    <span id="daRg"></span>
+  </div>
+  <div class="row">
+    <input id="daNote" maxlength="80" placeholder="Note (optional), like: phones only">
+    <button class="btn primary small" type="button" onclick="daAdd()">Add availability</button>
+  </div>
+</div>
+<div id="daList"></div>
 {% endblock %}
-{% block scripts %}<script>
+{% block scripts %}<script src="/static/regionpick.js"></script>
+<script>
 const DAYS = {{ days|tojson }};
 function pill(s){
   const c = s==='approved' ? 'green' : s==='denied' ? 'red' : 'amber';
@@ -46,6 +72,7 @@ function daySel(id, v){
     '<option value="'+i+'"'+(i===v?' selected':'')+'>'+d+'</option>').join('')+'</select>';
 }
 async function load(){
+  await loadRegions();
   const res = await jget('/api/dispatch/schedule');
   if(!res.ok){ window.location='/dispatch/login'; return; }
   document.getElementById('pendCount').textContent = res.pending + ' waiting on you';
@@ -53,11 +80,11 @@ async function load(){
     const week = DAYS.map((name,i)=>{
       const slots = d.availability.filter(a=>a.dow===i && (!WEEK || a.week_start===WEEK));
       return '<div class="wday"><div class="wname">'+name+(WEEK_DATES[i]?' '+WEEK_DATES[i]:'')+'</div>'+
-        (slots.length ? slots.map(a=>'<div class="wslot '+a.status+'">'+a.start+'-'+a.end+'</div>').join('')
+        (slots.length ? slots.map(a=>'<div class="wslot '+a.status+'">'+a.start+'-'+a.end+(a.region_label?'<br><span class="small">'+rgEsc(a.region_label)+'</span>':'')+'</div>').join('')
                       : '<div class="wslot none">off</div>')+'</div>';
     }).join('');
     const rows = d.availability.filter(a=>!WEEK || a.week_start===WEEK).map(a=>
-      '<div class="row between schedrow"><span>'+a.day+' '+(a.date_label||'')+' '+a.start+'-'+a.end+' '+pill(a.status)+
+      '<div class="row between schedrow"><span>'+a.day+' '+(a.date_label||'')+' '+a.start+'-'+a.end+' '+pill(a.status)+regionTag(a.region_label)+
       (a.decided_by?' <span class="muted small">by '+a.decided_by+'</span>':'')+'</span><span>'+
       (a.status==='pending'
         ? '<button class="btn tiny primary" onclick="decide('+a.id+',true)">Approve</button>'+
@@ -79,6 +106,7 @@ async function load(){
       '<div class="week">'+week+'</div>'+ rows + off +
       '<div class="row"><input id="nd'+d.id+'" type="date" value="'+new Date().toLocaleDateString('en-CA')+'">'+
       '<input id="ns'+d.id+'" type="time" value="16:00"><input id="ne'+d.id+'" type="time" value="22:00">'+
+      regionBoxes('nr'+d.id, [])+
       '<button class="btn tiny primary" onclick="addSlot('+d.id+')">Add hours</button>'+
       '<input id="os'+d.id+'" type="date"><input id="oe'+d.id+'" type="date">'+
       '<button class="btn tiny" onclick="addOff('+d.id+')">Mark off</button></div></section>';
@@ -94,7 +122,8 @@ async function addSlot(did){
   const date = document.getElementById('nd'+did).value;
   if(!date){ alert('Pick the date.'); return; }
   const ok = await post({op:'add', driver_id:did, date:date,
-        start:document.getElementById('ns'+did).value, end:document.getElementById('ne'+did).value});
+        start:document.getElementById('ns'+did).value, end:document.getElementById('ne'+did).value,
+        regions: regionVals('nr'+did)});
   if(ok) loadWeek(WEEK);
 }
 async function addOff(did){
@@ -120,6 +149,7 @@ function editDay(did, name, date, day, start, end){
     '<h3 style="margin-top:0">'+name+' &middot; '+day+' '+mdy(date)+'</h3>'+
     '<div class="row"><label class="small muted">Start</label><input type="time" id="dmS" value="'+(start||'16:00')+'">'+
     '<label class="small muted">End</label><input type="time" id="dmE" value="'+(end||'22:00')+'"></div>'+
+    '<div class="row">'+regionBoxes('dmR', [])+'</div>'+
     '<div class="row mt"><button class="btn primary" id="dmOn">Mark available</button>'+
     '<button class="btn" id="dmOff">Mark off</button><button class="btn" id="dmX">Cancel</button></div>'+
     '<p class="muted small">This applies to '+day+' '+mdy(date)+' only.</p></div>';
@@ -129,7 +159,8 @@ function editDay(did, name, date, day, start, end){
   document.getElementById('dmX').onclick = close;
   document.getElementById('dmOn').onclick = async ()=>{
     const ok = await post({op:'set_day', driver_id:did, date:date,
-      start:document.getElementById('dmS').value, end:document.getElementById('dmE').value});
+      start:document.getElementById('dmS').value, end:document.getElementById('dmE').value,
+      regions: regionVals('dmR', m)});
     if(ok){ close(); loadWeek(WEEK); }
   };
   document.getElementById('dmOff').onclick = async ()=>{
@@ -138,6 +169,59 @@ function editDay(did, name, date, day, start, end){
   };
 }
 load(); setInterval(load, 15000);
+
+// ---- dispatcher availability
+function daEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function daPick(list){ document.querySelectorAll('.daDay').forEach(b=>{ b.checked = list.includes(+b.value); }); }
+function daDraw(res){
+  if(!res || !res.ok) return;
+  const sel = document.getElementById('daWho'), keep = sel.value;
+  sel.innerHTML = res.dispatchers.map(d=>'<option value="'+d.id+'">'+daEsc(d.name)+(d.me?' (you)':'')+'</option>').join('');
+  sel.value = keep || String(res.me || (res.dispatchers[0]||{}).id || '');
+  document.getElementById('daList').innerHTML = res.dispatchers.map(d=>{
+    const byDay = DAYS.map((n,i)=>{
+      const s = d.slots.filter(x=>x.dow===i);
+      return '<tr><td class="daday">'+n+'</td><td>'+(s.length ? s.map(x=>
+        '<span class="pill '+(x.on_now?'green':'grey')+' daslot">'+x.label+(x.region_label?' &middot; '+daEsc(x.region_label):'')+(x.note?' &middot; '+daEsc(x.note):'')+
+        ' <button class="linkx" title="Remove" onclick="daDel('+x.id+')">&times;</button></span>').join(' ')
+        : '<span class="muted small">Not available</span>')+'</td></tr>';
+    }).join('');
+    return '<div class="panel"><div class="row"><strong>'+daEsc(d.name)+(d.me?' (you)':'')+'</strong>'+
+      '<span class="pill '+(d.on_now?'green':'grey')+'">'+(d.on_now?'Available now':'Not on now')+'</span>'+
+      '<span class="muted small">'+d.hours+' hrs a week</span></div>'+
+      '<div class="row daphone">'+(d.phone ? '<a class="btn tiny" href="tel:'+d.phone+'">Call '+daEsc(d.phone_label)+'</a>' : '<span class="muted small">No phone number yet</span>')+
+      '<input type="tel" id="daPh'+d.id+'" value="'+daEsc(d.phone_label)+'" placeholder="334-555-0100" style="max-width:160px">'+
+      '<button class="btn tiny" onclick="daPhone('+d.id+')">Save phone</button></div>'+
+      '<table class="datable">'+byDay+'</table></div>';
+  }).join('');
+}
+loadRegions().then(()=>{ const s = document.getElementById('daRg'); if(s) s.innerHTML = regionBoxes('daR', []); });
+async function daLoad(){
+  const a = document.activeElement;
+  if (a && a.id && a.id.startsWith('daPh')) return;
+  daDraw(await jget('/api/dispatch/dispatcher-avail'));
+}
+async function daAdd(){
+  const days = [...document.querySelectorAll('.daDay:checked')].map(b=>+b.value);
+  const res = await jpost('/api/dispatch/dispatcher-avail', {op:'add', dispatcher_id: document.getElementById('daWho').value,
+    days: days, start: document.getElementById('daStart').value, end: document.getElementById('daEnd').value,
+    note: document.getElementById('daNote').value, regions: regionVals('daR')});
+  if(!res.ok){ alert(res.error || 'That did not save.'); return; }
+  document.getElementById('daNote').value = ''; daPick([]);
+  document.querySelectorAll('.daR').forEach(b=>b.checked=false); daDraw(res);
+}
+async function daPhone(id){
+  const res = await jpost('/api/dispatch/dispatcher-avail', {op:'phone', dispatcher_id:id, phone: document.getElementById('daPh'+id).value});
+  if(!res.ok){ alert(res.error || 'That did not save.'); return; }
+  daDraw(res);
+}
+async function daDel(id){
+  if(!confirm('Remove this time?')) return;
+  const res = await jpost('/api/dispatch/dispatcher-avail', {op:'delete', id:id});
+  if(!res.ok){ alert(res.error || 'That did not delete.'); return; }
+  daDraw(res);
+}
+daLoad(); setInterval(daLoad, 60000);
 
 async function loadWeek(start){
   const r = await jget('/api/dispatch/week' + (start ? ('?start=' + start) : ''));

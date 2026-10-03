@@ -140,6 +140,14 @@ async function load(force){
     res.open_24 ? 'Open 24 hours' : (res.open ? 'Open' : 'Closed');
   document.getElementById('hourline').textContent = res.hours;
   document.getElementById('h24').textContent = res.open_24 ? 'Back to set hours' : 'Open 24 hours';
+  try {
+    let dob = document.getElementById('dispOrdBar');
+    if(res.dispatch_ordering && !dob){
+      dob = document.createElement('div'); dob.id='dispOrdBar'; dob.className='issuebar';
+      dob.textContent = 'Dispatch is placing orders for this restaurant for now, so new orders will not show on this tablet.';
+      document.querySelector('main, .wrap, body').prepend(dob);
+    } else if(!res.dispatch_ordering && dob){ dob.remove(); }
+  } catch(e) {}
   try { newTicketAlert(res.orders); } catch(e) { console.log('alert skipped', e); }
   const pend = res.orders.filter(o=>o.kitchen_status==='pending' && !['delivered','cancelled'].includes(o.dispatch_status)).length;
   if (pend) flashTicket(pend); else clearTicketFlash();

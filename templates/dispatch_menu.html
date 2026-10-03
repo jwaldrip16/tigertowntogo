@@ -62,7 +62,7 @@ function draw(){
   const el = document.getElementById('menu');
   if (!order.length){ el.innerHTML = '<p class="muted">No items yet. Add one above.</p>'; return; }
   el.innerHTML = order.map((s,ix)=>
-    '<div class="sechead edsec"><span>'+escH(s)+'</span><span>'+
+    '<div class="sechead edsec"><span>'+escH(s)+secAvailTag(groups[s])+'</span><span>'+
     (ix>0 ? '<button class="btn tiny" onclick="moveSection(\''+escH(s).replace(/\\/g,'\\\\')+'\',\'up\')">Move up</button> ' : '')+
     (ix<order.length-1 ? '<button class="btn tiny" onclick="moveSection(\''+escH(s)+'\',\'down\')">Move down</button> ' : '')+
     '<button class="btn tiny" onclick="editItem(null,\''+escH(s)+'\')">Add item here</button></span></div>'+
@@ -72,8 +72,13 @@ function draw(){
       '<div class="mhead"><strong>'+escH(it.name)+'</strong><span class="mprice">'+it.price+'</span></div>'+
       (it.description ? '<div class="mdesc">'+escH(it.description)+'</div>' : '')+
       '<div class="small">'+(it.active ? '' : '<span class="pill grey">hidden</span> ')+
+      (it.avail_label ? '<span class="pill">'+escH(it.avail_label)+'</span> ' : '')+
       (it.groups.length ? '<span class="pill blue">'+it.groups.length+' choice'+(it.groups.length>1?'s':'')+'</span>' : '')+
       '</div></button>').join('')+'</div>').join('');
+}
+function secAvailTag(list){
+  const l = list.length ? (list[0].avail_label||'') : '';
+  return l && list.every(x=>(x.avail_label||'') === l) ? ' <span class="pill">Available '+escH(l)+'</span>' : '';
 }
 let ETAB = '', ETABS = [];
 function pickETab(k){ ETAB = ETABS[k]; draw(); }
@@ -163,6 +168,12 @@ function fillModal(it){
     '<label>Menu section</label><input id="edSec" list="edSecs" value="'+escH(it.section)+'" placeholder="Chicken Sandwiches">'+
     '<datalist id="edSecs">'+secs.map(s=>'<option value="'+escH(s)+'">').join('')+'</datalist>'+
     '<label>Description</label><textarea id="edDesc" rows="4">'+escH(it.description)+'</textarea>'+
+    '<label>Availability</label><p class="muted small">Leave every day unchecked and the times blank for an item customers can order any time.</p>'+
+    '<div class="row availdays">'+['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map((d,k)=>
+      '<label class="chk"><input type="checkbox" class="edDay" value="'+k+'" '+((it.avail_days||[]).indexOf(k)>=0?'checked':'')+'> '+d+'</label>').join('')+'</div>'+
+    '<div class="row"><input type="time" id="edStart" value="'+escH(it.avail_start||'')+'" style="max-width:140px"> to '+
+    '<input type="time" id="edEnd" value="'+escH(it.avail_end||'')+'" style="max-width:140px"></div>'+
+    '<label><input type="checkbox" id="edAvailSec"> Use these days and hours for every item in this section</label>'+
     '<label><input type="checkbox" id="edActive" '+(it.active?'checked':'')+'> Show on the menu</label>'+
     '<div class="row"><button class="btn primary" onclick="saveItem('+(it.id||'null')+')">'+(it.id?'Save item':'Create item')+'</button>'+
     (it.id ? '<button class="btn small danger" onclick="delItem('+it.id+')">Delete item</button>' : '')+
@@ -180,13 +191,22 @@ async function saveItem(id){
     section:document.getElementById('edSec').value.trim(),
     tab:document.getElementById('edTab').value.trim(),
     description:document.getElementById('edDesc').value.trim(),
-    active:document.getElementById('edActive').checked ? 1 : 0};
+    active:document.getElementById('edActive').checked ? 1 : 0,
+    avail_days:[...document.querySelectorAll('.edDay:checked')].map(x=>+x.value),
+    avail_start:document.getElementById('edStart').value,
+    avail_end:document.getElementById('edEnd').value};
   if (!body.name){ document.getElementById('edMsg').textContent = 'Give it a name.'; return; }
   let res;
   if (id){ res = await jpost('/api/dispatch/menu-item', Object.assign({op:'update', item_id:id}, body)); }
   else { res = await jpost('/api/dispatch/menu-item', Object.assign({op:'create', restaurant_id:RID}, body)); if (res.ok) EDIT = res.item_id; }
+  let note = '';
+  if (res.ok && document.getElementById('edAvailSec') && document.getElementById('edAvailSec').checked && body.section){
+    const sr = await jpost('/api/dispatch/menu-item', {op:'section_avail', restaurant_id:RID, section:body.section,
+      tab:body.tab, avail_days:body.avail_days, avail_start:body.avail_start, avail_end:body.avail_end});
+    note = sr.ok ? ' Set on all '+sr.updated+' items in '+body.section+'.' : '';
+  }
   await load();
-  const m = document.getElementById('edMsg'); if (m) m.textContent = res.ok ? 'Saved.' : (res.error || 'Not saved.');
+  const m = document.getElementById('edMsg'); if (m) m.textContent = res.ok ? 'Saved.'+note : (res.error || 'Not saved.');
 }
 async function delItem(id){
   if (!confirm('Delete this item and its photo?')) return;

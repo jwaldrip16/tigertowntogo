@@ -101,6 +101,7 @@
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="/static/cardbox.js"></script>
 <script src="/static/itempick.js"></script>
+<script src="/static/avail.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
 const MENUS = {{ menus | tojson }};
@@ -147,10 +148,13 @@ function rebind(rid){
   el.innerHTML = tabbar + nav + order.map(sec=>
     '<h3 class="sechead" id="'+slug(sec)+'">'+ItemPickEsc(sec)+'</h3><div class="mgrid">'+
     groups[sec].map(n=>{ const i = items[n];
-      return '<button type="button" class="mcard" data-n="'+n+'">'+
+      const on = Avail.ok(i, dWhen());
+      return '<button type="button" class="mcard'+(on?'':' off')+'" data-n="'+n+'">'+
         (i.image ? '<img class="mimg" loading="lazy" src="'+i.image+'" alt="">' : '')+
         '<div class="mhead"><strong>'+ItemPickEsc(i.name)+'</strong><span class="mprice">'+money(i.price_cents)+'</span></div>'+
-        (i.description ? '<div class="mdesc">'+ItemPickEsc(i.description)+'</div>' : '')+'</button>'; }).join('')+
+        (i.description ? '<div class="mdesc">'+ItemPickEsc(i.description)+'</div>' : '')+
+        (i.avail_label ? '<div class="mavail">'+(on?'Available ':'Not available now. Available ')+ItemPickEsc(i.avail_label)+'</div>' : '')+
+        '</button>'; }).join('')+
     '</div>').join('');
   el.querySelectorAll('button[data-tab]').forEach(b=>{ b.onclick = ()=>{ DTAB[rid] = tabs[parseInt(b.dataset.tab,10)]; rebind(rid); }; });
   el.querySelectorAll('a[data-jump]').forEach(a=>{ a.onclick = ev=>{ ev.preventDefault();
@@ -158,9 +162,14 @@ function rebind(rid){
   el.querySelectorAll('button[data-n]').forEach(b=>{
     b.onclick = ()=>{
       const i = items[parseInt(b.dataset.n,10)];
+      if (!Avail.ok(i, dWhen()) && !confirm(i.name+' is only available '+i.avail_label+'. Customers cannot order it right now. Add it anyway?')) return;
       ItemPick.open(i, line=>{ cart.push(Object.assign({id:'m'+i.id+'-'+Date.now(), fee_cents:0}, line)); draw(); });
     };
   });
+}
+function dWhen(){
+  const later = document.getElementById('whenMode').value === 'later';
+  return Avail.parts(later ? document.getElementById('whenAt').value : '');
 }
 function ItemPickEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function bump(ix,d){
