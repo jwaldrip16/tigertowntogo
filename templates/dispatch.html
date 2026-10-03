@@ -21,7 +21,8 @@
 <div class="tabbar">
   <button class="tab on" id="tabBoard" onclick="page('board')">Order board</button>
   <button class="tab" id="tabComms" onclick="page('comms')">Driver chat and mass text
-    <span class="pill red hidden" id="chatBadge"></span>
+    <span class="pill red hidden" id="chatBadge"></span></button>
+  <button class="tab" id="tabRest" onclick="page('rest')">Restaurant chat
     <span class="pill amber hidden" id="restBadge"></span></button>
 </div>
 <div id="chatAlert" class="chatalert hidden" onclick="page('comms')"></div>
@@ -36,13 +37,6 @@
       <div class="row"><input id="chatBox" placeholder="Message the driver"
         onkeydown="if(event.key==='Enter')send()"><button class="btn" onclick="send()">Send</button></div>
       <div id="chatRoster" class="muted small"></div>
-    </section>
-    <section class="panel"><h2>Restaurant chat <span class="pill red hidden" id="restBadge2"></span></h2>
-      <div class="row"><select id="rchatRest" onchange="loadRestChat()"></select></div>
-      <div id="rchat" class="chat tall"></div>
-      <div class="row"><input id="rchatBox" placeholder="Message the restaurant"
-        onkeydown="if(event.key==='Enter')sendRestChat()"><button class="btn" onclick="sendRestChat()">Send</button></div>
-      <div id="rchatRoster" class="muted small"></div>
     </section>
     <aside class="panel"><h2>Mass text</h2>
       <div class="masstext">
@@ -59,6 +53,18 @@
       <h2 class="mt">Recent group texts</h2>
       <div id="castHist" class="muted small"></div>
     </aside>
+  </div>
+</div>
+
+<div id="pageRest" class="hidden">
+  <div class="restchatpage">
+    <section class="panel"><h2>Restaurant chat <span class="pill red hidden" id="restBadge2"></span></h2>
+      <div class="row"><select id="rchatRest" onchange="loadRestChat()"></select></div>
+      <div id="rchat" class="chat tall"></div>
+      <div class="row"><input id="rchatBox" placeholder="Message the restaurant"
+        onkeydown="if(event.key==='Enter')sendRestChat()"><button class="btn" onclick="sendRestChat()">Send</button></div>
+      <div id="rchatRoster" class="muted small"></div>
+    </section>
   </div>
 </div>
 
@@ -133,17 +139,25 @@ let REDO = [];
 let CHAT_SEEN = null;
 let PAGE = 'board';
 function page(which){
-  PAGE = (which === 'comms') ? 'comms' : 'board';
+  PAGE = (which === 'comms' || which === 'rest') ? which : 'board';
   const show = function(id, on){
     const el = document.getElementById(id);
     if (el) el.classList.toggle('hidden', !on);
   };
   show('pageBoard', PAGE === 'board');
   show('pageComms', PAGE === 'comms');
+  show('pageRest', PAGE === 'rest');
   const tb = document.getElementById('tabBoard');
   const tc = document.getElementById('tabComms');
+  const tr = document.getElementById('tabRest');
   if (tb) tb.classList.toggle('on', PAGE === 'board');
   if (tc) tc.classList.toggle('on', PAGE === 'comms');
+  if (tr) tr.classList.toggle('on', PAGE === 'rest');
+  if (PAGE === 'rest'){
+    if (tr) tr.classList.remove('alerting');
+    const ra = document.getElementById('restAlert'); if (ra) ra.classList.add('hidden');
+    loadRestList().then(function(){ loadRestChat(); }).catch(function(){});
+  }
   if (PAGE === 'comms'){
     if (tc) tc.classList.remove('alerting');
     const a = document.getElementById('chatAlert');
@@ -153,7 +167,7 @@ function page(which){
     const rb = document.getElementById('railBadge');
     if (rb) rb.classList.add('hidden');
     document.title = 'Dispatch board';
-    loadChat();
+    loadChat(); loadCasts();
   }
 }
 function openChatWith(did){
@@ -482,12 +496,15 @@ async function sendCast(){
     (res.names.length ? ': ' + res.names.join(', ') : '');
   loadChat(); loadCasts();
 }
+setInterval(function(){ if (PAGE === 'comms') loadCasts().catch(function(){}); }, 10000);
 
 async function loadCasts(){
   const el = document.getElementById('castHist'); if(!el) return;
   const res = await jget('/api/dispatch/broadcasts');
-  el.innerHTML = (res.broadcasts||[]).map(b=>
-    '<div class="msg dispatch"><span class="muted small">'+b.at+' to '+b.audience+'</span><div>'+
+  const AUD = {active:'on shift drivers', scheduled:'scheduled group', unavailable:'unavailable group', all:'everyone', ids:'picked drivers'};
+  el.innerHTML = (res.sent||res.broadcasts||[]).map(b=>
+    '<div class="msg dispatch"><span class="muted small">'+b.at+' to '+(AUD[b.audience]||b.audience)+
+    ' · '+b.sent_to+' driver'+(b.sent_to===1?'':'s')+'</span><div>'+
     b.body.replace(/</g,'&lt;')+'</div></div>').join('') || 'No group texts yet.';
 }
 function editing(){
@@ -1041,7 +1058,7 @@ async function sendRestChat(){
   if (res && res.ok){ box.value=''; loadRestChat(); loadRestList(); } else alert((res && res.error) || 'Message did not send.');
 }
 async function openRestChat(rid){
-  page('comms');
+  page('rest');
   if (!document.getElementById('rchatRest').options.length) await loadRestList();
   document.getElementById('rchatRest').value = String(rid);
   await loadRestChat(); loadRestList();
@@ -1051,11 +1068,13 @@ function restChatNotify(res){
   const n = res.rest_chat_unread || 0, m = res.rest_chat_latest;
   ['restBadge','restBadge2'].forEach(function(id){
     const el = document.getElementById(id); if (!el) return;
-    el.textContent = n ? (n + (id==='restBadge' ? ' restaurant' : ' new')) : '';
+    el.textContent = n ? (n + ' new') : '';
     el.classList.toggle('hidden', !n);
   });
+  const rt = document.getElementById('tabRest');
+  if (rt) rt.classList.toggle('alerting', n > 0 && PAGE !== 'rest');
   const lid = m ? m.id : 0;
-  if (PAGE === 'comms'){
+  if (PAGE === 'rest'){
     const sel = document.getElementById('rchatRest');
     if (!sel.options.length || (lid && lid !== REST_LAST) || Date.now() - REST_LIST_AT > 30000){
       loadRestList().then(function(){ if (m && sel.value === String(m.restaurant_id)) loadRestChat(); else if (!document.getElementById('rchat').innerHTML) loadRestChat(); });

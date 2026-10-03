@@ -384,3 +384,6 @@ body.assignflash{animation:assignpage 1s ease-in-out infinite}
 .menutabs button.on{color:#111;border-bottom-color:#111}
 .menutabs button:hover{color:#111}
 .menutabs button.addtab{color:var(--accent,#b44a22);text-transform:none;letter-spacing:0;font-size:13px}
+
+.restchatpage{max-width:760px}
+.restchatpage .chat.tall{min-height:420px}
