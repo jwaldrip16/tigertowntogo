@@ -74,8 +74,7 @@
   <span class="muted small" id="findNote"></span>
 </div>
 <div class="cols3">
-  <section><h2>Restaurants</h2><div id="rests"></div>
-    <h2>Blocked customers</h2>
+  <section><h2>Blocked customers</h2>
     <div class="row"><input id="blockPhone" placeholder="Phone to block or unblock"
          style="max-width:160px"><button class="btn tiny" onclick="toggleBlock()">Block</button></div>
     <div id="blocked" class="muted small"></div>
@@ -660,7 +659,7 @@ async function board(force){
   renderDrivers(res.drivers);
   chatNotify(res);
   drawAlerts(res.alerts || []);
-  document.getElementById('rests').innerHTML = (res.restaurants||[]).map(r=>
+  if (document.getElementById('rests')) document.getElementById('rests').innerHTML = (res.restaurants||[]).map(r=>
     '<div class="driver"><div><strong>'+r.name+'</strong> <span class="pill '+
     (r.paused?'red':r.open?'green':'grey')+'">'+
     (r.paused?'paused':r.open_24?'open 24h':r.open?'open':'closed')+'</span>'+
