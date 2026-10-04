@@ -221,7 +221,7 @@ def init_db():
         seed(con)
     topup_restaurants(con)
     for k, v in [("base_fee_cents", "399"), ("base_miles", "3"), ("per_mile_cents", "100"),
-                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("kitchen_hold", "1"), ("max_stack_default", "3"), ("sched_lead_min", "60"),
+                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("kitchen_hold", "1"), ("auto_driver_pay", "1"), ("auto_pay_cap_cents", "2500"), ("auto_pay_delay_min", "15"), ("max_stack_default", "3"), ("sched_lead_min", "60"),
                  ("assign_on_pending", "0"), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
                  ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
                  ("business_name", "Fleet Delivery"),
@@ -364,6 +364,9 @@ def init_db():
     con.execute("""CREATE TABLE IF NOT EXISTS dispatcher_regions (dispatcher_id INTEGER NOT NULL,
                    region_id INTEGER NOT NULL, PRIMARY KEY(dispatcher_id, region_id))""")
     ensure_column(con, "restaurants", "region_id", "INTEGER")
+    ensure_column(con, "regions", "paused", "INTEGER DEFAULT 0")
+    ensure_column(con, "regions", "paused_by", "TEXT")
+    ensure_column(con, "regions", "paused_at", "TEXT")
     ensure_column(con, "orders", "region_id", "INTEGER")
     ensure_column(con, "availability", "region_ids", "TEXT")
     ensure_column(con, "dispatchers", "is_owner", "INTEGER DEFAULT 0")
@@ -384,6 +387,8 @@ def init_db():
     ensure_column(con, "orders", "kitchen_sent_at", "TEXT")
     # Restaurants not on the restaurant app yet: dispatch places the order with them by hand.
     ensure_column(con, "restaurants", "uses_app", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(con, "restaurants", "call_method", "TEXT NOT NULL DEFAULT 'phone'")   # called-in stores: phone or online
+    ensure_column(con, "restaurants", "order_url", "TEXT")                               # where dispatch orders online
     ensure_column(con, "orders", "manual_state", "TEXT")
     # PayPal / Venmo / card through PayPal: hold at checkout, charge after delivery (late tips included)
     for _c, _d in (("pp_order_id", "TEXT"), ("pp_auth_id", "TEXT"), ("pp_auth_cents", "INTEGER"),
@@ -396,6 +401,7 @@ def init_db():
     # Send to kitchen: a new order stays off the kitchen until dispatch taps Send to kitchen,
     # even after it is paid. kitchen_go=1 means dispatch released it (old orders count as released).
     ensure_column(con, "orders", "kitchen_go", "INTEGER NOT NULL DEFAULT 1")
+    ensure_column(con, "orders", "auto_pay_note", "TEXT")
     con.executescript("""
     CREATE TRIGGER IF NOT EXISTS trg_kitchen_gate AFTER UPDATE OF kitchen_status ON orders
       WHEN NEW.kitchen_go=0 AND NEW.kitchen_status='pending'
@@ -771,8 +777,22 @@ def is_closed_day(restaurant_id, when=None):
                        (day, restaurant_id)).fetchone()
     return row["reason"] if row else None
 
+def paused_region_ids():
+    try:
+        return {r["id"] for r in db().execute("SELECT id FROM regions WHERE COALESCE(paused,0)=1").fetchall()}
+    except sqlite3.OperationalError:
+        return set()
+
+
+def region_paused_for(restaurant):
+    rg = restaurant["region_id"] if "region_id" in restaurant.keys() else None
+    return bool(rg) and rg in paused_region_ids()
+
+
 def is_open(restaurant, when=None):
     if restaurant["closed_override"]:
+        return False
+    if region_paused_for(restaurant):
         return False
     if is_closed_day(restaurant["id"], when):
         return False
@@ -789,6 +809,8 @@ def is_open(restaurant, when=None):
     return o <= t <= c if o <= c else (t >= o or t <= c)
 
 def hours_label(restaurant):
+    if region_paused_for(restaurant):
+        return "Not taking orders right now"
     shut = is_closed_day(restaurant["id"])
     if shut:
         return "Closed today (" + shut + ")" if shut.strip() else "Closed today"
@@ -913,6 +935,14 @@ def dispatcher_work_regions(did):
     return picked or dispatcher_region_ids(did)
 
 
+def dispatcher_view_regions(did):
+    """What a dispatcher sees on the board: every region they are assigned, plus any
+    region picked on the shift they are working now. None assigned = all regions."""
+    if not did:
+        return set()
+    return dispatcher_region_ids(did) | dispatcher_work_regions(did)
+
+
 def is_owner(did=None):
     did = did if did is not None else session.get("dispatcher_id")
     if not did:
@@ -957,6 +987,84 @@ def available_drivers():
     return [r for r in rows if r["load"] == 0]
 
 
+def cross_region_driver(o, shift=None):
+    """A driver already holding orders can still take an order in ANOTHER region they work,
+    when no free driver covers that region. Same-region orders still wait for the rotation."""
+    rg = o["region_id"]
+    if not rg:
+        return None
+    shift = shift if shift is not None else on_shift_drivers()
+    if len(shift) < 2:
+        return None
+    for r in shift:
+        if r["load"] == 0 or r["load"] >= (r["max_stack"] or 1):
+            continue
+        if not covers(driver_work_regions(r["id"]), rg):
+            continue
+        held = {(x["region_id"] or 0) for x in db().execute(
+            """SELECT region_id FROM orders WHERE driver_id=?
+               AND dispatch_status NOT IN ('delivered','cancelled')""", (r["id"],)).fetchall()}
+        if rg in held:
+            continue
+        return r
+    return None
+
+
+def region_conflict(did, order_region, exclude_id=None):
+    """A driver holding a live order in one region can't take an order in a different
+    region until that order is finished. Returns the error text, or None when it's fine."""
+    if not did or not order_region:
+        return None
+    for x in db().execute("""SELECT region_id FROM orders WHERE driver_id=? AND id!=?
+                             AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
+                          (did, exclude_id or 0)).fetchall():
+        rg = x["region_id"] or 0
+        if rg and rg != order_region:
+            names = {r["id"]: r["name"] for r in all_regions()}
+            d = db().execute("SELECT name FROM drivers WHERE id=?", (did,)).fetchone()
+            def an(w):
+                return ("an " if w[:1].lower() in "aeiou" else "a ") + w
+            return ((d["name"] if d else "This driver") + " is still on " + an(names.get(rg, "other region")) +
+                    " order. They can take " + an(names.get(order_region, "different region")) +
+                    " order once that one is delivered.")
+    return None
+
+
+def region_queues(region_ids=None, detail=True):
+    """Waiting orders per region. region_ids empty/None = every region."""
+    regs = [r for r in all_regions() if not region_ids or r["id"] in region_ids]
+    pinfo = {r["id"]: r for r in db().execute("SELECT id, paused, paused_by, paused_at FROM regions").fetchall()}
+    rows = db().execute("""SELECT o.*, r.name rname FROM orders o LEFT JOIN restaurants r ON r.id=o.restaurant_id
+                           WHERE o.dispatch_status IN ('queued','held')
+                           ORDER BY o.created_at ASC, o.id ASC""").fetchall()
+    shift = db().execute("SELECT id, name FROM drivers WHERE status='online'").fetchall()
+    nowdt = dt.datetime.now()
+    def mins(o):
+        try:
+            return max(0, int((nowdt - dt.datetime.fromisoformat((o["created_at"] or "")[:19])).total_seconds() // 60))
+        except ValueError:
+            return 0
+    out = []
+    buckets = [(r["id"], r["name"]) for r in regs]
+    if any(not (o["region_id"] or 0) for o in rows):
+        buckets.append((0, "No region"))
+    for rid, name in buckets:
+        mine = [o for o in rows if (o["region_id"] or 0) == rid]
+        on = [d["name"] for d in shift if rid and covers(driver_work_regions(d["id"]), rid)] if rid else [d["name"] for d in shift]
+        pi = pinfo.get(rid)
+        q = {"id": rid, "name": name, "waiting": len(mine),
+             "paused": bool(pi and pi["paused"]), "paused_by": (pi["paused_by"] if pi and pi["paused"] else "") or "",
+             "oldest_min": mins(mine[0]) if mine else 0,
+             "drivers_on": len(on)}
+        if detail:
+            q["drivers"] = on
+            q["orders"] = [{"id": o["id"], "code": o["code"], "pos": i + 1, "status": o["dispatch_status"],
+                            "reason": o["hold_reason"] or "", "restaurant": o["rname"] or "",
+                            "minutes": mins(o)} for i, o in enumerate(mine)]
+        out.append(q)
+    return out
+
+
 def line_positions():
     """Where each on-shift driver stands for the next order, shown on the driver app and
     the board. Separate from auto dispatch: a lone driver is always first in line, even
@@ -996,10 +1104,14 @@ def recompute_queue():
     else:
         short = "every driver has an order, dispatcher to assign"
     pool = list(free)
+    paused = paused_region_ids()
+    rnames = {r["id"]: r["name"] for r in all_regions()}
     for i, o in enumerate(waiting):
         fit = next((fd for fd in pool if covers(driver_work_regions(fd["id"]), o["region_id"])), None)
         if o["address_ok"] == 0:
             status, reason = "held", "address needs dispatch approval"
+        elif o["region_id"] and o["region_id"] in paused:
+            status, reason = "held", rnames.get(o["region_id"], "this region") + " is paused by dispatch"
         elif o["kitchen_status"] not in stages:
             status, reason = "held", "waiting on kitchen"
         elif not auto_on:
@@ -1043,6 +1155,10 @@ def place_redo_orders():
             con.execute("UPDATE orders SET dispatch_status='held', hold_reason=? WHERE id=?",
                         ("waiting on " + d["name"] + " (original driver) to come on shift", o["id"]))
             continue
+        if region_conflict(d["id"], o["region_id"], o["id"]):
+            con.execute("UPDATE orders SET dispatch_status='held', hold_reason=? WHERE id=?",
+                        ("waiting on " + d["name"] + " to finish an order in another region", o["id"]))
+            continue
         seq = con.execute("""SELECT COALESCE(MAX(stack_seq),0)+1 s FROM orders WHERE driver_id=?
                              AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
                           (d["id"],)).fetchone()["s"]
@@ -1073,19 +1189,21 @@ def auto_assign():
     con = db()
     while True:
         free = available_drivers()
-        if not free:
+        shift_now = on_shift_drivers()
+        if len(shift_now) < 2:
             break
         stages = ("'pending','preparing','ready'" if setting("assign_on_pending")
                   else "'preparing','ready'")
         waiting = con.execute("""SELECT * FROM orders
                            WHERE driver_id IS NULL AND redo_driver_id IS NULL
                              AND dispatch_status IN ('queued','held')
+                             AND COALESCE(region_id,0) NOT IN (SELECT id FROM regions WHERE COALESCE(paused,0)=1)
                              AND kitchen_status IN (""" + stages + """)
                            ORDER BY created_at ASC""").fetchall()
         pick = None
         for cand in waiting:
             for fd in free:
-                if covers(driver_work_regions(fd["id"]), cand["region_id"]):
+                if covers(driver_work_regions(fd["id"]), cand["region_id"]) and not region_conflict(fd["id"], cand["region_id"]):
                     pick = (cand, fd)
                     break
             if pick:
@@ -1132,7 +1250,8 @@ def rebalance_stacks():
             if cand["id"] in moved:
                 continue
             for fd in free:
-                if fd["id"] != cand["driver_id"] and covers(driver_work_regions(fd["id"]), cand["region_id"]):
+                if (fd["id"] != cand["driver_id"] and covers(driver_work_regions(fd["id"]), cand["region_id"])
+                        and not region_conflict(fd["id"], cand["region_id"])):
                     pick = (cand, fd)
                     break
             if pick:
@@ -1407,17 +1526,64 @@ def stamp_label(kind, status):
     return STATUS_WORDS.get((kind, status), status.replace("_", " ").capitalize())
 
 
+def order_uses_app(o):
+    """True when the restaurant gets orders on its tablet. Called-in restaurants (dispatch
+    phones the order in) never show 'sent to kitchen' anywhere."""
+    r = db().execute("SELECT uses_app FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+    return bool(r["uses_app"]) if r is not None and "uses_app" in r.keys() else True
+
+
+def order_method(r):
+    """app = restaurant tablet, online = dispatch orders on the store's website,
+    phone = dispatch calls the order in."""
+    if r is None:
+        return "app"
+    if "uses_app" in r.keys() and r["uses_app"]:
+        return "app"
+    m = (r["call_method"] if "call_method" in r.keys() else "") or "phone"
+    return "online" if m == "online" else "phone"
+
+
+METHOD_WORDS = {"app": "Restaurant app", "online": "Called in by dispatch: online",
+                "phone": "Called in by dispatch: telephone"}
+
+
+def called_in_words(o, text):
+    if not text or order_uses_app(o):
+        return text
+    return (text.replace("tap Send to kitchen", "tap Release order")
+                .replace("waiting on kitchen", "waiting on dispatch to call it in"))
+
+
 def order_timeline(oid):
     """Every status this order has been through, with the time it happened."""
     rows = db().execute("""SELECT kind, status, at FROM status_log
                            WHERE order_id=? ORDER BY id""", (oid,)).fetchall()
+    o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+    called_in = o is not None and not order_uses_app(o)
     out = []
+    placed = None
+    if called_in and "manual_state" in o.keys() and o["manual_state"] == "placed" and o["manual_at"]:
+        placed = {"kind": "manual", "status": "placed", "label": "Order placed with the restaurant",
+                  "at": o["manual_at"], "time": clock(o["manual_at"]), "day": (o["manual_at"] or "")[:10]}
     for r in rows:
+        if called_in and r["kind"] == "kitchen" and r["status"] == "pending":
+            continue
+        if placed and r["kind"] == "kitchen" and r["status"] == "preparing":
+            out.append(placed)   # dispatch placing the call is what starts the cooking timer
+            placed = None
         out.append({"kind": r["kind"], "status": r["status"],
                     "label": stamp_label(r["kind"], r["status"]),
                     "at": r["at"], "time": clock(r["at"]),
                     "day": (r["at"] or "")[:10]})
-    return out
+    if placed:
+        out.append(placed)
+    # A status picked early and then picked again (driver and dispatch both tapping it, or a
+    # step undone and redone) shows once, at the time it finally stuck.
+    last = {}
+    for i, e in enumerate(out):
+        last[(e["kind"], e["status"])] = i
+    return [e for i, e in enumerate(out) if last[(e["kind"], e["status"])] == i]
 
 
 def stamped_at(oid, kind, status):
@@ -1498,8 +1664,13 @@ def order_dict(o):
         end = dt.datetime.fromisoformat(o["prep_started"]) + dt.timedelta(minutes=o["prep_minutes"])
         eta = int((end - dt.datetime.now()).total_seconds())
     pu = pickup_of(o, r)
+    try:
+        _e = eta_info(o, r, d)
+    except Exception:
+        _e = {"eta_min": None, "eta_clock": "", "eta_note": ""}
     return {
         "id": o["id"], "code": o["code"],
+        "eta_min": _e["eta_min"], "eta_clock": _e["eta_clock"], "eta_note": _e["eta_note"],
         "scheduled_for": o["scheduled_for"], "scheduled_label": when_label(o["scheduled_for"]) if o["scheduled_for"] else "",
         "release_label": when_label(o["release_at"]) if o["release_at"] else "", "ref": (o["ref_code"] or ""), "restaurant": pu["name"], "restaurant_address": pu["address"],
         "restaurant_phone": pu["phone"], "restaurant_tel": "tel:" + digits(pu["phone"]),
@@ -1550,10 +1721,10 @@ def order_dict(o):
         "service": money((o["service_cents"] or 0) if "service_cents" in o.keys() else 0),
         "miles": (o["miles"] if o["address_ok"] else None), "kitchen_status": o["kitchen_status"],
         "address_ok": bool(o["address_ok"]),
-        "source": o["source"], "source_label": SOURCES.get(o["source"], "Online"),
+        "source": o["source"], "source_label": SOURCES.get(o["source"], "Web"),
         "token": (o["token"] or ""),
         "needs_address_approval": not o["address_ok"],
-        "dispatch_status": o["dispatch_status"], "hold_reason": ("tap Send to kitchen" if ("kitchen_go" in o.keys() and o["kitchen_go"] == 0 and o["kitchen_status"] == "waiting" and o["dispatch_status"] in ("held", "queued") and o["address_ok"]) else o["hold_reason"]),
+        "dispatch_status": o["dispatch_status"], "hold_reason": called_in_words(o, ("tap Send to kitchen" if ("kitchen_go" in o.keys() and o["kitchen_go"] == 0 and o["kitchen_status"] == "waiting" and o["dispatch_status"] in ("held", "queued") and o["address_ok"]) else o["hold_reason"])),
         "issue": o["issue"] or "", "issue_note": o["issue_note"] or "",
         "cloned_from": o["cloned_from"] or "",
         "driver": d["name"] if d else None, "driver_id": o["driver_id"], "stack_seq": o["stack_seq"],
@@ -1562,6 +1733,8 @@ def order_dict(o):
         "delivered_at": o["delivered_at"],
         "queue_position": queue_position(o["id"]),
         "uses_app": bool(r["uses_app"]) if r is not None and "uses_app" in r.keys() else True,
+        "order_method": order_method(r),
+        "order_url": ((r["order_url"] or "") if r is not None and "order_url" in r.keys() else ""),
         "manual_state": (o["manual_state"] or "") if "manual_state" in o.keys() else "",
         "manual_by": (o["manual_by"] or "") if "manual_by" in o.keys() else "",
         "pp": pp_info(o),
@@ -1573,8 +1746,23 @@ def order_dict(o):
 def home():
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
     biz = business_is_open() and business_in_hours()
+    # region picker: only regions that actually have restaurants
+    used = {r["region_id"] for r in rs if r["region_id"]}
+    paused = paused_region_ids()
+    regions = [{"id": g["id"], "name": g["name"], "paused": g["id"] in paused}
+               for g in all_regions() if g["id"] in used]
+    pick = request.args.get("region")
+    if pick is not None:
+        session["cust_region"] = pick if pick.isdigit() else ""
+    sel = session.get("cust_region") or ""
+    sel_id = int(sel) if sel.isdigit() and int(sel) in {g["id"] for g in regions} else 0
+    if sel_id:
+        # restaurants with no region show in every area
+        rs = [r for r in rs if not r["region_id"] or r["region_id"] == sel_id]
     cards = [{"r": r, "open": biz and is_open(r), "hours": hours_label(r)} for r in rs]
-    return render_template("index.html", cards=cards, biz_open=biz,
+    sel_name = next((g["name"] for g in regions if g["id"] == sel_id), "")
+    return render_template("index.html", cards=cards, biz_open=biz, regions=regions,
+                           sel_region=sel_id, sel_region_name=sel_name,
                            any_on=any_rest_on(), any_open=biz and any_rest_open())
 
 @app.route("/r/<slug>")
@@ -2521,6 +2709,9 @@ def checkout():
     if not r:
         return jsonify({"ok": False, "error": "Unknown restaurant"}), 400
     placed_by = payload.get("placed_by", "customer")
+    house = bool(payload.get("house")) and placed_by == "dispatch" and bool(dispatcher_required())
+    if house:
+        payload["cash"] = True   # created like a cash order (no card), then marked paid to the house account
     sched = None
     if (payload.get("scheduled_for") or "").strip():
         sched = parse_future(payload.get("scheduled_for"))
@@ -2742,6 +2933,9 @@ def checkout():
                         (" once the card is marked paid." if not cash else ".")
     if address_ok and cash and not (sched and dt.datetime.now() < sched - dt.timedelta(minutes=future_lead())):
         auto_assign()
+    if house:
+        mark_paid(db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone(), method="house_account",
+                  ref=("House account " + str(payload.get("house_account") or "").strip()[:60]).strip()[:80])
     return jsonify({"pay_url": ("/pay/" + code) if (use_pp and not cash) else "",
                     "future_note": future_note, "ok": True, "cash": cash, "code": code, "order_id": oid, "total": money(total),
                     "send_note": send_note,
@@ -2811,9 +3005,116 @@ def track(code):
 TRACK_FIELDS = ("code", "dispatch_status", "kitchen_status", "restaurant", "restaurant_nav", "address",
                 "scheduled_label", "needs_address_approval", "timeline", "timer_seconds",
                 "queue_position", "hold_reason", "miles", "subtotal", "fee", "service", "service_cents",
-                "tax", "tip", "total", "delivered_time", "lines")
+                "tax", "tip", "total", "delivered_time", "lines", "uses_app", "manual_state")
 TRACK_AVG_MPH = 25.0       # town driving speed used for the customer's rough arrival time
 TRACK_FIX_FRESH_MIN = 10   # an older GPS fix is not shown to the customer
+ETA_STOP_MIN = 5           # minutes added for each stop a driver makes before this one
+ETA_NO_DRIVER_MIN = 10     # assumed time for a driver to reach the restaurant when none is on it yet
+_LEG_CACHE = {}            # (rounded from, rounded to) -> (stamp, minutes)
+
+
+def leg_minutes(a_lat, a_lng, b_lat, b_lng):
+    """Driving minutes between two points. Live traffic from Google when
+    GOOGLE_MAPS_API_KEY is set (cached 90 seconds), otherwise distance at town speed."""
+    if None in (a_lat, a_lng, b_lat, b_lng):
+        return None
+    key = ("%.3f,%.3f" % (a_lat, a_lng), "%.3f,%.3f" % (b_lat, b_lng))
+    hit = _LEG_CACHE.get(key)
+    if hit and time.time() - hit[0] < 90:
+        return hit[1]
+    mins = None
+    if GOOGLE_KEY:
+        try:
+            url = ("https://maps.googleapis.com/maps/api/distancematrix/json?origins=%f,%f&destinations=%f,%f"
+                   "&departure_time=now&units=imperial&key=%s"
+                   % (a_lat, a_lng, b_lat, b_lng, urllib.parse.quote(GOOGLE_KEY)))
+            with urllib.request.urlopen(url, timeout=4) as resp:
+                js = json.loads(resp.read().decode("utf-8"))
+            el = js["rows"][0]["elements"][0]
+            if el.get("status") == "OK":
+                secs = (el.get("duration_in_traffic") or el.get("duration") or {}).get("value")
+                if secs:
+                    mins = secs / 60.0
+        except Exception:
+            mins = None
+    if mins is None:
+        mins = haversine_miles(a_lat, a_lng, b_lat, b_lng) * ROAD_FACTOR / TRACK_AVG_MPH * 60
+    _LEG_CACHE[key] = (time.time(), mins)
+    if len(_LEG_CACHE) > 2000:
+        _LEG_CACHE.clear()
+    return mins
+
+
+def _fresh_fix(d):
+    if not d or d["last_lat"] is None or d["last_lng"] is None or not d["last_loc_at"]:
+        return None
+    try:
+        age = (dt.datetime.now() - dt.datetime.fromisoformat(d["last_loc_at"])).total_seconds() / 60
+    except ValueError:
+        return None
+    return (d["last_lat"], d["last_lng"]) if age <= TRACK_FIX_FRESH_MIN else None
+
+
+def eta_info(o, r=None, d=None):
+    """Live estimate of when the food reaches the customer, for the tracking page and the board.
+    Adds up what is left: the kitchen timer, the driver getting to the restaurant (from their
+    live GPS when it is fresh), stops ahead of this one in the driver's stack, and the drive out."""
+    st = o["dispatch_status"]
+    if st in ("delivered", "cancelled"):
+        return {"eta_min": None, "eta_clock": "", "eta_note": ""}
+    nowdt = dt.datetime.now()
+    if o["scheduled_for"] and not o["prep_started"]:
+        try:
+            when = dt.datetime.fromisoformat(o["scheduled_for"])
+            if when > nowdt + dt.timedelta(minutes=10):
+                return {"eta_min": int((when - nowdt).total_seconds() // 60),
+                        "eta_clock": clock(when.isoformat()), "eta_note": "scheduled"}
+        except ValueError:
+            pass
+    if r is None:
+        r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+    if d is None and o["driver_id"]:
+        d = db().execute("SELECT * FROM drivers WHERE id=?", (o["driver_id"],)).fetchone()
+    pu = pickup_of(o, r)
+    # kitchen time left
+    ks = o["kitchen_status"]
+    if ks == "ready" or st == "enroute":
+        kitchen = 0.0
+    elif o["prep_started"] and o["prep_minutes"]:
+        end = dt.datetime.fromisoformat(o["prep_started"]) + dt.timedelta(minutes=o["prep_minutes"])
+        kitchen = max(0.0, (end - nowdt).total_seconds() / 60)
+    else:
+        kitchen = float((r["prep_default"] if r is not None and r["prep_default"] else 15))
+    # the drive from the restaurant to the customer
+    out = leg_minutes(pu["lat"], pu["lng"], o["lat"], o["lng"])
+    if out is None:
+        out = (o["miles"] or 3) / TRACK_AVG_MPH * 60
+    fix = _fresh_fix(d)
+    ahead = 0
+    if d:
+        ahead = db().execute("""SELECT COUNT(*) n FROM orders WHERE driver_id=? AND id<>?
+                                AND dispatch_status IN ('assigned','received','at_restaurant','enroute')
+                                AND COALESCE(stack_seq,0) < ?""",
+                             (d["id"], o["id"], o["stack_seq"] or 0)).fetchone()["n"]
+    note = ""
+    if st == "enroute":
+        to_home = leg_minutes(fix[0], fix[1], o["lat"], o["lng"]) if fix else None
+        total = (to_home if to_home is not None else out) + ahead * ETA_STOP_MIN
+        note = "live GPS" if fix else ""
+    elif st == "at_restaurant":
+        total = kitchen + ahead * ETA_STOP_MIN + out
+    elif d and st in ("assigned", "received"):
+        to_rest = leg_minutes(fix[0], fix[1], pu["lat"], pu["lng"]) if fix else None
+        if to_rest is None:
+            to_rest = ETA_NO_DRIVER_MIN
+        total = max(kitchen, to_rest + ahead * ETA_STOP_MIN) + out
+        note = "live GPS" if fix else ""
+    else:
+        total = max(kitchen, ETA_NO_DRIVER_MIN) + out
+        note = "no driver yet"
+    total = max(2, int(round(total)))
+    return {"eta_min": total, "eta_clock": clock((nowdt + dt.timedelta(minutes=total)).isoformat()),
+            "eta_note": note}
 
 
 def track_payload(o):
@@ -2849,9 +3150,8 @@ def track_payload(o):
             if fresh:
                 t["driver_lat"], t["driver_lng"] = d["last_lat"], d["last_lng"]
                 t["driver_fix"] = clock(d["last_loc_at"])
-                if o["lat"] is not None and o["lng"] is not None:
-                    mi = haversine_miles(d["last_lat"], d["last_lng"], o["lat"], o["lng"]) * ROAD_FACTOR
-                    t["eta_min"] = max(2, int(round(mi / TRACK_AVG_MPH * 60 + ahead * 5)))
+    e = eta_info(o, r, d)
+    t["eta_min"], t["eta_clock"], t["eta_note"] = e["eta_min"], e["eta_clock"], e["eta_note"]
     out["track"] = t
     return out
 
@@ -3010,7 +3310,13 @@ def drv_pay_info(o):
     d = db().execute("SELECT * FROM drivers WHERE id=?", (o["driver_id"],)).fetchone() if o["driver_id"] else None
     t = driver_payout_target(d)
     sug = drv_pay_suggest(o)
-    return {"paid_cents": paid, "paid": money(paid), "suggest_cents": sug, "suggest": money(sug),
+    note = (o["auto_pay_note"] if "auto_pay_note" in o.keys() else None) or ""
+    if not rows and not note and setting("auto_driver_pay"):
+        note = ("auto pay waits for PayPal keys" if not pp_enabled() else
+                ("auto pay waits for the customer's payment" if not ((o["payment_status"] or "") in ("paid", "part_refunded") or is_cash(o))
+                 else "auto pay goes out about " + str(_int_setting("auto_pay_delay_min", 15, 0, 1440)) + " min after delivery"))
+    return {"auto_note": note,
+            "paid_cents": paid, "paid": money(paid), "suggest_cents": sug, "suggest": money(sug),
             "owed_cents": max(0, sug - paid), "to": t[3] if t else "", "ready": bool(t),
             "open": any((r["status"] or "") in PAYOUT_OPEN for r in rows),
             "rows": [{"id": r["id"], "amount": money(r["cents"]), "status": r["status"] or "",
@@ -3088,6 +3394,84 @@ def payout_sweep(force=False):
             _payout_check(r)
     except Exception as e:
         print("payout sweep:", e)
+
+_autopay_lock = threading.Lock()
+_autopay_last = [0.0]
+
+def _int_setting(key, default, lo, hi):
+    try:
+        v = int(float(setting(key, str) or default))
+    except (TypeError, ValueError):
+        v = default
+    return max(lo, min(hi, v))
+
+def auto_driver_pay_sweep(force=False):
+    """Pay each driver automatically for a delivered trip: the suggested trip pay (fee/tip share
+    + flat), by PayPal or Venmo, once the customer's payment is settled and the delay has passed.
+    Anything it can't do (no wallet on file, bank drivers, over the limit, a PayPal error) is left
+    on the order for a dispatcher, and it never pays the same trip twice."""
+    if not setting("auto_driver_pay") or not pp_enabled():
+        return
+    if not force and time.time() - _autopay_last[0] < 60:
+        return
+    if not _autopay_lock.acquire(blocking=False):
+        return
+    try:
+        _autopay_last[0] = time.time()
+        delay = _int_setting("auto_pay_delay_min", 15, 0, 1440)
+        cap = _int_setting("auto_pay_cap_cents", 2500, 0, 50000)
+        nowd = dt.datetime.now()
+        upto = (nowd - dt.timedelta(minutes=delay)).isoformat(timespec="seconds")
+        since = (nowd - dt.timedelta(days=2)).isoformat(timespec="seconds")
+        rows = db().execute("""SELECT * FROM orders WHERE dispatch_status='delivered' AND driver_id IS NOT NULL
+                               AND auto_pay_note IS NULL AND delivered_at IS NOT NULL
+                               AND delivered_at <= ? AND delivered_at >= ?
+                               AND NOT EXISTS (SELECT 1 FROM driver_payouts p WHERE p.order_id=orders.id)
+                               ORDER BY delivered_at LIMIT 10""", (upto, since)).fetchall()
+        for o in rows:
+            def note(t, oid=o["id"]):
+                db().execute("UPDATE orders SET auto_pay_note=? WHERE id=?", (t, oid))
+                db().commit()
+            ps = o["payment_status"] or ""
+            if not (ps in ("paid", "part_refunded") or is_cash(o)):
+                continue            # customer's payment isn't settled yet; looked at again next time
+            d = db().execute("SELECT * FROM drivers WHERE id=?", (o["driver_id"],)).fetchone()
+            t = driver_payout_target(d) if d else None
+            cents = drv_pay_suggest(o)
+            if cents <= 0:
+                note("nothing to pay on this trip")
+                continue
+            if not t:
+                note("no PayPal email or Venmo phone on file, pay by hand")
+                continue
+            if t[0] == "BANK":
+                note("driver is paid by bank, pay by hand")
+                continue
+            if cents > cap:
+                note("over the auto pay limit of " + money(cap) + ", pay by hand")
+                continue
+            cur = db().execute("UPDATE orders SET auto_pay_note='sending' WHERE id=? AND auto_pay_note IS NULL", (o["id"],))
+            db().commit()
+            if cur.rowcount != 1 or db().execute("SELECT 1 FROM driver_payouts WHERE order_id=?", (o["id"],)).fetchone():
+                continue            # someone else got to it
+            stamp = dt.datetime.now().isoformat(timespec="seconds")
+            cur = db().execute("""INSERT INTO driver_payouts(order_id,driver_id,cents,wallet,receiver,status,created_at,created_by)
+                                  VALUES(?,?,?,?,?,'SENDING',?,'Auto pay')""", (o["id"], d["id"], cents, t[0], t[2], stamp))
+            pid = cur.lastrowid
+            db().execute("UPDATE driver_payouts SET sender_id=? WHERE id=?", ("FD-%s-%d" % (o["code"], pid), pid))
+            db().commit()
+            r = _payout_send(pid)
+            if r["status"] == "ERROR":
+                note("auto pay failed: " + (r["error"] or "PayPal error")[:120])
+            else:
+                note("auto paid")
+            log("driver pay", "Auto pay " + money(cents) + " to " + d["name"] + " for " + o["code"] + " (" +
+                (r["status"] or "").lower() + ")")
+    except Exception as e:
+        print("auto driver pay:", e)
+    finally:
+        _autopay_lock.release()
+
 
 @app.post("/api/dispatch/driver-pay")
 def api_driver_pay():
@@ -3257,6 +3641,7 @@ def api_board():
     auto_assign()   # safety net: anything an earlier event missed is placed on the next refresh
     pp_sweep()      # charge delivered PayPal/Venmo orders once the tip window is over
     payout_sweep()  # update driver pay that is still going through PayPal
+    auto_driver_pay_sweep()  # pay drivers for delivered trips when auto pay is on
     purge_cards()
     try:
         purge_old_orders()
@@ -3283,8 +3668,9 @@ def api_board():
            WHERE m.sender='driver' AND m.seen_by_dispatch=0
            ORDER BY m.id DESC LIMIT 1""").fetchone()
     rests = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
-    my_regions = dispatcher_work_regions(session.get("dispatcher_id"))
-    show_all = request.args.get("all") == "1"
+    my_regions = dispatcher_view_regions(session.get("dispatcher_id"))
+    owner_view = is_owner()
+    show_all = request.args.get("all") == "1" and owner_view
     myr = set() if show_all else my_regions
     if myr:
         live = [o for o in live if covers(myr, o["region_id"])]
@@ -3300,6 +3686,8 @@ def api_board():
         "regions_label": region_names(my_regions),
         "region_filtered": bool(my_regions),
         "showing_all": show_all,
+        "is_owner": owner_view,
+        "region_queues": region_queues(set() if owner_view else my_regions),
         "auto": bool(setting("auto_assign")),
         "tokens": token_list(),
         "alerts": open_call_alerts(),
@@ -3351,6 +3739,33 @@ def api_driver_status():
     set_driver_status(data["driver_id"], status, "Dispatch set you " + status + ".")
     return jsonify({"ok": True})
 
+@app.post("/api/dispatch/pause-region")
+def api_pause_region():
+    """Pause or resume a whole region. Customers can't order from its restaurants while it
+    is paused, and orders already placed there hold in the queue until it is resumed."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    try:
+        rid = int(b.get("region_id") or 0)
+    except (TypeError, ValueError):
+        rid = 0
+    r = db().execute("SELECT * FROM regions WHERE id=?", (rid,)).fetchone()
+    if not r:
+        return jsonify({"ok": False, "error": "Unknown region."}), 404
+    mine = dispatcher_view_regions(session.get("dispatcher_id"))
+    if not is_owner() and mine and rid not in mine:
+        return jsonify({"ok": False, "error": "You can only pause regions you are assigned to."}), 403
+    want = bool(b["paused"]) if "paused" in b else not bool(r["paused"])
+    who = session.get("dispatcher_name", "dispatch")
+    db().execute("UPDATE regions SET paused=?, paused_by=?, paused_at=? WHERE id=?",
+                 (1 if want else 0, who if want else None, now() if want else None, rid))
+    db().commit()
+    log("region_pause", r["name"] + (" paused by " if want else " resumed by ") + who)
+    auto_assign()
+    return jsonify({"ok": True, "paused": want, "region": r["name"]})
+
+
 @app.post("/api/dispatch/pause-restaurant")
 def api_pause_restaurant():
     """Pause or resume a kitchen straight from the board."""
@@ -3381,6 +3796,10 @@ def api_assign():
         prev_did = prev["driver_id"] if prev else None
         if prev_did and str(prev_did) == str(did):
             return jsonify({"ok": True, "moved": False})
+        orow = db().execute("SELECT region_id FROM orders WHERE id=?", (oid,)).fetchone()
+        rc = region_conflict(int(did), orow["region_id"] if orow else None, oid)
+        if rc:
+            return jsonify({"ok": False, "error": rc}), 400
         seq = db().execute("""SELECT COALESCE(MAX(stack_seq),0)+1 s FROM orders WHERE driver_id=?
                               AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
                            (did,)).fetchone()["s"]
@@ -3421,6 +3840,10 @@ def api_order_status():
     if session.get("driver_id") and not dispatcher_required() and not session.get("restaurant_id"):
         if o["driver_id"] != session["driver_id"]:
             return jsonify({"ok": False, "error": "not your order"}), 403
+        if data.get("dispatch_status") == "received" and o["dispatch_status"] == "assigned":
+            rc = region_conflict(session["driver_id"], o["region_id"], o["id"])
+            if rc:
+                return jsonify({"ok": False, "error": "Finish your current order first. " + rc}), 400
     if o["dispatch_status"] == "delivered":
         if not session.get("dispatcher_id"):
             return jsonify({"ok": False, "error": "This order was already delivered."}), 403
@@ -3529,7 +3952,8 @@ def api_send_kitchen():
                         hold_reason=CASE WHEN dispatch_status IN ('held','queued') THEN 'waiting on kitchen' ELSE hold_reason END
                         WHERE id=?""", (o["id"],))
     db().commit()
-    log("order", o["code"] + " sent to the kitchen by " + (session.get("dispatcher_name") or "dispatch"))
+    log("order", o["code"] + (" sent to the kitchen by " if order_uses_app(o) else " released to call in by ")
+        + (session.get("dispatcher_name") or "dispatch"))
     auto_assign()
     return jsonify({"ok": True})
 
@@ -3881,7 +4305,7 @@ def item_fees(items):
     return sum(int(i.get("fee_cents", 0) or 0) * int(i["qty"]) for i in items)
 
 
-SOURCES = {"website": "Online", "call_in": "Call-in", "dispatch_online": "Dispatch online"}
+SOURCES = {"website": "Web", "call_in": "Call-in", "dispatch_online": "Dispatch online"}
 
 REDO_REASONS = {
     "missing_item": "Restaurant left an item off",
@@ -5097,7 +5521,7 @@ def api_find_order():
                            ORDER BY created_at DESC LIMIT 25""",
                         (like, like, digits, digits, "%" + digits + "%")).fetchall()
     names = {r["id"]: r["name"] for r in all_regions()}
-    myr = dispatcher_work_regions(session.get("dispatcher_id"))
+    myr = dispatcher_view_regions(session.get("dispatcher_id"))
     out = []
     for o in rows:
         x = order_dict(o)
@@ -5108,6 +5532,7 @@ def api_find_order():
                     "driver": d["name"] if d else "", "created": (o["created_at"] or "")[:16].replace("T", " "),
                     "region": names.get(o["region_id"] or 0, "No region"),
                     "mine": covers(myr, o["region_id"]),
+                    "web": (o["source"] or "") == "website",
                     "track": "/track/" + o["code"]})
     return jsonify({"ok": True, "results": out})
 
@@ -5402,10 +5827,14 @@ def api_send_to_driver():
     lk = delivered_lock(o)
     if lk:
         return lk
+    did = b.get("driver_id")
+    if did:
+        rc = region_conflict(int(did), o["region_id"], o["id"])
+        if rc:
+            return jsonify({"ok": False, "error": rc}), 400
     db().execute("""UPDATE orders SET dispatch_status='queued', hold_reason=NULL WHERE id=?""",
                  (o["id"],))
     db().commit()
-    did = b.get("driver_id")
     if did:
         d = db().execute("SELECT * FROM drivers WHERE id=?", (did,)).fetchone()
         if not d:
@@ -5540,8 +5969,18 @@ def dispatch_restaurants():
                      (json.dumps(hours), 1 if request.form.get("closed_override") else 0,
                       1 if request.form.get("open_24") else 0,
                       int(request.form.get("prep_default") or 15), request.form.get("phone", ""), rid))
-        db().execute("UPDATE restaurants SET uses_app=? WHERE id=?",
-                     (1 if request.form.get("uses_app") else 0, rid))
+        meth = request.form.get("order_method")
+        if meth in ("app", "online", "phone"):
+            db().execute("UPDATE restaurants SET uses_app=?, call_method=? WHERE id=?",
+                         (1 if meth == "app" else 0, "online" if meth == "online" else "phone", rid))
+        else:   # older form: just the checkbox
+            db().execute("UPDATE restaurants SET uses_app=? WHERE id=?",
+                         (1 if request.form.get("uses_app") else 0, rid))
+        if "order_url" in request.form:
+            url = (request.form.get("order_url") or "").strip()[:300]
+            if url and not url.lower().startswith(("http://", "https://")):
+                url = "https://" + url
+            db().execute("UPDATE restaurants SET order_url=? WHERE id=?", (url, rid))
         if "region_id" in request.form:
             try:
                 _rg = int(request.form.get("region_id") or 0)
@@ -5567,7 +6006,7 @@ def dispatch_restaurants():
         db().commit()
         saved = True
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
-    data = [{"r": r, "hours": json.loads(r["hours"]), "open": is_open(r)} for r in rs]
+    data = [{"r": r, "hours": json.loads(r["hours"]), "open": is_open(r), "method": order_method(r)} for r in rs]
     stamp_regions()
     return render_template("dispatch_restaurants.html", data=data, week=WEEK, saved=saved,
                            regions=[{"id": g["id"], "name": g["name"]} for g in all_regions()])
@@ -5717,6 +6156,23 @@ def dispatch_settings():
         for key in ("base_fee_cents", "base_miles", "per_mile_cents", "tax_rate_bp", "auto_assign", "kitchen_hold"):
             if key in request.form:
                 db().execute("UPDATE settings SET value=? WHERE key=?", (request.form[key], key))
+        if "auto_driver_pay" in request.form:
+            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_driver_pay',?)",
+                         ("1" if request.form.get("auto_driver_pay") == "1" else "0",))
+        if "auto_pay_cap" in request.form:
+            try:
+                capc = int(round(float(request.form["auto_pay_cap"].replace("$", "").strip() or 0) * 100))
+                if 0 <= capc <= 50000:
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_pay_cap_cents',?)", (str(capc),))
+            except ValueError:
+                pass
+        if "auto_pay_delay_min" in request.form:
+            try:
+                dm = int(request.form["auto_pay_delay_min"])
+                if 0 <= dm <= 1440:
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_pay_delay_min',?)", (str(dm),))
+            except ValueError:
+                pass
         errs = []
         if "any_present" in request.form:
             st = (request.form.get("any_start") or "").strip()[:5]
@@ -5915,6 +6371,10 @@ def driver():
 
 @app.get("/api/driver/state")
 def api_driver_state():
+    try:
+        payout_sweep(); auto_driver_pay_sweep()
+    except Exception as e:
+        print('driver poll pay sweep:', e)
     did = session.get("driver_id")
     if not did:
         return jsonify({"ok": False}), 403
@@ -5946,7 +6406,8 @@ def api_driver_state():
                                "pending_request": d["pending_request"], "max_stack": d["max_stack"],
                                "up_next": rotation.get(d["id"]), "waiting_count": waiting,
                                "at_limit": (lines.get(d["id"]) or {}).get("at_limit", False),
-                               "roster": d["roster"]},
+                               "roster": d["roster"],
+                               "region_queues": region_queues(dr, detail=False)},
                     "availability": availability_for(did),
                     "stack": [order_dict(o) for o in mine]})
 

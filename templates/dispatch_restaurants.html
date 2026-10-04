@@ -25,10 +25,27 @@
     <div><input name="lng" placeholder="Longitude (optional)"></div></div>
   <button class="btn primary">Add restaurant</button>
 </form>
+{% set appl = data|selectattr('method','equalto','app')|list %}
+{% set onl = data|selectattr('method','equalto','online')|list %}
+{% set phl = data|selectattr('method','equalto','phone')|list %}
+<div class="panel" id="howorders">
+  <h2>How each restaurant gets its orders</h2>
+  <p class="muted small">Restaurant app orders show "Sent to kitchen". Called-in orders never do: dispatch
+    places them online or by telephone, then marks Ordering in process and Order placed. Change it with
+    "How this restaurant gets orders" on that restaurant below.</p>
+  <div class="howcols">
+    {% for title, lst in [('Restaurant app', appl), ('Called in by dispatch: online', onl), ('Called in by dispatch: telephone', phl)] %}
+    <div><h3>{{ title }} ({{ lst|length }})</h3>
+      {% if lst %}<ul class="howlist">{% for d in lst %}<li><a href="#rest{{ d.r['id'] }}">{{ d.r['name'] }}</a></li>{% endfor %}</ul>
+      {% else %}<p class="muted small">None yet.</p>{% endif %}</div>
+    {% endfor %}
+  </div>
+</div>
 {% for d in data %}
-<form class="panel" method="post">
+<form class="panel" method="post" id="rest{{ d.r['id'] }}">
   <input type="hidden" name="restaurant_id" value="{{ d.r['id'] }}">
-  <h2>{{ d.r['name'] }} <span class="pill {{ 'green' if d.open else 'grey' }}">{{ 'Open' if d.open else 'Closed' }}</span></h2>
+  <h2>{{ d.r['name'] }} <span class="pill {{ 'green' if d.open else 'grey' }}">{{ 'Open' if d.open else 'Closed' }}</span>
+    <span class="pill {{ 'blue' if d.method == 'app' else 'amber' }}">{{ {'app':'Restaurant app','online':'Called in: online','phone':'Called in: telephone'}[d.method] }}</span></h2>
   <div class="cols">
     <div><label>Name</label><input name="name" value="{{ d.r['name'] }}"></div>
     <div><label>Address</label><input name="address" value="{{ d.r['address'] }}"></div>
@@ -45,9 +62,14 @@
     Force closed (kitchen paused)</label>
   <label><input type="checkbox" name="open_24" {{ 'checked' if d.r['open_24'] }}>
     Open 24 hours (ignores the table above)</label>
-  <label><input type="checkbox" name="uses_app" {{ 'checked' if d.r['uses_app'] }}>
-    Uses the restaurant app (orders go to their tablet). Leave off and dispatch places the order:
-    Ordering in process, then Order placed with a timer.</label>
+  <div class="row"><label>How this restaurant gets orders</label>
+    <select name="order_method">
+      <option value="app" {{ 'selected' if d.method == 'app' }}>Restaurant app (orders go to their tablet)</option>
+      <option value="online" {{ 'selected' if d.method == 'online' }}>Called in by dispatch: online</option>
+      <option value="phone" {{ 'selected' if d.method == 'phone' }}>Called in by dispatch: telephone</option>
+    </select></div>
+  <div class="row"><label>Online ordering link (for online)</label>
+    <input name="order_url" value="{{ d.r['order_url'] or '' }}" placeholder="https://..."></div>
   <div class="row"><label>Region</label>
     <select name="region_id"><option value="0">No region</option>
       {% for g in regions %}<option value="{{ g.id }}" {{ 'selected' if (d.r['region_id'] or 0) == g.id }}>{{ g.name }}</option>{% endfor %}

@@ -12,6 +12,16 @@
 the driver actually has to go.</p>
 {% if not biz_open %}<div class="panel" style="border-left:4px solid #b44a22"><b>We are closed right now.</b> You can still place a future order: pick a restaurant and choose Schedule for later.</div>{% endif %}
 {% if business_hours_label() %}<p class="muted small" style="text-align:center">Delivery hours: {{ business_hours_label() }}</p>{% endif %}
+{% if regions|length > 1 %}
+<div class="regionpick">
+  <span class="muted small">Where are you?</span>
+  <a class="chip {{ 'on' if not sel_region else '' }}" href="/?region=all">All areas</a>
+  {% for g in regions %}
+  <a class="chip {{ 'on' if sel_region == g.id else '' }}" href="/?region={{ g.id }}">{{ g.name }}{% if g.paused %} (not taking orders){% endif %}</a>
+  {% endfor %}
+</div>
+{% endif %}
+{% if sel_region and not cards %}<div class="panel">No restaurants in {{ sel_region_name }} yet. <a href="/?region=all">See all areas</a>.</div>{% endif %}
 <div class="grid">
   {% for c in cards %}
   <a class="card {{ 'closed' if not c.open else '' }}" href="/r/{{ c.r['slug'] }}">

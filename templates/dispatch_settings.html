@@ -62,6 +62,13 @@ async function setLogo(inp){
   <div class="muted small">When you tap Pay driver on a delivered order, the amount starts at this and you can change it before sending. Money goes from your PayPal balance to the driver's PayPal or Venmo.</div>
   <label>Share of the delivery fee the driver gets (%)</label>
   <input name="driver_pay_fee_pct" type="number" min="0" max="100" value="{{ s['driver_pay_fee_pct'] if s['driver_pay_fee_pct'] is not none else 100 }}">
+  <label>Pay drivers automatically after delivery (1 on, 0 off)</label>
+  <input name="auto_driver_pay" value="{{ s['auto_driver_pay'] if s['auto_driver_pay'] is not none else 1 }}">
+  <label>Auto pay limit per trip ($). Trips over this wait for a dispatcher.</label>
+  <input name="auto_pay_cap" inputmode="decimal" value="{{ '%.2f' % (((s['auto_pay_cap_cents'] or 2500)|int) / 100) }}">
+  <label>Wait this many minutes after delivery before paying (0 to 1440), so late tips and fixes are included</label>
+  <input name="auto_pay_delay_min" type="number" min="0" max="1440" value="{{ s['auto_pay_delay_min'] if s['auto_pay_delay_min'] is not none else 15 }}">
+  <div class="muted small">Auto pay sends the trip's suggested pay by PayPal or Venmo once the customer's payment is settled. Drivers paid by bank, drivers with nothing on file, and failed payments are left for you on the order.</div>
   <label>Share of the tip the driver gets (%)</label>
   <input name="driver_pay_tip_pct" type="number" min="0" max="100" value="{{ s['driver_pay_tip_pct'] if s['driver_pay_tip_pct'] is not none else 100 }}">
   <label>Flat amount added per trip ($)</label>

@@ -66,8 +66,6 @@
     <div class="muted small" id="refNote">Whatever the shop calls this order. Ours is assigned on its own.</div>
     <input id="name" placeholder="Customer name">
     <input id="phone" placeholder="Phone">
-  <label>How did this order come in?</label>
-  <select id="source"><option value="call_in">Call-in (phone)</option><option value="dispatch_online">Placed online by dispatch</option></select>
     <textarea id="address" rows="2" placeholder="Street, city, state, ZIP"></textarea>
     <input id="note" placeholder="Gate code, apartment, door instructions">
     <div id="quote" class="quote"></div>
@@ -91,6 +89,10 @@
     <label class="switch" style="display:flex;gap:8px;align-items:center;margin:8px 0">
       <input type="checkbox" id="cashOrder"> <b>Cash order</b>
       <span class="muted small">the driver collects at the door, no card needed</span></label>
+    <label class="switch" style="display:flex;gap:8px;align-items:center;margin:8px 0">
+      <input type="checkbox" id="houseOrder"> <b>House account</b>
+      <span class="muted small">marked paid now, nothing collected at the door</span></label>
+    <input id="houseName" class="hidden" placeholder="House account name (optional)" maxlength="60">
     <button class="btn primary" id="place" disabled onclick="placeOrder()">Create order</button>
     <p class="muted small">Dispatcher orders go through even when the customer's number is blocked.
       If the kitchen is closed, only a redo goes through now; schedule anything else for when they open.</p>
@@ -98,6 +100,14 @@
 </div>
 {% endblock %}
 {% block scripts %}
+<script>
+document.addEventListener('DOMContentLoaded', function(){
+  const c = document.getElementById('cashOrder'), h = document.getElementById('houseOrder'),
+        n = document.getElementById('houseName');
+  h.addEventListener('change', function(){ if(h.checked) c.checked = false; n.classList.toggle('hidden', !h.checked); });
+  c.addEventListener('change', function(){ if(c.checked){ h.checked = false; n.classList.add('hidden'); } });
+});
+</script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="/static/cardbox.js"></script>
 <script src="/static/itempick.js"></script>
@@ -286,7 +296,9 @@ async function placeOrder(){
     send_to: SRC && document.getElementById('sendTo') ? document.getElementById('sendTo').value : '',
     placed_by: 'dispatch',
     cash: document.getElementById('cashOrder').checked,
-    source: document.getElementById('source').value}));
+    house: document.getElementById('houseOrder').checked,
+    house_account: document.getElementById('houseName').value,
+    source: 'call_in'}));
   if(!res.ok){ alert(res.error); return; }
   if(res.send_note && res.cash) alert(res.code + ': ' + res.send_note);
   if(res.future_note) alert(res.code + ': ' + res.future_note + ' It waits on the Future orders tab until then.');

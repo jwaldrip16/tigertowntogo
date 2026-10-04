@@ -16,6 +16,7 @@
 </div>
 <div class="row regionbar"><span class="pill blue" id="rgLabel">All regions</span>
   <button class="btn tiny" id="rgAll" onclick="toggleAllRegions()" style="display:none">Show all regions</button>
+  <div id="rgQueues" class="rgqueues"></div>
   <span id="myRg" class="rgpick"></span>
   <input id="findAny" placeholder="Find any order: code, phone or name" onkeydown="if(event.key==='Enter')findAny()">
   <button class="btn tiny" onclick="findAny()">Find</button></div>
@@ -654,7 +655,8 @@ function payBlock(o){
   h += p.rows.length ? p.rows.map(r=>'<span class="pill '+(r.status==='SUCCESS'||r.status==='BANK_PAID'?'green':(r.error?'red':'amber'))+'">'+
         r.amount+' '+fEsc(r.label)+'</span>'+(r.error?' <span class="muted">'+fEsc(r.error)+'</span>':'')).join(' ')
       : '<span class="pill grey">not paid</span>';
-  h += ' <span class="muted">suggested '+p.suggest+(p.to?' to '+fEsc(p.to):'')+'</span></div><div class="order-actions">';
+  h += ' <span class="muted">suggested '+p.suggest+(p.to?' to '+fEsc(p.to):'')+'</span>'+
+       (p.auto_note?' <span class="pill grey">'+fEsc(p.auto_note)+'</span>':'')+'</div><div class="order-actions">';
   const bankBtn = ' <button class="btn tiny" onclick="bankPay('+o.id+',\''+(p.paid_cents?(p.owed_cents?('$'+(p.owed_cents/100).toFixed(2)):''):p.suggest)+'\',\''+fEsc(o.driver)+'\')">Paid by bank</button>';
   if (p.open) { h += '<button class="btn tiny" onclick="checkPay('+o.id+')">Check driver pay</button>'; return h + '</div>'; }
   if (!p.ready) h += '<span class="muted small">Add a PayPal email or Venmo phone for this driver under Restaurants and drivers.</span>';
@@ -717,9 +719,42 @@ function renderCompleted(res){
     document.getElementById('completed').innerHTML = (res.completed||[]).map(o=>'<div class="order"><strong>'+o.code+'</strong> '+o.dispatch_status+'</div>').join('') || '<p class="muted">Nothing completed yet.</p>'; }
 }
 let SHOW_ALL_REGIONS = false;
+let RGQ_OPEN = {};
+async function pauseRegion(id, on, name){
+  if (on && !confirm('Pause ' + name + '? Customers can\'t order from its restaurants, and orders already placed there hold in the queue until you resume it.')) return;
+  const r = await jpost('/api/dispatch/pause-region', {region_id: id, paused: on});
+  if (!r.ok){ alert(r.error || 'Could not change that region.'); return; }
+  board(true);
+}
+function drawRegionQueues(res){
+  const box = document.getElementById('rgQueues'); if(!box) return;
+  const qs = res.region_queues || [];
+  if (qs.length < 2 && !(qs[0] && qs[0].id)){ box.innerHTML = ''; return; }
+  box.innerHTML = '<div class="muted small">' + (res.is_owner ? 'Queue in every region (owner view)' : 'Queue in your regions') + '</div>' +
+    qs.map(q => {
+      const late = q.oldest_min >= 15;
+      const head = '<button class="btn tiny" onclick="RGQ_OPEN['+q.id+']=!RGQ_OPEN['+q.id+'];board(true)">' +
+        esc(q.name) + ': <strong>' + q.waiting + '</strong> waiting' +
+        (q.waiting ? ', oldest ' + q.oldest_min + ' min' : '') + ', ' + q.drivers_on + ' driver' + (q.drivers_on===1?'':'s') + ' on</button>';
+      const pill = (q.paused ? ' <span class="pill red">Paused' + (q.paused_by ? ' by ' + esc(q.paused_by) : '') + '</span>' : '') +
+        (q.waiting && late ? ' <span class="pill red">late</span>' : '') +
+        (q.id ? ' <button class="btn tiny' + (q.paused ? '' : ' danger') + '" onclick="pauseRegion(' + q.id + ',' + (q.paused ? 'false' : 'true') + ',\'' + esc(q.name).replace(/'/g, "\\'") + '\')">' +
+          (q.paused ? 'Resume' : 'Pause') + '</button>' : '');
+      let body = '';
+      if (RGQ_OPEN[q.id]){
+        body = '<div class="small" style="margin:4px 0 8px 10px">' +
+          ((q.orders||[]).map(o => '#' + o.pos + ' ' + esc(o.code) + ' ' + esc(o.restaurant) + ' (' + o.minutes + ' min' +
+             (o.reason ? ', ' + esc(o.reason) : '') + ')').join('<br>') || 'Nothing waiting.') +
+          '<br><span class="muted">Drivers on: ' + (q.drivers && q.drivers.length ? q.drivers.map(esc).join(', ') : 'none') + '</span></div>';
+      }
+      return '<div>' + head + pill + body + '</div>';
+    }).join('');
+}
 function drawRegionBar(res){
   const lab = document.getElementById('rgLabel'), b = document.getElementById('rgAll');
+  try { drawRegionQueues(res); } catch(e) { console.log('region queues', e); }
   if (!res.region_filtered){ lab.textContent = 'All regions'; b.style.display = 'none'; return; }
+  if (!res.is_owner){ SHOW_ALL_REGIONS = false; lab.textContent = 'Your regions: ' + res.regions_label; b.style.display = 'none'; return; }
   b.style.display = '';
   lab.textContent = SHOW_ALL_REGIONS ? 'Showing every region' : 'Your regions: ' + res.regions_label;
   b.textContent = SHOW_ALL_REGIONS ? 'Back to my regions' : 'Show all regions';
@@ -752,12 +787,14 @@ async function findAny(){
   out.innerHTML = (r.results.length ? r.results.map(o=>
     '<div class="findres'+(o.mine?'':' other')+'"><div class="row between"><span><strong>'+fEsc(o.code)+'</strong> '+
     fEsc(o.customer)+' &middot; '+fEsc(o.restaurant)+' <span class="pill blue">'+fEsc(o.region)+'</span>'+
+    (o.web?' <span class="pill green">Web</span>':'')+
     (o.mine?'':' <span class="pill amber">outside your regions</span>')+'</span>'+
     '<span class="muted small">'+fEsc(o.created)+'</span></div>'+
     '<div class="small">Status: <strong>'+fEsc(o.status)+'</strong> &middot; kitchen '+fEsc(o.kitchen)+
     (o.driver?' &middot; driver '+fEsc(o.driver):' &middot; no driver yet')+
     (o.hold_reason?' &middot; '+fEsc(o.hold_reason):'')+'</div>'+
     '<div class="row"><button class="btn tiny primary" onclick="editOrder('+o.id+')">Edit order</button>'+
+    '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>'+
     '<a class="btn tiny" target="_blank" href="'+o.track+'">Tracking page</a></div></div>').join('')
     : '<p class="muted small">No orders match that.</p>') +
     '<button class="btn tiny" onclick="document.getElementById(\'findAnyOut\').innerHTML=\'\';document.getElementById(\'findAny\').value=\'\'">Close</button>';
@@ -811,7 +848,7 @@ async function board(force){
       res.auto ? 'Auto dispatch on' : 'Auto dispatch off, assign by hand';
   }
   LAST = res;
-  const unconfirmed = res.orders.filter(o=>o.kitchen_status==='pending' && o.manual_state!=='ordering' &&
+  const unconfirmed = res.orders.filter(o=>o.uses_app && o.kitchen_status==='pending' && o.manual_state!=='ordering' &&
     ['awaiting_payment','cancelled','delivered','scheduled'].indexOf(o.dispatch_status) < 0);
   if (unconfirmed.length) flashPending(unconfirmed.length);
   else { clearFlash(); PEND_NOTIFIED = 0; }
@@ -956,8 +993,20 @@ async function houseAcct(id, code, total){
   if(!res.ok){ alert(res.error || 'That did not save.'); return; }
   board(true);
 }
+function etaPill(o){
+  if (!o.eta_clock || o.dispatch_status==='delivered' || o.dispatch_status==='cancelled') return '';
+  const t = o.eta_note==='scheduled' ? 'Due '+o.eta_clock : 'ETA '+o.eta_clock+' ('+o.eta_min+' min)';
+  return '<span class="pill blue" title="'+(o.eta_note?esc(o.eta_note):'estimate')+'">'+t+(o.eta_note==='live GPS'?' &#9679;':'')+'</span> ';
+}
+function srcPill(o){
+  // customer placed it themselves on the website
+  if(o.source==='website') return '<span class="pill green" title="Customer ordered on the website">Web</span>';
+  return '<span class="pill grey">'+esc(o.source_label||'Call-in')+'</span>';
+}
 function kitchenGo(o){
   if(!o.can_send_kitchen) return '';
+  if(!o.uses_app) return '<span class="pill amber">Not released yet</span>'+
+    '<button class="btn tiny primary" onclick="sendKitchen('+o.id+')">Release order</button>';
   return '<span class="pill amber">Not sent to kitchen</span>'+
     '<button class="btn tiny primary" onclick="sendKitchen('+o.id+')">Send to kitchen</button>';
 }
@@ -1051,10 +1100,10 @@ function orderCard(o, opts, drivers){
     'ondragend="dragEnd()"><div class="order-head"><span class="grip">&#8942;&#8942;</span><strong>'+o.code+'</strong> '+
     refPill(o)+tokenPill(o)+
     ((o.dispatch_status==='awaiting_payment' || o.kitchen_status==='waiting')
-      ? '<span class="pill amber">not sent to kitchen</span> <span class="pill blue">waiting on payment</span> '
+      ? '<span class="pill amber">'+(o.uses_app?'not sent to kitchen':'not released yet')+'</span> <span class="pill blue">waiting on payment</span> '
       : '<span class="pill '+(o.kitchen_status==='ready'?'green':o.kitchen_status==='preparing'?'amber':'grey')+'">'
-        +(o.kitchen_status==='pending'?(o.uses_app?'sent to kitchen':(o.manual_state==='ordering'?'ordering in process':'needs ordering')):o.kitchen_status)+'</span> <span class="pill blue">'+o.dispatch_status+'</span> ')+timer+' '+q+' '+hold+
-    ' <span class="pill grey">'+(o.source_label||'Online')+'</span>'+
+        +(o.kitchen_status==='pending'?(o.uses_app?'sent to kitchen':(o.manual_state==='ordering'?'ordering in process':'needs ordering')+(o.order_method==='online'?' online':' by phone')):o.kitchen_status)+'</span> <span class="pill blue">'+o.dispatch_status+'</span> ')+timer+' '+q+' '+hold+
+    ' '+srcPill(o)+
     payPill(o)+
     (o.placed_by!=='customer' ? ' <span class="pill grey">by '+o.placed_by+'</span>' : '')+'</div>'+
     '<div class="muted small">'+o.restaurant+' &rarr; '+o.customer+' &middot; '+o.address+
@@ -1070,7 +1119,7 @@ function orderCard(o, opts, drivers){
     trailLine(o)+
     '<div class="order-actions">'+
       payButtons(o)+
-      kitchenGo(o)+
+      etaPill(o)+kitchenGo(o)+
       manualButtons(o)+
       (o.needs_address_approval ? '<button class="btn tiny primary" onclick="approveAddress('+o.id+
         ',\''+o.address.replace(/'/g,"\\'")+'\')">Approve address</button>' : '')+
@@ -1115,7 +1164,10 @@ function manualButtons(o){
   if(o.uses_app || o.kitchen_status!=='pending' || o.dispatch_status==='awaiting_payment'
      || ['delivered','cancelled'].includes(o.dispatch_status)) return '';
   const by = o.manual_state==='ordering' && o.manual_by ? ' ('+esc(o.manual_by)+')' : '';
-  return (o.manual_state==='ordering'
+  const go = o.order_method==='online'
+      ? (o.order_url ? '<a class="btn tiny" href="'+esc(o.order_url)+'" target="_blank" rel="noopener">Open ordering site</a>' : '<span class="pill grey">online, no link saved</span>')
+      : (o.restaurant_phone ? '<a class="btn tiny" href="'+esc(o.restaurant_tel)+'">Call '+esc(o.restaurant_phone)+'</a>' : '');
+  return go+(o.manual_state==='ordering'
       ? '<button class="btn tiny" disabled>Ordering in process'+by+'</button>'
       : '<button class="btn tiny primary" onclick="manualStep('+o.id+',\'ordering\')">Ordering in process</button>')+
     '<button class="btn tiny primary" onclick="manualStep('+o.id+',\'placed\')">Order placed + start timer</button>';

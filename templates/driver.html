@@ -288,7 +288,10 @@ function renderStatus(d){
                    : 'You are holding your stack limit, so you are out of line until a stop clears. ')
       : 'Dispatch has you '+d.status+', so you are out of the rotation. ')+
     'Stacking up to '+d.max_stack+' orders. '+
-    d.waiting_count+' order'+(d.waiting_count===1?'':'s')+' waiting to go out.</div></div>'+
+    d.waiting_count+' order'+(d.waiting_count===1?'':'s')+' waiting to go out.'+
+    ((d.region_queues||[]).length > 1 || ((d.region_queues||[])[0]||{}).id
+      ? '<br>' + (d.region_queues||[]).map(q => q.name+(q.paused?' (paused)':'')+': '+q.waiting+' waiting'+(q.waiting?' (oldest '+q.oldest_min+' min)':'')+', '+q.drivers_on+' on').join('<br>')
+      : '')+'</div></div>'+
     '<div><button class="btn tiny" onclick="ask(\'online\')">Request online</button>'+
     '<button class="btn tiny" onclick="ask(\'break\')">Request break</button>'+
     '<button class="btn tiny" onclick="ask(\'offline\')">Request clock out</button></div></div>';

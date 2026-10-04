@@ -431,3 +431,17 @@ body.assignflash{animation:assignpage 1s ease-in-out infinite}
 .findres{border:1px solid #e3e8ef;border-radius:10px;padding:8px 10px;margin:6px 0;background:#fff}
 .findres.other{border-left:4px solid #f59f00}
 .rgtable td{padding:6px 8px;vertical-align:top}
+
+.regionpick{display:flex;flex-wrap:wrap;gap:8px;align-items:center;justify-content:center;margin:10px 0 16px}
+.regionpick .chip{display:inline-block;padding:7px 14px;border-radius:999px;border:1px solid #d0d5dd;background:#fff;color:#1B2A41;text-decoration:none;font-size:14px}
+.regionpick .chip.on{background:#E8590C;border-color:#E8590C;color:#fff}
+
+.etabox{background:#fff4ec;border:1px solid #f4c6a5;border-radius:12px;padding:12px 16px;margin:10px 0;text-align:center}
+.etabox .etatime{font-size:28px;font-weight:700;color:#E8590C}
+
+.howlist{margin:4px 0 0 18px;padding:0;columns:2;font-size:14px}
+.howlist li{margin:2px 0}
+
+.howcols>div{margin-bottom:12px}
+.howcols .howlist{columns:3;column-gap:24px}
+@media(max-width:800px){.howcols .howlist{columns:1}}
