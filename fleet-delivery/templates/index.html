@@ -1,0 +1,62 @@
+{% extends "base.html" %}{% block body %}
+<div class="panel" id="trackbox">
+  <h2>Track an order</h2>
+  <p class="muted small">Enter the order code from your confirmation (it looks like FF123456789).</p>
+  <div class="row"><input id="trackcode" placeholder="FF123456789">
+    <button class="btn primary" onclick="goTrack()">Track it</button></div>
+  <div id="recent"></div>
+</div>
+
+<h1>Food delivery in Opelika, Auburn and Valley</h1>
+<p class="lede">Pick a restaurant, we validate your address, and the fee is calculated from how far
+the driver actually has to go.</p>
+{% if not biz_open %}<div class="panel" style="border-left:4px solid #b44a22"><b>We are closed right now.</b> You can still place a future order: pick a restaurant and choose Schedule for later.</div>{% endif %}
+{% if hours_text %}<p class="muted small" style="text-align:center">Delivery hours{% if sel_region_name %} in {{ sel_region_name }}{% endif %}: {{ hours_text }}</p>{% endif %}
+{% if closed_text %}<p class="muted small" style="text-align:center">{{ closed_text }}</p>{% endif %}
+{% if regions|length > 1 %}
+<div class="regionpick">
+  <span class="muted small">Where are you?</span>
+  <a class="chip {{ 'on' if not sel_region else '' }}" href="/?region=all">All areas</a>
+  {% for g in regions %}
+  <a class="chip {{ 'on' if sel_region == g.id else '' }}" href="/?region={{ g.id }}">{{ g.name }}{% if g.paused %} (not taking orders){% endif %}</a>
+  {% endfor %}
+</div>
+{% endif %}
+{% if sel_region and not cards %}<div class="panel">No restaurants in {{ sel_region_name }} yet. <a href="/?region=all">See all areas</a>.</div>{% endif %}
+<div class="grid">
+  {% for c in cards %}
+  <a class="card {{ 'closed' if not c.open else '' }}" href="/r/{{ c.r['slug'] }}">
+    {% if c.r['image'] %}<img class="cardimg" src="/media/{{ c.r['image'] }}" alt="" loading="lazy">{% endif %}
+    <h3>{{ c.r['name'] }}</h3>
+    <p class="muted">{{ c.r['address'] }}</p>
+    <p class="muted">{{ c.hours }}</p>
+    {% if c.rules and (c.rules.min_cents or c.rules.max_miles) %}<p class="muted small">{% if c.rules.min_cents %}{{ c.rules.min_cents|money }} minimum{% endif %}{% if c.rules.min_cents and c.rules.max_miles %} &middot; {% endif %}{% if c.rules.max_miles %}Delivers within {{ '%g' % c.rules.max_miles }} mi{% endif %}</p>{% endif %}
+    <span class="pill {{ 'green' if c.open else 'grey' }}">{{ 'Open now' if c.open else 'Closed' }}</span>
+  </a>
+  {% endfor %}
+  {% if any_on %}
+  <a class="card anycard {{ '' if any_open else 'closed' }}" href="/r/oneoff">
+    <h3>Restaurant not listed?</h3>
+    <p class="muted">Order from any restaurant in the area. Tell us the place, the items, and the prices,
+      and your driver picks it up.</p>
+    {% if any_rest_label() %}<p class="muted">Available {{ any_rest_label() }}</p>{% endif %}
+    <span class="pill {{ 'green' if any_open else 'grey' }}">{{ 'Order from anywhere' if any_open else 'Closed' }}</span>
+  </a>
+  {% endif %}
+</div>
+<p class="muted small">Already ordered? <a href="/track/FF000000">Track an order</a> by putting your
+code in the address bar, e.g. /track/FF123456.</p>
+{% endblock %}
+{% block scripts %}<script>
+function goTrack(){
+  const c = document.getElementById('trackcode').value.trim().toUpperCase();
+  if(c) window.location = '/track/' + c;
+}
+(function(){
+  let seen = [];
+  try{ seen = JSON.parse(localStorage.getItem('ffOrders')||'[]'); }catch(e){}
+  if(!seen.length) return;
+  document.getElementById('recent').innerHTML = '<p class="muted small">Your recent orders: '+
+    seen.map(c=>'<a href="/track/'+c+'">'+c+'</a>').join(' &middot; ')+'</p>';
+})();
+</script>{% endblock %}

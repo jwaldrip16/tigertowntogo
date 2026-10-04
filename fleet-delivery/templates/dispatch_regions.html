@@ -1,0 +1,189 @@
+{% extends "base.html" %}{% block body %}
+<div class="head"><h1>Regions</h1>
+  <div><a class="btn small" href="/dispatch">Board</a>
+       <a class="btn small" href="/dispatch/schedule">Driver schedule</a>
+       <a class="btn small" href="/dispatch/account">Dispatchers</a>
+       <a class="btn small" href="/dispatch/logout">Sign out</a></div></div>
+<p class="muted small">Each restaurant belongs to one region and its orders land in that region. Drivers and dispatchers can cover
+several regions. Someone with no region checked covers every region. A region picked on someone's availability
+overrides this list while they are working that shift.</p>
+
+<div class="panel">
+  <h2>Regions</h2>
+  <div id="rgList"></div>
+  <div class="row mt"><input id="rgNew" maxlength="40" placeholder="New region, like Phenix City" onkeydown="if(event.key==='Enter')addRegion()">
+    <label class="small"><input type="checkbox" id="rgMatch" checked> Put restaurants with this town in their address in it</label>
+    <button class="btn primary small" onclick="addRegion()">Add region</button></div>
+</div>
+
+<div class="panel mt">
+  <h2>Restaurants</h2>
+  <div class="row"><input id="rsFind" placeholder="Filter restaurants" oninput="drawRests()">
+    <select id="rsOnly" onchange="drawRests()"><option value="">All</option><option value="0">No region yet</option></select></div>
+  <table class="rgtable" id="rsTable"></table>
+</div>
+
+<div class="cols mt">
+  <section class="panel"><h2>Drivers</h2><div id="drList"></div></section>
+  <aside class="panel"><h2>Dispatchers</h2><div id="dpList"></div></aside>
+</div>
+
+<script>
+let RG = null;
+function e(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+async function send(b){
+  const r = await jpost('/api/dispatch/regions', b);
+  if(!r.ok){ alert(r.error || 'That did not save.'); return false; }
+  RG = r; draw(); return true;
+}
+
+let HR = null;
+async function hoursRegion(id){
+  const r = await jget('/api/dispatch/region-hours?region_id='+id);
+  if (!r.ok){ alert(r.error || 'Could not load the hours.'); return; }
+  HR = {id:id, dates:r.closed_dates.slice()};
+  const old = document.getElementById('hrModal'); if (old) old.remove();
+  const box = document.createElement('div'); box.id = 'hrModal';
+  box.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;overflow:auto';
+  const dis = r.can_edit ? '' : ' disabled';
+  box.innerHTML = '<div style="background:#fff;border-radius:12px;padding:18px;max-width:460px;width:94%;margin:20px auto">' +
+    '<h3 style="margin:0 0 6px">'+e(r.region)+' hours</h3>' +
+    '<label class="small" style="display:block;margin:4px 0"><input type="radio" name="hrOwn" value="0"'+(r.own?'':' checked')+dis+' onchange="hrToggle()"> Use the business hours <span class="muted">('+e(r.business_label)+')</span></label>' +
+    '<label class="small" style="display:block;margin:4px 0 8px"><input type="radio" name="hrOwn" value="1"'+(r.own?' checked':'')+dis+' onchange="hrToggle()"> This region has its own hours</label>' +
+    '<table id="hrDays" style="width:100%;font-size:14px">' + r.rows.map(x =>
+      '<tr><td style="padding:3px 6px 3px 0">'+e(x.day)+'</td>' +
+      '<td><input type="time" id="hro'+x.k+'" value="'+e(x.open)+'"'+dis+'></td>' +
+      '<td><input type="time" id="hrc'+x.k+'" value="'+e(x.close)+'"'+dis+'></td>' +
+      '<td><label class="small"><input type="checkbox" id="hrx'+x.k+'"'+(x.closed?' checked':'')+dis+'> Closed</label></td></tr>').join('') + '</table>' +
+    '<div class="muted small" style="margin:2px 0 10px">A close time earlier than the open time runs past midnight.</div>' +
+    '<h4 style="margin:10px 0 4px">Closed dates</h4>' +
+    '<div class="muted small">Holidays or days this region is closed all day. Customers can\'t order or schedule for these days.</div>' +
+    '<div id="hrDates" style="margin:6px 0"></div>' +
+    (r.can_edit ? '<div class="row"><input type="date" id="hrNewDate" min="'+new Date().toLocaleDateString('en-CA')+'"> <button class="btn tiny" onclick="hrAddDate()">Add date</button></div>' : '') +
+    '<div class="small" id="hrErr" style="color:#b42318;min-height:1em;margin-top:6px"></div>' +
+    '<div class="btnrow" style="margin-top:10px">' + (r.can_edit ? '<button class="btn primary" onclick="hrSave()">Save</button> ' : '<span class="muted small">You can only change hours for regions you are assigned to.</span> ') +
+    '<button class="btn tiny" onclick="document.getElementById(\'hrModal\').remove()">Close</button></div></div>';
+  document.body.appendChild(box);
+  box.onclick = ev => { if (ev.target === box) box.remove(); };
+  HR.can = r.can_edit; hrToggle(); hrDrawDates();
+}
+function hrToggle(){
+  const own = (document.querySelector('input[name=hrOwn]:checked')||{}).value === '1';
+  document.getElementById('hrDays').style.opacity = own ? '1' : '.45';
+  document.querySelectorAll('#hrDays input').forEach(i => i.disabled = !own || !HR.can);
+}
+function hrNice(d){ const x = new Date(d+'T12:00:00'); return x.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'}); }
+function hrDrawDates(){
+  const box = document.getElementById('hrDates');
+  box.innerHTML = HR.dates.length ? HR.dates.sort().map(d => '<span class="rgchip">'+hrNice(d)+
+    (HR.can ? ' <button class="rgx" title="Remove" onclick="hrDelDate(\''+d+'\')">&times;</button>' : '')+'</span>').join(' ')
+    : '<span class="muted small">No closed dates.</span>';
+}
+function hrAddDate(){
+  const v = document.getElementById('hrNewDate').value;
+  if (!v){ document.getElementById('hrErr').textContent = 'Pick a date first.'; return; }
+  if (!HR.dates.includes(v)) HR.dates.push(v);
+  document.getElementById('hrErr').textContent = ''; hrDrawDates();
+}
+function hrDelDate(d){ HR.dates = HR.dates.filter(x => x !== d); hrDrawDates(); }
+async function hrSave(){
+  const own = (document.querySelector('input[name=hrOwn]:checked')||{}).value === '1';
+  const hours = {};
+  for (let k = 0; k < 7; k++){
+    hours[k] = {open: document.getElementById('hro'+k).value, close: document.getElementById('hrc'+k).value,
+                closed: document.getElementById('hrx'+k).checked};
+  }
+  const r = await jpost('/api/dispatch/region-hours', {region_id: HR.id, own: own, hours: hours, closed_dates: HR.dates});
+  if (!r.ok){ document.getElementById('hrErr').textContent = r.error || 'That did not save.'; return; }
+  document.getElementById('hrModal').remove();
+  load();
+}
+
+async function phoneRegion(id){
+  const r = RG.regions.find(x => x.id === id); if (!r) return;
+  const v = prompt('Dispatch number for '+r.name+'. Drivers, kitchens and customers in this region call this number.\nLeave it blank to use the business number'+(r.business_phone?' ('+r.business_phone+')':'')+'.', r.phone || '');
+  if (v === null) return;
+  const res = await jpost('/api/dispatch/region-phone', {region_id:id, phone:v});
+  if (!res.ok){ alert(res.error || 'That did not save.'); return; }
+  load();
+}
+async function load(){ const r = await jget('/api/dispatch/regions'); if(!r.ok){ window.location='/dispatch/login'; return; } RG = r; draw(); }
+function draw(){
+  document.getElementById('rgList').innerHTML = RG.regions.length ? RG.regions.map(r=>
+    '<div class="row between schedrow"><span><strong>'+e(r.name)+'</strong> <span class="muted small">'+r.restaurants+' restaurant'+(r.restaurants===1?'':'s')+'</span>'+
+    '<div class="muted small">Hours: '+e(r.own_hours ? r.hours_label : 'business hours ('+r.hours_label+')')+(r.closed_label?' &middot; '+e(r.closed_label):'')+'</div>'+
+    '<div class="muted small">Dispatch number: '+e(r.phone ? r.phone : 'business number'+(r.business_phone?' ('+r.business_phone+')':''))+'</div>'+
+    '<div class="muted small">Minimum order: '+(r.min_order_cents ? '$'+(r.min_order_cents/100).toFixed(2) : 'none')+' &middot; Delivery radius: '+(r.max_miles ? r.max_miles+' mi' : 'no limit')+'</div></span>'+
+    '<span><button class="btn tiny" onclick="hoursRegion('+r.id+')">Hours &amp; closed dates</button>'+
+    '<button class="btn tiny" onclick="phoneRegion('+r.id+')">Dispatch number</button>'+
+    '<button class="btn tiny" onclick="rulesEdit(\'region\','+r.id+')">Minimum &amp; radius</button>'+
+    '<button class="btn tiny" onclick="renRegion('+r.id+')">Rename</button>'+
+    '<button class="btn tiny danger" onclick="delRegion('+r.id+')">Delete</button></span></div>').join('')
+    : '<p class="muted small">No regions yet. Add one below.</p>';
+  const only = document.getElementById('rsOnly'), keep = only.value;
+  only.innerHTML = '<option value="">All</option><option value="0">No region yet</option>' +
+    RG.regions.map(r=>'<option value="'+r.id+'">'+e(r.name)+'</option>').join('');
+  only.value = keep;
+  drawRests();
+  const boxes = (kind, p) => RG.regions.map(r=>'<label class="rgchip"><input type="checkbox" '+(p.regions.includes(r.id)?'checked ':'')+
+      (kind==='p' && !RG.owner ? 'disabled title="Only an owner can change dispatcher regions" ' : '')+
+      'onchange="setPerson(\''+kind+'\','+p.id+')" class="'+kind+p.id+'" value="'+r.id+'"> '+e(r.name)+'</label>').join('');
+  const row = (kind, p) => '<div class="schedrow"><div class="row between"><strong>'+e(p.name)+'</strong><span class="muted small">'+
+      (p.regions.length ? '' : (kind==='d' ? 'No region yet, cannot set availability' : 'No region yet, cannot set a schedule'))+
+      (kind==='p' && !RG.owner ? ' <span class="pill">Set by the owner</span>' : '')+'</span></div><div class="rgpick">'+boxes(kind, p)+'</div></div>';
+  document.getElementById('drList').innerHTML = RG.drivers.map(p=>row('d', p)).join('') || '<p class="muted small">No drivers yet.</p>';
+  document.getElementById('dpList').innerHTML = RG.dispatchers.map(p=>row('p', p)).join('');
+}
+function rulesLabel(r){
+  const ru = r.rules || {};
+  const m = ru.min_cents ? '$'+(ru.min_cents/100).toFixed(2)+' min'+(r.min_order_cents==null?' (region)':'') : 'No minimum';
+  const x = ru.max_miles ? ru.max_miles+' mi'+(r.max_miles==null?' (region)':'') : 'no radius limit';
+  return e(m+' \u00b7 '+x);
+}
+async function rulesEdit(kind, id){
+  const list = kind==='region' ? RG.regions : RG.restaurants;
+  const it = list.find(x=>x.id===id); if(!it) return;
+  const blank = kind==='region' ? 'Leave blank for no minimum.' : 'Leave blank to use the region\'s.';
+  const m = prompt('Minimum order for '+it.name+' in dollars (example 15).\n'+blank,
+                   it.min_order_cents!=null ? (it.min_order_cents/100).toString() : '');
+  if (m === null) return;
+  const x = prompt('Delivery radius for '+it.name+' in miles (example 8).\n'+(kind==='region' ? 'Leave blank for no limit.' : 'Leave blank to use the region\'s.'),
+                   it.max_miles!=null ? String(it.max_miles) : '');
+  if (x === null) return;
+  const res = await jpost('/api/dispatch/delivery-rules', {kind:kind, id:id, min_order:m, max_miles:x});
+  if (!res.ok){ alert(res.error || 'That did not save.'); return; }
+  load();
+}
+function drawRests(){
+  const q = document.getElementById('rsFind').value.trim().toLowerCase();
+  const only = document.getElementById('rsOnly').value;
+  const list = RG.restaurants.filter(r=>(!q || (r.name+' '+r.address).toLowerCase().includes(q)) &&
+                                     (only === '' || String(r.region_id) === only));
+  document.getElementById('rsTable').innerHTML = list.map(r=>
+    '<tr><td><strong>'+e(r.name)+'</strong><div class="muted small">'+e(r.address)+'</div>'+
+    '<div class="muted small">'+rulesLabel(r)+' <button class="btn tiny" onclick="rulesEdit(\'restaurant\','+r.id+')">Minimum &amp; radius</button></div></td><td>'+
+    '<select onchange="setRest('+r.id+', this.value)"><option value="0">No region</option>'+
+    RG.regions.map(g=>'<option value="'+g.id+'"'+(g.id===r.region_id?' selected':'')+'>'+e(g.name)+'</option>').join('')+
+    '</select></td></tr>').join('') || '<tr><td class="muted small">No restaurants match.</td></tr>';
+}
+async function addRegion(){
+  const n = document.getElementById('rgNew').value.trim(); if(!n) return;
+  if(await send({op:'add_region', name:n, match_towns: document.getElementById('rgMatch').checked}))
+    document.getElementById('rgNew').value = '';
+}
+function renRegion(id){
+  const r = RG.regions.find(x=>x.id===id); const n = prompt('Region name', r.name);
+  if(n && n.trim()) send({op:'rename_region', id:id, name:n});
+}
+function delRegion(id){
+  const r = RG.regions.find(x=>x.id===id);
+  if(confirm('Delete '+r.name+'? Its restaurants go to No region, and drivers and dispatchers lose it.')) send({op:'delete_region', id:id});
+}
+function setRest(id, rg){ send({op:'set_restaurant', restaurant_id:id, region_id:+rg}); }
+function setPerson(kind, id){
+  const vals = Array.from(document.querySelectorAll('.'+kind+id+':checked')).map(b=>+b.value);
+  send({op: kind==='d' ? 'set_driver' : 'set_dispatcher', id:id, regions:vals});
+}
+load();
+</script>
+{% endblock %}

@@ -1,0 +1,230 @@
+{% extends "base.html" %}{% block body %}
+<div class="head"><h1>{{ r['name'] }} menu</h1>
+  <span><a class="btn small" href="/r/{{ r['slug'] }}" target="_blank">See it as a customer</a>
+  <a class="btn small" href="/dispatch/restaurants">Back to restaurants</a></span></div>
+
+<div class="panel">
+  <h2>Restaurant photo</h2>
+  <p class="muted small">Shows on the restaurant's card on the home page and across the top of its menu.</p>
+  <div class="photoedit" id="restPhoto"></div>
+  <div id="presetBox"></div>
+</div>
+
+<div class="panel">
+  <div class="head"><h2>Menu</h2><button class="btn primary small" onclick="editItem(null,'')">Add an item</button></div>
+  <p class="muted small">Click any item to change its photo, price, description, section or choices
+    (sides, drinks, extra sauces). This is laid out the same way customers see it.</p>
+  <div id="tabBox"></div>
+  <div id="menu"><p class="muted">Loading...</p></div>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+const RID = {{ r['id'] }};
+let DATA = null, EDIT = null;
+function escH(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function cents(v){ return Math.round(parseFloat(String(v).replace(/[^0-9.\-]/g,'')||0)*100); }
+function dollars(c){ return (c/100).toFixed(2); }
+async function load(){
+  DATA = await jget('/api/dispatch/menu-full/' + RID);
+  draw();
+  if (EDIT) { const it = DATA.items.find(x=>x.id===EDIT); if (it) fillModal(it); }
+}
+function photoBlock(kind, id, img){
+  return (img ? '<img class="edimg" src="'+img+'" alt="">' : '<div class="noimg">No photo yet</div>')+
+    '<div class="row"><label class="btn small">'+(img?'Replace photo':'Upload photo')+
+    '<input type="file" accept="image/*" hidden onchange="upPhoto(\''+kind+'\','+id+',this)"></label>'+
+    (img ? ' <button type="button" class="btn small" onclick="rmPhoto(\''+kind+'\','+id+')">Remove photo</button>' : '')+
+    ' <span class="small muted" id="ph-'+kind+id+'"></span></div>';
+}
+function draw(){
+  const r = DATA.restaurant;
+  document.getElementById('restPhoto').innerHTML = photoBlock('restaurant', r.id, r.image);
+  document.getElementById('presetBox').innerHTML = (DATA.presets||[]).map(p=>
+    '<p><button class="btn small" onclick="loadPreset(\''+p.key+'\')">Load the '+escH(p.label)+'</button> '+
+    '<span class="muted small">Fills this menu with the items, prices and choices from that menu.</span></p>').join('');
+  const tabs = [];
+  DATA.items.forEach(it=>{ const t = (it.tab||'').trim() || 'Menu'; if (!tabs.includes(t)) tabs.push(t); });
+  if (!tabs.includes(ETAB)) ETAB = tabs[0] || 'Menu';
+  document.getElementById('tabBox').innerHTML =
+    '<nav class="menutabs">' + tabs.map((t,k)=>
+      '<button type="button" class="'+(t===ETAB?'on':'')+'" onclick="pickETab('+k+')">'+escH(t)+'</button>').join('') +
+    '<button type="button" class="addtab" onclick="addTab()">+ Add tab</button></nav>' +
+    (tabs.length ? '<p class="muted small">Showing the '+escH(ETAB)+' tab. Customers only see the tab bar once there are two or more tabs.'+
+      (tabs.length>1 ? ' <button class="btn tiny" onclick="renameTab()">Rename this tab</button>' : '')+'</p>' : '');
+  ETABS = tabs;
+  const order = [], groups = {};
+  DATA.items.forEach(it=>{
+    if (((it.tab||'').trim() || 'Menu') !== ETAB) return;
+    const sec = it.section || 'Menu';
+    if (!groups[sec]){ groups[sec] = []; order.push(sec); }
+    groups[sec].push(it);
+  });
+  const el = document.getElementById('menu');
+  if (!order.length){ el.innerHTML = '<p class="muted">No items yet. Add one above.</p>'; return; }
+  el.innerHTML = order.map((s,ix)=>
+    '<div class="sechead edsec"><span>'+escH(s)+secAvailTag(groups[s])+'</span><span>'+
+    (ix>0 ? '<button class="btn tiny" onclick="moveSection(\''+escH(s).replace(/\\/g,'\\\\')+'\',\'up\')">Move up</button> ' : '')+
+    (ix<order.length-1 ? '<button class="btn tiny" onclick="moveSection(\''+escH(s)+'\',\'down\')">Move down</button> ' : '')+
+    '<button class="btn tiny" onclick="editItem(null,\''+escH(s)+'\')">Add item here</button></span></div>'+
+    '<div class="mgrid">'+groups[s].map(it=>
+      '<button type="button" class="mcard ed-card'+(it.active?'':' hiddenitem')+'" onclick="editItem('+it.id+')">'+
+      (it.image ? '<img class="mimg" src="'+it.image+'" alt="">' : '<div class="noimg">No photo</div>')+
+      '<div class="mhead"><strong>'+escH(it.name)+'</strong><span class="mprice">'+it.price+'</span></div>'+
+      (it.description ? '<div class="mdesc">'+escH(it.description)+'</div>' : '')+
+      '<div class="small">'+(it.active ? '' : '<span class="pill grey">hidden</span> ')+
+      (it.avail_label ? '<span class="pill">'+escH(it.avail_label)+'</span> ' : '')+
+      (it.groups.length ? '<span class="pill blue">'+it.groups.length+' choice'+(it.groups.length>1?'s':'')+'</span>' : '')+
+      '</div></button>').join('')+'</div>').join('');
+}
+function secAvailTag(list){
+  const l = list.length ? (list[0].avail_label||'') : '';
+  return l && list.every(x=>(x.avail_label||'') === l) ? ' <span class="pill">Available '+escH(l)+'</span>' : '';
+}
+let ETAB = '', ETABS = [];
+function pickETab(k){ ETAB = ETABS[k]; draw(); }
+function addTab(){
+  const t = (prompt('Name of the new menu tab, like Dinner Menu or Lunch Specials:') || '').trim().slice(0,40);
+  if (!t) return;
+  ETAB = t; NEWTAB = t;
+  editItem(null, '');
+}
+async function renameTab(){
+  const t = (prompt('New name for the '+ETAB+' tab:', ETAB) || '').trim().slice(0,40);
+  if (!t || t === ETAB) return;
+  const ids = DATA.items.filter(it=>((it.tab||'').trim() || 'Menu') === ETAB).map(it=>it.id);
+  for (const id of ids) await jpost('/api/dispatch/menu-item', {op:'update', item_id:id, tab:t});
+  ETAB = t; load();
+}
+let NEWTAB = '';
+async function moveSection(sec, dir){
+  const fd = new FormData(); fd.append('op','move-section'); fd.append('section', sec); fd.append('dir', dir);
+  await fetch('/dispatch/menu/' + RID, {method:'POST', body:fd});
+  load();
+}
+async function upPhoto(kind, id, inp){
+  if (!inp.files.length) return;
+  const st = document.getElementById('ph-'+kind+id); if (st) st.textContent = 'Uploading...';
+  const fd = new FormData(); fd.append('kind', kind); fd.append('id', id); fd.append('photo', inp.files[0]);
+  const res = await (await fetch('/api/dispatch/photo', {method:'POST', body:fd})).json().catch(()=>({ok:false}));
+  if (!res.ok){ if (st) st.textContent = res.error || 'Upload failed.'; return; }
+  load();
+}
+async function rmPhoto(kind, id){
+  if (!confirm('Remove this photo?')) return;
+  const fd = new FormData(); fd.append('kind', kind); fd.append('id', id); fd.append('op','remove');
+  await fetch('/api/dispatch/photo', {method:'POST', body:fd});
+  load();
+}
+async function loadPreset(key){
+  const has = DATA.items.length;
+  let replace = false;
+  if (has){
+    if (!confirm('This menu already has '+has+' item(s). Replace them with the new menu? Their photos are deleted too.')) return;
+    replace = true;
+  }
+  const res = await jpost('/api/dispatch/load-preset', {restaurant_id:RID, preset:key, replace:replace});
+  alert(res.ok ? ('Loaded '+res.items+' items.') : (res.error || 'Could not load that menu.'));
+  load();
+}
+// ---------- item editor ----------
+function editItem(id, section){
+  EDIT = id;
+  const it = id ? DATA.items.find(x=>x.id===id) : {id:null, name:'', price_cents:0, description:'', section:section||'', active:1, image:'', groups:[], tab:(NEWTAB||ETAB||'')};
+  NEWTAB = '';
+  let box = document.getElementById('edModal');
+  if (!box){
+    box = document.createElement('div'); box.className = 'modalback'; box.id = 'edModal';
+    box.onclick = ev=>{ if (ev.target === box) closeEdit(); };
+    document.body.appendChild(box);
+  }
+  fillModal(it);
+}
+function closeEdit(){ const m = document.getElementById('edModal'); if (m) m.remove(); EDIT = null; }
+function fillModal(it){
+  const box = document.getElementById('edModal'); if (!box) return;
+  const secs = [...new Set(DATA.items.map(x=>x.section).filter(Boolean))];
+  const groups = (it.groups||[]).map(g=>
+    '<div class="edgroup"><div class="ohead"><input value="'+escH(g.name)+'" onchange="saveGroup('+g.id+',{name:this.value})">'+
+    '<label class="small"><input type="checkbox" '+(g.min>0?'checked':'')+' onchange="saveGroup('+g.id+',{min_select:this.checked?Math.max(1,'+g.min+'):0})"> Required</label></div>'+
+    '<div class="row small edlimits">'+
+      '<label>Must pick at least <input class="mins" type="number" min="0" max="50" value="'+g.min+'" onchange="saveGroup('+g.id+',{min_select:+this.value})"></label>'+
+      '<label>Up to <input class="mins" type="number" min="1" max="50" value="'+g.max+'" onchange="saveGroup('+g.id+',{max_select:+this.value})"></label>'+
+      '<label>Each choice up to <input class="mins" type="number" min="1" max="10" value="'+g.each+'" onchange="saveGroup('+g.id+',{max_each:+this.value})"></label>'+
+      '<button class="btn tiny danger" onclick="delGroup('+g.id+')">Delete this choice</button></div>'+
+    g.options.map(o=>
+      '<div class="optrow"><input value="'+escH(o.name)+'" onchange="saveOpt('+o.id+',{name:this.value})">'+
+      '<span>+$<input class="mins" value="'+dollars(o.delta_cents)+'" onchange="saveOpt('+o.id+',{price_delta_cents:cents(this.value)})">'+
+      ' <button class="btn tiny" onclick="delOpt('+o.id+')">Remove</button></span></div>').join('')+
+    '<div class="row"><input id="no'+g.id+'" placeholder="New option, e.g. Cajun Fries">'+
+    '<input class="mins" id="np'+g.id+'" placeholder="0.00"><button class="btn tiny" onclick="addOpt('+g.id+')">Add option</button></div></div>'
+  ).join('');
+  box.innerHTML = '<div class="itemmodal">'+
+    '<button type="button" class="imclose" onclick="closeEdit()" aria-label="Close">&times;</button>'+
+    '<h2>'+(it.id ? escH(it.name) : 'New item')+'</h2><div class="im-cols"><div>'+
+    '<label>Item name</label><input id="edName" value="'+escH(it.name)+'">'+
+    '<label>Price</label><input id="edPrice" value="'+dollars(it.price_cents)+'">'+
+    '<label>Menu tab</label><input id="edTab" list="edTabs" value="'+escH(it.tab||'')+'" placeholder="Menu">'+
+    '<datalist id="edTabs">'+ETABS.map(s=>'<option value="'+escH(s)+'">').join('')+'</datalist>'+
+    '<label>Menu section</label><input id="edSec" list="edSecs" value="'+escH(it.section)+'" placeholder="Chicken Sandwiches">'+
+    '<datalist id="edSecs">'+secs.map(s=>'<option value="'+escH(s)+'">').join('')+'</datalist>'+
+    '<label>Description</label><textarea id="edDesc" rows="4">'+escH(it.description)+'</textarea>'+
+    '<label>Availability</label><p class="muted small">Leave every day unchecked and the times blank for an item customers can order any time.</p>'+
+    '<div class="row availdays">'+['Mon','Tue','Wed','Thu','Fri','Sat','Sun'].map((d,k)=>
+      '<label class="chk"><input type="checkbox" class="edDay" value="'+k+'" '+((it.avail_days||[]).indexOf(k)>=0?'checked':'')+'> '+d+'</label>').join('')+'</div>'+
+    '<div class="row"><input type="time" id="edStart" value="'+escH(it.avail_start||'')+'" style="max-width:140px"> to '+
+    '<input type="time" id="edEnd" value="'+escH(it.avail_end||'')+'" style="max-width:140px"></div>'+
+    '<label><input type="checkbox" id="edAvailSec"> Use these days and hours for every item in this section</label>'+
+    '<label><input type="checkbox" id="edActive" '+(it.active?'checked':'')+'> Show on the menu</label>'+
+    '<div class="row"><button class="btn primary" onclick="saveItem('+(it.id||'null')+')">'+(it.id?'Save item':'Create item')+'</button>'+
+    (it.id ? '<button class="btn small danger" onclick="delItem('+it.id+')">Delete item</button>' : '')+
+    '<span class="small" id="edMsg"></span></div>'+
+    (it.id ? '<h3>Choices customers make</h3><p class="muted small">Sides, drinks, extra sauces, spice level. '+
+      'Required choices must be picked before the item goes in the bag.</p>'+groups+
+      '<div class="row"><input id="ngName" placeholder="New choice, e.g. What side would you like?">'+
+      '<button class="btn small" onclick="addGroup('+it.id+')">Add choice</button></div>'
+      : '<p class="muted small">Create the item first, then add a photo and choices.</p>')+
+    '</div><div>'+(it.id ? photoBlock('item', it.id, it.image) : '')+'</div></div></div>';
+}
+async function saveItem(id){
+  const body = {name:document.getElementById('edName').value.trim(),
+    price_cents:cents(document.getElementById('edPrice').value),
+    section:document.getElementById('edSec').value.trim(),
+    tab:document.getElementById('edTab').value.trim(),
+    description:document.getElementById('edDesc').value.trim(),
+    active:document.getElementById('edActive').checked ? 1 : 0,
+    avail_days:[...document.querySelectorAll('.edDay:checked')].map(x=>+x.value),
+    avail_start:document.getElementById('edStart').value,
+    avail_end:document.getElementById('edEnd').value};
+  if (!body.name){ document.getElementById('edMsg').textContent = 'Give it a name.'; return; }
+  let res;
+  if (id){ res = await jpost('/api/dispatch/menu-item', Object.assign({op:'update', item_id:id}, body)); }
+  else { res = await jpost('/api/dispatch/menu-item', Object.assign({op:'create', restaurant_id:RID}, body)); if (res.ok) EDIT = res.item_id; }
+  let note = '';
+  if (res.ok && document.getElementById('edAvailSec') && document.getElementById('edAvailSec').checked && body.section){
+    const sr = await jpost('/api/dispatch/menu-item', {op:'section_avail', restaurant_id:RID, section:body.section,
+      tab:body.tab, avail_days:body.avail_days, avail_start:body.avail_start, avail_end:body.avail_end});
+    note = sr.ok ? ' Set on all '+sr.updated+' items in '+body.section+'.' : '';
+  }
+  await load();
+  const m = document.getElementById('edMsg'); if (m) m.textContent = res.ok ? 'Saved.'+note : (res.error || 'Not saved.');
+}
+async function delItem(id){
+  if (!confirm('Delete this item and its photo?')) return;
+  await jpost('/api/dispatch/menu-item', {op:'delete', item_id:id}); closeEdit(); load();
+}
+async function addGroup(itemId){
+  const n = document.getElementById('ngName').value.trim(); if (!n) return;
+  await jpost('/api/dispatch/option-group', {op:'create', item_id:itemId, name:n, min_select:1, max_select:1, max_each:1});
+  load();
+}
+async function saveGroup(gid, ch){ await jpost('/api/dispatch/option-group', Object.assign({op:'update', group_id:gid}, ch)); load(); }
+async function delGroup(gid){ if (!confirm('Delete this choice and its options?')) return; await jpost('/api/dispatch/option-group', {op:'delete', group_id:gid}); load(); }
+async function addOpt(gid){
+  const n = document.getElementById('no'+gid).value.trim(); if (!n) return;
+  await jpost('/api/dispatch/option', {op:'create', group_id:gid, name:n, price_delta_cents:cents(document.getElementById('np'+gid).value||0)});
+  load();
+}
+async function saveOpt(oid, ch){ await jpost('/api/dispatch/option', Object.assign({op:'update', option_id:oid}, ch)); load(); }
+async function delOpt(oid){ await jpost('/api/dispatch/option', {op:'delete', option_id:oid}); load(); }
+load();
+</script>{% endblock %}

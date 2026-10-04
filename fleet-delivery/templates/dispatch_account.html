@@ -1,0 +1,137 @@
+{% extends "base.html" %}{% block body %}
+<div class="head"><h1>Dispatcher accounts</h1>
+  <div><a class="btn small" href="/dispatch">Board</a>
+       <a class="btn small" href="/dispatch/manage">Restaurants and drivers</a>
+       <a class="btn small" href="/dispatch/regions">Regions</a>
+       <a class="btn small" href="/dispatch/logout">Sign out</a></div></div>
+
+<div class="cols">
+  <section>
+    <div class="panel">
+      <h2>Your account</h2>
+      <p class="muted small">Signed in as <strong>{{ me["username"] }}</strong>. Change your display name,
+      username or password here. Your name is what drivers see on every message you send them.</p>
+      <div class="row"><label>Name</label><input id="myName" value="{{ me['name'] }}"></div>
+      <div class="row"><label>Username</label><input id="myUser" value="{{ me['username'] }}"></div>
+      <div class="row"><label>New password</label>
+        <input id="myPass" type="password" placeholder="leave blank to keep the current one"></div>
+      <button class="btn primary" onclick="saveMe()">Save my account</button>
+      <span class="muted small" id="meMsg"></span>
+    </div>
+
+    <div class="panel mt">
+      <h2>Add a dispatcher</h2>
+      <p class="muted small">Every dispatcher gets their own login. They all work the same board and
+      see the same orders, and drivers see the name of whoever messages them.</p>
+      <div class="row"><label>Name</label><input id="nName" placeholder="Nicole Frazier"></div>
+      <div class="row"><label>Username</label><input id="nUser" placeholder="nicole"></div>
+      <div class="row"><label>Password</label><input id="nPass" type="password" placeholder="at least 4 characters"></div>
+      <div class="row" id="nOwnerRow" style="display:none"><label><input type="checkbox" id="nOwner"> Owner account (chats with every region, sees all regions)</label></div>
+      <button class="btn primary" onclick="addUser()">Create dispatcher</button>
+      <span class="muted small" id="newMsg"></span>
+    </div>
+  </section>
+
+  <aside>
+    <div class="panel">
+      <h2>All dispatchers</h2>
+      <div id="users"></div>
+    </div>
+    <div class="panel mt">
+      <h2>Dispatcher room</h2>
+      <p class="muted small" id="roomNote">Private thread between dispatchers. Drivers never see this.</p>
+      <div class="row"><label class="small muted">Room</label><select id="roomSel" onchange="loadStaff()"></select></div>
+      <div id="staff" class="chat"></div>
+      <div class="row"><input id="staffBox" placeholder="Message the other dispatchers"
+          onkeydown="if(event.key==='Enter')sendStaff()"><button class="btn" onclick="sendStaff()">Send</button></div>
+    </div>
+  </aside>
+</div>
+
+<script>
+async function jget(u){ const r = await fetch(u); return r.json(); }
+async function jpost(u,b){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},
+  body:JSON.stringify(b)}); return r.json(); }
+
+async function loadUsers(){
+  const res = await jget('/api/dispatch/users');
+  if(!res.ok) return;
+  document.getElementById('nOwnerRow').style.display = res.i_am_owner ? '' : 'none';
+  document.getElementById('users').innerHTML = res.users.map(u =>
+    '<div class="card pad"><div class="row between"><div><strong>'+u.name+'</strong>'+
+      (u.id===res.me ? ' <span class="pill blue">you</span>' : '')+
+      (u.owner ? ' <span class="pill green">owner</span>' : '')+
+      '<div class="muted small">'+u.username+(u.created_at?(' · added '+u.created_at):'')+'</div></div>'+
+      '<div>'+(u.owner && !res.i_am_owner ? '' : '<button class="btn tiny" onclick="editUser('+u.id+',\''+u.name.replace(/'/g,"\\'")+'\',\''+u.username+'\')">Edit</button>')+
+      (res.i_am_owner ? '<button class="btn tiny" onclick="setOwner('+u.id+','+(!u.owner)+')">'+(u.owner?'Remove owner':'Make owner')+'</button>' : '')+
+      (u.id===res.me || (u.owner && !res.i_am_owner) ? '' : '<button class="btn tiny danger" onclick="delUser('+u.id+')">Remove</button>')+
+      '</div></div></div>').join('');
+}
+async function saveMe(){
+  const res = await jpost('/api/dispatch/user', {id: {{ me['id'] }},
+    name: myName.value, username: myUser.value, password: myPass.value});
+  meMsg.textContent = res.ok ? 'Saved.' : (res.error || 'Could not save that.');
+  myPass.value = '';
+  loadUsers();
+}
+async function addUser(){
+  const res = await jpost('/api/dispatch/user', {name:nName.value, username:nUser.value, password:nPass.value,
+    owner: document.getElementById('nOwner').checked});
+  newMsg.textContent = res.ok ? ('Created ' + res.username + '.') : (res.error || 'Could not create that user.');
+  if(res.ok){ nName.value=''; nUser.value=''; nPass.value=''; document.getElementById('nOwner').checked=false; }
+  loadUsers();
+}
+async function editUser(id, name, username){
+  const n = prompt('Display name', name); if(n === null) return;
+  const u = prompt('Username', username); if(u === null) return;
+  const p = prompt('New password (blank keeps the current one)', '');
+  if(p === null) return;
+  const res = await jpost('/api/dispatch/user', {id:id, name:n, username:u, password:p});
+  if(!res.ok) alert(res.error || 'Could not save that.');
+  loadUsers();
+}
+async function delUser(id){
+  if(!confirm('Remove this dispatcher login?')) return;
+  const res = await jpost('/api/dispatch/user-delete', {id:id});
+  if(!res.ok) alert(res.error || 'Could not remove that user.');
+  loadUsers();
+}
+async function setOwner(id, on){
+  const u = (USERS||[]).find(x=>x.id===id) || {};
+  const res = await jpost('/api/dispatch/user', {id:id, name:u.name, username:u.username, password:'', owner:on});
+  if(!res.ok) alert(res.error || 'Could not change that.');
+  loadUsers();
+}
+let USERS = [];
+fetch('/api/dispatch/users').then(r=>r.json()).then(r=>{ USERS = r.users || []; });
+function sEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+async function loadStaff(){
+  const sel = document.getElementById('roomSel');
+  const room = sel.value || 'all';
+  const res = await jget('/api/dispatch/staff-chat?room=' + encodeURIComponent(sel.dataset.ready ? room : 'all'));
+  if(!res.ok) return;
+  if(!sel.dataset.ready){
+    sel.innerHTML = (res.rooms.length > 1 ? '<option value="all">Everything I can see</option>' : '') +
+      res.rooms.map(r=>'<option value="'+r.id+'">'+sEsc(r.name)+'</option>').join('');
+    sel.dataset.ready = '1';
+    document.getElementById('roomNote').textContent = res.owner
+      ? 'You are an owner: you see every region\'s room. Pick a region to message it, or All regions for everyone.'
+      : 'Dispatchers in your region see this room, plus anything an owner sends to all regions.';
+  }
+  document.getElementById('staff').innerHTML = res.messages.map(m =>
+    '<div class="msg '+(m.mine?'me':'them')+'"><span class="muted small">'+m.at+' '+sEsc(m.sender)+
+    (m.owner?' <span class="pill green">owner</span>':'')+' <span class="pill blue">'+sEsc(m.region)+'</span></span><br>'+
+    sEsc(m.body)+'</div>').join('');
+  const box = document.getElementById('staff'); box.scrollTop = box.scrollHeight;
+}
+async function sendStaff(){
+  const b = staffBox.value.trim(); if(!b) return;
+  staffBox.value='';
+  const sel = document.getElementById('roomSel');
+  const res = await jpost('/api/dispatch/staff-chat', {body:b, room: (sel.value && sel.value !== 'all') ? sel.value : 0});
+  if(res && res.ok === false && res.error){ alert(res.error); staffBox.value = b; }
+  loadStaff();
+}
+loadUsers(); loadStaff(); setInterval(loadStaff, 4000);
+</script>
+{% endblock %}

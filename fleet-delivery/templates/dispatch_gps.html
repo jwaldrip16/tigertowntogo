@@ -1,0 +1,36 @@
+{% extends "base.html" %}{% block body %}
+<div class="head"><h1>Driver GPS log</h1><a class="btn small" href="/dispatch">Back to board</a></div>
+<form class="panel row" method="get">
+  <label class="small">Driver
+    <select name="driver"><option value="">All drivers</option>
+      {% for d in drivers %}<option value="{{ d.id }}" {% if did|string == d.id|string %}selected{% endif %}>{{ d.name }}</option>{% endfor %}
+    </select></label>
+  <label class="small">From <input type="date" name="from" value="{{ f }}"></label>
+  <label class="small">To <input type="date" name="to" value="{{ t }}"></label>
+  <label class="small"><input type="checkbox" name="events" value="1" {% if events_only %}checked{% endif %}> Status changes only</label>
+  <button class="btn small primary">Show</button>
+  <a class="btn small" href="/dispatch/export/gps.xlsx?from={{ f }}&to={{ t }}&driver={{ did }}">Export to Excel</a>
+  {% if route %}<a class="btn small" target="_blank" rel="noopener" href="{{ route }}">Route in Maps</a>{% endif %}
+</form>
+<p class="muted small">Every status a driver marks (asking for online, break or offline, Received, At restaurant, On the way, Delivered) and every status dispatch sets is logged with where the driver was. While a driver is online or on break, a GPS point is saved about once a minute, or sooner after they move. History is kept {{ keep_days }} days.</p>
+<div class="panel">
+{% if rows %}
+<table class="table">
+  <thead><tr><th>Time</th><th>Driver</th><th>Status</th><th>Event</th><th>Address</th><th>Map</th></tr></thead>
+  <tbody>
+  {% for r in rows %}
+    <tr{% if r.event != 'gps' %} style="background:#fff7e6"{% endif %}>
+      <td>{{ r.created_at[5:10] }} {{ r.created_at[11:19] }}</td>
+      <td>{{ r.name }}</td>
+      <td><span class="pill {% if r.status == 'online' %}green{% elif r.status == 'break' %}amber{% else %}grey{% endif %}">{{ r.status or '' }}</span></td>
+      <td>{% if r.event == 'gps' %}<span class="muted">GPS point</span>{% else %}<strong>{{ r.event }}</strong>{% endif %}</td>
+      <td>{{ r.address or '' }}</td>
+      <td>{% if r.lat is not none %}<a target="_blank" rel="noopener" href="https://www.google.com/maps?q={{ '%.6f'|format(r.lat) }},{{ '%.6f'|format(r.lng) }}">open</a>{% endif %}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+<p class="muted small">{{ rows|length }} entries.</p>
+{% else %}<p class="muted">Nothing logged for this driver and date range.</p>{% endif %}
+</div>
+{% endblock %}

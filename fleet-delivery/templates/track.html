@@ -1,0 +1,198 @@
+{% extends "base.html" %}{% block body %}
+{% if not order %}
+<h1>Order {{ code }}</h1><p>We could not find that order code.</p>
+{% else %}
+<h1>Order {{ order.code }}</h1>
+<div class="panel" id="live"></div>
+<div class="panel mt" id="payBox" style="display:none"></div>
+{% endif %}
+{% endblock %}
+{% block scripts %}{% if order %}<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/static/maptiles.js"></script>
+<script>
+const CODE = '{{ order.code }}';
+function drawPay(p, o){
+  const box = document.getElementById('payBox');
+  if(!p.enabled || (!p.can_pay && !p.tip_editable)){ box.style.display = 'none'; return; }
+  if(document.activeElement && document.activeElement.id === 'tipBox') return;
+  let h = '';
+  if(p.can_pay){
+    h = '<h3>Pay now</h3><p>Pay with PayPal or a debit or credit card. Your order goes to the kitchen the moment it is paid.</p>'+
+        '<a class="btn primary" href="'+p.pay_url+'">Pay '+o.total+'</a>';
+  } else {
+    const tipNum = (o.tip||'$0.00').replace(/[^0-9.]/g,'');
+    if(p.state === 'authorized'){
+      h = '<h3>Tip your driver</h3><p class="small muted">'+p.held+' is held on your '+(p.source||'account')+'. '+
+          (o.dispatch_status === 'delivered'
+            ? 'You can still add or change the tip. We charge the final total '+p.tip_window_min+' minutes after delivery.'
+            : 'Add or change the tip any time, even after your food arrives. We charge the final total after delivery.')+'</p>';
+      if(p.error) h += '<p class="small" style="color:#c0392b">We could not charge your payment yet. Dispatch will reach out.</p>';
+    } else {
+      h = '<h3>Tip your driver</h3><p class="small muted">Charged '+p.charged+' on your '+(p.source||'account')+'. You can still add to the tip.</p>';
+    }
+    h += '<div class="row"><span>Tip</span><span>$<input id="tipBox" type="number" min="0" max="200" step="0.50" value="'+tipNum+
+         '" style="max-width:100px"> <button class="btn small primary" onclick="saveTip()">Save tip</button></span></div>'+
+         '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>'+
+         '<div id="tipMsg" class="small"></div>';
+    if(p.owed_cents > 0)
+      h += '<p>'+p.owed+' of your tip goes past what your hold covers. <a class="btn primary small" href="'+p.pay_url+'?kind=balance">Pay '+p.owed+'</a></p>';
+  }
+  box.innerHTML = h; box.style.display = '';
+}
+async function saveTip(){
+  const v = document.getElementById('tipBox').value;
+  const r = await jpost('/api/track/'+CODE+'/tip', {tip: v});
+  if(!r || !r.ok){ alert((r && r.error) || 'Could not save the tip.'); return; }
+  let msg = 'Tip saved: '+r.tip+'. New total '+r.total+'.';
+  if(r.charge && r.charge.ok) msg += ' Charged '+r.charge.charged+'.';
+  document.activeElement && document.activeElement.blur();
+  alert(msg);
+  tick();
+}
+async function tick(){
+  const res = await jget('/api/track/'+CODE);
+  if(!res.ok) return;
+  const o = res.order;
+  try { drawPay(res.pay || {}, o); } catch(e) { console.log('pay box skipped', e); }
+  if(o.dispatch_status === 'scheduled'){
+    document.getElementById('live').innerHTML =
+      '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+
+      '<p class="big">Scheduled for '+o.scheduled_label+'</p>'+
+      '<p>Your order goes to the restaurant shortly before then. This page updates on its own.</p>'+
+      '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
+    return;
+  }
+  if(o.scheduled_label && o.dispatch_status !== 'delivered' && o.dispatch_status !== 'cancelled'){
+    document.getElementById('live').setAttribute('data-when', o.scheduled_label);
+  }
+  if(o.dispatch_status === 'awaiting_payment'){
+    document.getElementById('live').innerHTML =
+      '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+
+      '<p class="big">Waiting on payment</p>'+
+      '<p>'+(o.uses_app===false?'Your order has not been placed with the restaurant yet.':'Your order has not gone to the kitchen yet.')+' It goes as soon as your payment is marked paid. '+
+      (o.needs_address_approval ? 'Dispatch is also confirming your address, so your delivery fee may change with the distance. ' : '')+
+      'Dispatch may call you to take your card. This page updates on its own.</p>'+
+      '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
+    return;
+  }
+  if(o.needs_address_approval){
+    document.getElementById('live').innerHTML =
+      '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+
+      '<p class="big">Pending dispatch approval</p>'+
+      '<p>We could not verify your address automatically, so dispatch is checking it now. '+
+      'Your order has not gone to the kitchen yet. It goes once dispatch confirms your address, and your delivery fee may change with the distance. '+
+      'This page updates on its own.</p>'+
+      '<div class="row"><span>Subtotal</span><span>'+o.subtotal+'</span></div>'+
+      '<div class="row"><span>Delivery (estimate)</span><span>'+o.fee+'</span></div>'+
+      '<div class="row total"><span>Total so far</span><span>'+o.total+'</span></div>';
+    return;
+  }
+  const withDriver = ['assigned','received','at_restaurant','enroute','delivered'].includes(o.dispatch_status);
+  if (o.dispatch_status==='awaiting_payment' || o.kitchen_status==='waiting'){
+    document.getElementById('box').innerHTML = '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+
+      '<p><b>Waiting on payment.</b> Your order has not gone to the kitchen yet. It goes as soon as your payment is marked paid. '+
+      'This page updates on its own.</p>'+
+      '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
+    return;
+  }
+  const calledIn = o.uses_app===false;
+  const sentK = calledIn ? (o.manual_state==='placed' || ['preparing','ready'].includes(o.kitchen_status) || o.dispatch_status==='delivered')
+                         : (['pending','preparing','ready'].includes(o.kitchen_status) || o.dispatch_status==='delivered');
+  const steps = [[calledIn ? 'Order placed with the restaurant' : 'Sent to kitchen', sentK],
+                 ['Being prepared', o.kitchen_status==='preparing'||o.kitchen_status==='ready'||o.dispatch_status==='delivered'],
+                 ['Ready for pickup', o.kitchen_status==='ready'||o.dispatch_status==='delivered'],
+                 ['With a driver', withDriver],
+                 ['On the way', ['enroute','delivered'].includes(o.dispatch_status)],
+                 ['Delivered', o.dispatch_status==='delivered']];
+  let html = '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>';
+  // each step carries the time it actually happened, so the customer can quote it back
+  const at = {};
+  (o.timeline||[]).forEach(t=>{ at[t.kind+':'+t.status] = t.time; });
+  const stamps = [calledIn ? 'manual:placed' : 'kitchen:pending','kitchen:preparing','kitchen:ready',
+                  'dispatch:assigned','dispatch:enroute','dispatch:delivered'];
+  html += '<ul class="steps">'+steps.map((s,ix)=>{
+    const ts = at[stamps[ix]];
+    return '<li class="'+(s[1]?'done':'')+'">'+s[0]+
+      (s[1] && ts ? ' <span class="muted small">'+ts+'</span>' : '')+'</li>';
+  }).join('')+'</ul>';
+  if ((o.timeline||[]).length)
+    html += '<details class="trail"><summary>Order history</summary><ul class="trail">'+
+      o.timeline.map(t=>'<li><span class="ts">'+t.time+'</span> '+t.label+'</li>').join('')+
+      '</ul><p class="muted small">Quote order '+o.code+' and any time above when you call dispatch.</p></details>';
+  if (o.timer_seconds !== null && o.kitchen_status==='preparing')
+    html += '<p class="big">Kitchen timer: '+Math.max(0,Math.ceil(o.timer_seconds/60))+' min left</p>';
+  if (o.queue_position)
+    html += '<p class="big">Position in the delivery queue: #'+o.queue_position+
+            (o.hold_reason ? ' <span class="muted">('+o.hold_reason+')</span>' : '')+'</p>';
+  const tr = o.track || {};
+  if (tr.eta_clock && o.dispatch_status!=='delivered' && o.dispatch_status!=='cancelled')
+    html += '<div class="etabox"><div class="muted small">'+(tr.eta_note==='scheduled'?'Scheduled for':'Estimated arrival')+'</div>'+
+      '<div class="etatime">'+tr.eta_clock+'</div>'+
+      (tr.eta_note==='scheduled'?'':'<div class="small">about '+tr.eta_min+' min'+
+        (tr.eta_note==='no driver yet'?' &middot; a driver will be assigned soon':'')+'</div>')+'</div>';
+  if (tr.driver_name){
+    let sub = tr.phase;
+    if (o.dispatch_status==='enroute'){
+      if (tr.stops_before) sub += ' &middot; '+tr.stops_before+' stop'+(tr.stops_before===1?'':'s')+' before yours';
+      if (tr.eta_min) sub += ' &middot; about '+tr.eta_min+' min away';
+    }
+    html += '<div class="drivercard"><div class="dav">'+tr.driver_name.charAt(0).toUpperCase()+'</div>'+
+      '<div><div class="muted small">Your driver</div><div class="big">'+tr.driver_name+'</div>'+
+      '<div class="small">'+sub+'</div></div></div>';
+  }
+  if (o.dispatch_status!=='delivered' && o.dispatch_status!=='cancelled' && (tr.home_lat!==null || tr.pickup_lat!==null))
+    html += '<div id="tmap" class="tmap"></div>'+
+      (o.dispatch_status==='enroute' && tr.driver_lat===null
+        ? '<p class="muted small">Your driver\'s location shows here when their phone sends it.</p>'
+        : (o.dispatch_status!=='enroute' ? '<p class="muted small">Your driver shows on the map once your food is picked up.</p>'
+           : '<p class="muted small">Driver location as of '+tr.driver_fix+'. Arrival time is an estimate.</p>'));
+  if (tr.dispatch_tel && o.dispatch_status!=='delivered')
+    html += '<p><a class="btn" href="tel:'+tr.dispatch_tel+'">Call dispatch about this order</a></p>';
+  html += '<div class="row"><span>Subtotal</span><span>'+o.subtotal+'</span></div>'+
+          '<div class="row"><span>Delivery ('+(o.miles===null?'distance confirmed by dispatch':o.miles+' mi')+')</span><span>'+o.fee+'</span></div>'+
+          (o.service_cents ? '<div class="row"><span>Service fee</span><span>'+o.service+'</span></div>' : '')+
+          '<div class="row"><span>Tax</span><span>'+o.tax+'</span></div>'+
+          '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>'+
+          '<p><a class="btn" target="_blank" href="'+o.restaurant_nav+'">Navigate to the restaurant</a></p>';
+  const keepMap = document.getElementById('tmap');
+  if (keepMap && document.getElementById('tmap') && MAP) MAP_EL = keepMap;
+  document.getElementById('live').innerHTML = html;
+  drawMap(o);
+}
+// ---- live map: restaurant, your door, and the driver once they have your food
+let MAP = null, MAP_EL = null, DRV = null, FIT = false;
+function drawMap(o){
+  const box = document.getElementById('tmap');
+  const tr = o.track || {};
+  if (!box || typeof L === 'undefined'){ MAP = null; return; }
+  if (MAP_EL && MAP){ box.replaceWith(MAP_EL); }
+  else {
+    MAP = L.map(box, {scrollWheelZoom:false});
+    ffBaseMap(MAP);
+    MAP_EL = box; DRV = null; FIT = false;
+    const pts = [];
+    if (tr.pickup_lat!==null){ L.marker([tr.pickup_lat,tr.pickup_lng],{title:o.restaurant}).addTo(MAP).bindTooltip(o.restaurant); pts.push([tr.pickup_lat,tr.pickup_lng]); }
+    if (tr.home_lat!==null){ L.circleMarker([tr.home_lat,tr.home_lng],{radius:9,color:'#14532d',fillColor:'#22c55e',fillOpacity:.9}).addTo(MAP).bindTooltip('You'); pts.push([tr.home_lat,tr.home_lng]); }
+    if (pts.length > 1) MAP.fitBounds(pts, {padding:[30,30]}); else if (pts.length) MAP.setView(pts[0], 14);
+  }
+  if (tr.driver_lat!==null){
+    const ll = [tr.driver_lat, tr.driver_lng];
+    if (!DRV) DRV = L.circleMarker(ll,{radius:10,color:'#1e3a8a',fillColor:'#3b82f6',fillOpacity:.95}).addTo(MAP).bindTooltip(tr.driver_name||'Driver');
+    else glideTo(DRV, ll, 2500);
+    if (!FIT && tr.home_lat!==null){ MAP.fitBounds([ll,[tr.home_lat,tr.home_lng]], {padding:[40,40]}); FIT = true; }
+  } else if (DRV){ MAP.removeLayer(DRV); DRV = null; }
+  setTimeout(()=>MAP && MAP.invalidateSize(), 50);
+}
+function glideTo(mk, to, ms){
+  const from = mk.getLatLng(), t0 = performance.now();
+  if (mk._ffa) cancelAnimationFrame(mk._ffa);
+  function step(tm){
+    const k = Math.min(1, (tm - t0) / ms);
+    mk.setLatLng([from.lat + (to[0]-from.lat)*k, from.lng + (to[1]-from.lng)*k]);
+    if (k < 1) mk._ffa = requestAnimationFrame(step);
+  }
+  mk._ffa = requestAnimationFrame(step);
+}
+tick(); setInterval(tick, 3000);
+</script>{% endif %}{% endblock %}

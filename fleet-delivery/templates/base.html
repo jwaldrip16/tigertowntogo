@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}{{ biz_name }}{% endblock %}</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+<link rel="icon" type="image/png" href="/brand/icon-32.png">
+<link rel="apple-touch-icon" href="/brand/icon-180.png">
+<script>
+async function jpost(url, data){
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+                             body: JSON.stringify(data||{})});
+  return r.json();
+}
+async function jget(url){ const r = await fetch(url); return r.json(); }
+function money(c){ return '$' + (c/100).toFixed(2); }
+</script>
+{% block head %}{% endblock %}
+</head><body class="{% block bodyclass %}{% endblock %}">
+{% set staff_area = request.path.startswith('/dispatch') or request.path.startswith('/driver') or request.path.startswith('/restaurant') %}
+<header class="topbar">
+  <a class="brand" href="{% if portal == 'dispatch' %}/dispatch{% elif portal == 'driver' %}/driver{% elif portal == 'kitchen' %}/restaurant{% elif staff_area %}{{ request.path }}{% else %}/{% endif %}"><img class="brandlogo" src="{{ logo_url }}" alt="">{{ biz_name }}{% if portal %} {{ portal|capitalize if portal != "kitchen" else "Kitchen" }}{% endif %}</a>
+  <nav>
+    {% if portal == 'dispatch' %}
+      <a href="/dispatch">Board</a>
+      <a href="/dispatch/manage">Manage</a>
+      <a href="/dispatch/schedule">Schedule</a>
+      <a href="/dispatch/map">Map</a>
+      <a href="/dispatch/gps-log">GPS log</a>
+      <a href="/dispatch/settings">Settings</a>
+      <a href="/dispatch/account">Account</a>
+      <a href="/dispatch/logout">Sign out</a>
+    {% elif portal == 'driver' %}
+      <a href="/driver">My run</a>
+      <a href="/driver/logout">Sign out</a>
+    {% elif portal == 'kitchen' %}
+      <a href="/restaurant">Orders</a>
+      <a href="/restaurant/logout">Sign out</a>
+    {% elif not portal and not staff_area %}
+      <a href="/">Order food</a>
+    {% endif %}
+  </nav>
+</header>
+<main>{% block body %}{% endblock %}</main>
+{% if not portal and not staff_area %}<footer class="muted small" style="text-align:center;padding:18px 12px">
+  {{ biz_name }}{% if biz_address %} &middot; {{ biz_address }}{% endif %}{% if biz_phone %} &middot; <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>{% endif %}
+</footer>{% endif %}
+<div class="poweredby">Powered by FleetFoot Delivery</div>
+<script src="{{ url_for('static', filename='alert.js') }}"></script>
+<script src="{{ url_for('static', filename='notify.js') }}"></script>
+<script>
+
+// ---- address type-ahead, shared by the customer site and dispatch ----
+function attachAddressPicker(inputId, onPick){
+  const input = document.getElementById(inputId);
+  if(!input) return;
+  const box = document.createElement('div');
+  box.className = 'acbox'; box.style.display = 'none';
+  input.parentNode.insertBefore(box, input.nextSibling);
+  let timer = null, last = '';
+  function hide(){ box.style.display = 'none'; }
+  function show(list){
+    if(!list.length){ hide(); return; }
+    box.innerHTML = list.map((s,i)=>'<div class="acitem" data-i="'+i+'">'+s.formatted+'</div>').join('');
+    box.style.display = 'block';
+    box.querySelectorAll('.acitem').forEach(el=>{
+      el.onclick = ()=>{
+        input.value = list[parseInt(el.dataset.i,10)].formatted;
+        hide();
+        if(typeof onPick === 'function') onPick(input.value);
+      };
+    });
+  }
+  input.setAttribute('autocomplete','off');
+  input.addEventListener('input', ()=>{
+    const q = input.value.trim();
+    if(timer) clearTimeout(timer);
+    if(q.length < 4){ hide(); return; }
+    timer = setTimeout(async ()=>{
+      if(q === last) return;
+      last = q;
+      const res = await jget('/api/address-suggest?q='+encodeURIComponent(q));
+      show((res && res.suggestions) || []);
+    }, 350);
+  });
+  input.addEventListener('blur', ()=> setTimeout(hide, 200));
+}
+
+</script>
+{% block scripts %}{% endblock %}
+<script>
+// if the alert file is unavailable for any reason, everything else still works
+if (!window.ffNotify){
+  window.ffNotify = {ask:function(){return Promise.resolve('unsupported');}, show:function(){return null;},
+                     state:function(){return 'unsupported';}, button:function(){}, supported:false};
+}
+if (!window.ffSound){
+  window.ffSound = {play:function(){}, startLoop:function(){}, stopLoop:function(){},
+                    looping:function(){return false;}, toggle:function(){return false;},
+                    enabled:function(){return false;}, armed:function(){return true;},
+                    ffSoundFallback:true};
+}
+</script>
+</body></html>

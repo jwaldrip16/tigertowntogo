@@ -1,0 +1,66 @@
+{% extends "base.html" %}{% block body %}
+{% if not order %}
+<h1>Order {{ code }}</h1><p>We could not find that order code.</p>
+{% elif not pp_ready %}
+<h1>Pay for order {{ code }}</h1>
+<p>Online payment is not turned on yet. Call dispatch to pay.</p>
+{% else %}
+<h1>{{ 'Pay the rest' if kind == 'balance' else 'Pay for your order' }}</h1>
+<div class="panel paybox">
+  <p class="muted">Order {{ order.code }}{% if rname %} from {{ rname }}{% endif %}</p>
+  <div class="row total"><span>{{ 'Still owed' if kind == 'balance' else 'Total' }}</span><span>{{ amount }}</span></div>
+  {% if kind == 'order' and not info.can_pay %}
+    <p>This order is already paid. <a href="/track/{{ order.code }}">Track your order</a>.</p>
+  {% elif kind == 'balance' and info.owed_cents <= 0 %}
+    <p>Nothing is owed on this order. <a href="/track/{{ order.code }}">Track your order</a>.</p>
+  {% else %}
+    {% if kind == 'order' %}
+    <p class="small muted">Your payment is held now and charged after delivery, so you can add or change the tip
+      up to {{ info.tip_window_min }} minutes after your food arrives.</p>
+    {% endif %}
+    {% if kind == 'order' %}
+    <button class="btn primary" id="cardBtn" style="width:100%;margin:8px 0">Pay with debit or credit card</button>
+    <p class="small muted" style="text-align:center;margin:4px 0">or</p>
+    {% endif %}
+    <div id="ppButtons"></div>
+    <p class="small muted">The card form is run by PayPal, so your card number never touches our site.</p>
+    <div id="payMsg" class="small"></div>
+  {% endif %}
+</div>
+{% endif %}
+{% endblock %}
+{% block scripts %}{% if order and pp_ready and ((kind == 'order' and info.can_pay) or (kind == 'balance' and info.owed_cents > 0)) %}
+<script src="https://www.paypal.com/sdk/js?client-id={{ client_id }}&currency=USD&intent={{ 'authorize' if kind == 'order' else 'capture' }}&enable-funding=card&disable-funding=venmo&components=buttons"></script>
+<script src="/static/ppcard.js"></script>
+<script>
+const CODE = '{{ order.code }}', KIND = '{{ kind }}', DISPATCH = {{ 'true' if is_dispatch else 'false' }};
+function say(t, bad){ const m = document.getElementById('payMsg'); m.textContent = t; m.style.color = bad ? '#c0392b' : ''; }
+// Orders take cards in PayPal's card boxes (no PayPal sign-up step). The PayPal button stays for PayPal accounts.
+const sources = KIND === 'order' ? [paypal.FUNDING.PAYPAL] : [paypal.FUNDING.PAYPAL, paypal.FUNDING.CARD];
+const cb = document.getElementById('cardBtn');
+if (cb) cb.onclick = function(){
+  ppCard.open({code: CODE, amount: '{{ amount }}', onPage: true,
+    onDone: function(){ say('Card accepted. Your order is on its way to the kitchen.');
+      setTimeout(function(){ window.location = DISPATCH ? '/dispatch' : '/track/'+CODE; }, 1500); }});
+};
+sources.forEach(src=>{
+  const b = paypal.Buttons({
+    fundingSource: src,
+    createOrder: async ()=>{
+      const r = await jpost('/api/paypal/create', {code: CODE, kind: KIND});
+      if(!r || !r.ok){ say((r && r.error) || 'Could not start the payment.', true); throw new Error('create'); }
+      return r.id;
+    },
+    onApprove: async (data)=>{
+      say('Finishing your payment...');
+      const r = await jpost('/api/paypal/approve', {code: CODE, kind: KIND, id: data.orderID});
+      if(!r || !r.ok){ say((r && r.error) || 'The payment did not go through.', true); return; }
+      say(KIND === 'balance' ? 'Paid '+r.paid+'. Thank you!' : 'Payment held: '+r.held+' on '+r.source+'. Your order is on its way to the kitchen.');
+      setTimeout(()=>{ window.location = DISPATCH ? '/dispatch' : '/track/'+CODE; }, 1500);
+    },
+    onError: ()=> say('Something went wrong with the payment. Try again or call dispatch.', true)
+  });
+  if(b.isEligible()){ const d = document.createElement('div'); d.style.margin = '8px 0';
+    document.getElementById('ppButtons').appendChild(d); b.render(d); }
+});
+</script>{% endif %}{% endblock %}

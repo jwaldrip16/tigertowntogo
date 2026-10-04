@@ -1,0 +1,91 @@
+{% extends "base.html" %}{% block body %}
+<div class="head"><h1>Driver map</h1>
+  <div><a class="btn small" href="/dispatch">Board</a>
+       <a class="btn small" href="/dispatch/account">Dispatchers</a>
+       <a class="btn small" href="/dispatch/logout">Sign out</a></div></div>
+<p class="muted small">Live positions from each driver's phone. Pins move every 2 seconds, with the closest street address. A pin goes
+grey once a fix is more than 10 minutes old, which usually means the driver closed the app.</p>
+<div class="maprow">
+  <div id="map" class="map"></div>
+  <aside class="panel" id="side"></aside>
+</div>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/static/maptiles.js"></script>
+<script>
+let MAP = null, LAYER = null, FITTED = false;
+const MARKS = {};
+function glide(mk, to, ms){
+  const from = mk.getLatLng(), t0 = performance.now();
+  if (Math.abs(from.lat-to[0]) < 1e-7 && Math.abs(from.lng-to[1]) < 1e-7) return;
+  if (mk._ffa) cancelAnimationFrame(mk._ffa);
+  function step(t){
+    const k = Math.min(1, (t - t0) / ms);
+    mk.setLatLng([from.lat + (to[0]-from.lat)*k, from.lng + (to[1]-from.lng)*k]);
+    if (k < 1) mk._ffa = requestAnimationFrame(step);
+  }
+  mk._ffa = requestAnimationFrame(step);
+}
+function initMap(){
+  MAP = L.map('map').setView([32.6454, -85.3783], 12);
+  ffBaseMap(MAP);
+  LAYER = L.layerGroup().addTo(MAP);
+}
+function dot(color, letter){
+  return L.divIcon({className:'', iconSize:[26,26], html:
+    '<div style="width:26px;height:26px;border-radius:13px;background:'+color+
+    ';color:#fff;font:700 12px sans-serif;display:flex;align-items:center;justify-content:center;'+
+    'border:2px solid #fff;box-shadow:0 1px 4px rgba(0,0,0,.4)">'+letter+'</div>'});
+}
+async function refresh(){
+  const res = await (await fetch('/api/dispatch/locations')).json();
+  if(!res.ok){ window.location = '/dispatch/login'; return; }
+  const pts = [], seen = {};
+  const SIDE = document.createElement('div');
+  SIDE.innerHTML = '<h2>Drivers</h2>';
+  res.drivers.forEach(d => {
+    const rows = [];
+    rows.push('<div class="row between"><div><strong>'+d.name+'</strong> '+
+      '<span class="pill '+(d.status==='online'?'green':d.status==='break'?'amber':'grey')+'">'+d.status+'</span></div>'+
+      '<a class="btn tiny" href="tel:'+d.phone+'">Call</a></div>');
+    if(d.location){
+      const age = d.location.minutes_ago===null ? 'just now'
+        : (d.location.minutes_ago<1 ? 'seconds ago' : d.location.minutes_ago+' min ago');
+      rows.push('<div class="small"><strong>'+(d.location.address||'Looking up address...')+'</strong></div>');
+      rows.push('<div class="muted small">Last fix '+age+
+        ' · <a href="'+d.location.map_url+'" target="_blank">open in Maps</a></div>');
+      if(d.next_stop) rows.push('<div class="muted small">Next: '+d.next_stop.code+' to '+
+        d.next_stop.target+(d.next_stop.miles_away!==null?(' · '+d.next_stop.miles_away+' mi out'):'')+'</div>');
+      const color = d.location.stale ? '#8b93a1' : (d.status==='online' ? '#168c50'
+        : d.status==='break' ? '#bf7e0a' : '#1e58c8');
+      const pop = '<strong>'+d.name+'</strong><br>'+d.status+
+        (d.location.address ? ('<br>'+d.location.address) : '')+
+        (d.next_stop ? ('<br>next: '+d.next_stop.code) : '')+'<br>'+age;
+      const ll = [d.location.lat, d.location.lng];
+      let mk = MARKS[d.id];
+      if (!mk){ mk = L.marker(ll, {icon: dot(color, d.name[0])}).addTo(LAYER); mk.bindPopup(pop); mk._ffc = color; MARKS[d.id] = mk; }
+      else {
+        glide(mk, ll, 1800);
+        if (mk._ffc !== color){ mk.setIcon(dot(color, d.name[0])); mk._ffc = color; }
+        mk.setPopupContent(pop);
+      }
+      seen[d.id] = true;
+      pts.push([d.location.lat, d.location.lng]);
+    } else {
+      rows.push('<div class="muted small">No location yet. The driver needs to open their app and allow '+
+        'location once.</div>');
+    }
+    rows.push('<div class="muted small">'+(d.roster||'scheduled').replace('_',' ')+'</div>');
+    const div = document.createElement('div');
+    div.className = 'card pad';
+    div.innerHTML = rows.join('');
+    SIDE.appendChild(div);
+  });
+  Object.keys(MARKS).forEach(id=>{ if (!seen[id]){ LAYER.removeLayer(MARKS[id]); delete MARKS[id]; } });
+  document.getElementById('side').replaceChildren(...SIDE.childNodes);
+  if(pts.length && !FITTED){ MAP.fitBounds(pts, {padding:[40,40], maxZoom:14}); FITTED = true; }
+}
+async function tick(){ try { await refresh(); } catch(e){} }
+initMap(); tick(); setInterval(tick, 2000);
+</script>
+{% endblock %}
