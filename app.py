@@ -371,6 +371,8 @@ def init_db():
     ensure_column(con, "regions", "paused", "INTEGER DEFAULT 0")
     ensure_column(con, "regions", "paused_by", "TEXT")
     ensure_column(con, "regions", "paused_at", "TEXT")
+    ensure_column(con, "regions", "hours", "TEXT")          # blank = use the business hours
+    ensure_column(con, "regions", "closed_dates", "TEXT")   # "2026-11-26,2026-12-25"
     ensure_column(con, "orders", "region_id", "INTEGER")
     ensure_column(con, "availability", "region_ids", "TEXT")
     ensure_column(con, "dispatchers", "is_owner", "INTEGER DEFAULT 0")
@@ -995,9 +997,57 @@ def save_day_pick(kind, pid, regions):
     return None
 
 
+def dispatch_driver_pick(did):
+    """Regions dispatch put this driver in today (set from the Online / Off buttons).
+    Empty = dispatch made no choice. A choice made last night still holds before 6 am."""
+    if not did:
+        return set()
+    nowdt = dt.datetime.now()
+    days = [nowdt.date().isoformat()]
+    if nowdt.hour < 6:
+        days.append((nowdt.date() - dt.timedelta(days=1)).isoformat())
+    valid = {r["id"] for r in all_regions()}
+    for d in days:
+        r = db().execute("SELECT region_ids FROM day_picks WHERE kind='driver_set' AND person_id=? AND day=?",
+                         (did, d)).fetchone()
+        if r and (r["region_ids"] or ""):
+            return parse_rids(r["region_ids"]) & valid
+    return set()
+
+
+def clear_dispatch_driver_pick(did):
+    db().execute("DELETE FROM day_picks WHERE kind='driver_set' AND person_id=?", (did,))
+
+
+def driver_region_choices(did, dispatcher_id=None):
+    """Regions dispatch may put this driver in: the regions the driver is eligible for
+    (assigned to them; none assigned = every region). A non-owner dispatcher only gets the
+    regions they work."""
+    regs = all_regions()
+    mine = driver_region_ids(did)
+    ids = [r["id"] for r in regs if not mine or r["id"] in mine]
+    if dispatcher_id and not is_owner(dispatcher_id):
+        view = dispatcher_view_regions(dispatcher_id)
+        if view:
+            ids = [i for i in ids if i in view]
+    names = {r["id"]: r["name"] for r in regs}
+    return [{"id": i, "name": names[i]} for i in ids]
+
+
+def driver_locked_regions(did):
+    """Regions a driver has live orders in. They stay in that region until it is delivered."""
+    return {o["region_id"] for o in db().execute(
+        """SELECT region_id FROM orders WHERE driver_id=? AND region_id IS NOT NULL AND region_id != 0
+           AND dispatch_status NOT IN ('delivered','cancelled')""", (did,)).fetchall()}
+
+
 def driver_work_regions(did):
-    """Regions a driver works right now: the regions picked on the availability they are
-    working at this moment, otherwise their usual regions."""
+    """Regions a driver works right now: the regions dispatch put them in today, else the
+    regions picked on the availability they are working at this moment, otherwise their
+    usual regions."""
+    set_by_dispatch = dispatch_driver_pick(did)
+    if set_by_dispatch:
+        return set_by_dispatch
     chosen = day_pick("driver", did)
     if chosen:
         return chosen
@@ -1148,12 +1198,19 @@ def region_queues(region_ids=None, detail=True):
         except ValueError:
             return 0
     out = []
+    lineups = region_lineups()
     buckets = [(r["id"], r["name"]) for r in regs]
     if any(not (o["region_id"] or 0) for o in rows):
         buckets.append((0, "No region"))
     for rid, name in buckets:
         mine = [o for o in rows if (o["region_id"] or 0) == rid]
-        on = [d["name"] for d in shift if rid and covers(driver_work_regions(d["id"]), rid)] if rid else [d["name"] for d in shift]
+        if rid and rid in lineups:
+            on = [(_line_ord(x["pos"]) + " up: " + x["name"]) if x["pos"] else (x["name"] + " (at stack limit)")
+                  for x in lineups[rid]["line"]]
+        elif rid:
+            on = [d["name"] for d in shift if covers(driver_work_regions(d["id"]), rid)]
+        else:
+            on = [d["name"] for d in shift]
         pi = pinfo.get(rid)
         q = {"id": rid, "name": name, "waiting": len(mine),
              "paused": bool(pi and pi["paused"]), "paused_by": (pi["paused_by"] if pi and pi["paused"] else "") or "",
@@ -1188,6 +1245,36 @@ def line_positions():
             n += 1
             out[r["id"]] = {"pos": n, "at_limit": False}
     return out
+
+
+def _line_ord(n):
+    return "%d%s" % (n, "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
+
+
+def region_lineups():
+    """Per region: the on-shift drivers working it, in rotation order, with each one's place in
+    that region's line. A driver holding their stack limit drops out of a region's line unless
+    they are the only driver working that region."""
+    rows = on_shift_drivers()
+    out = {}
+    for rg in all_regions():
+        members = [r for r in rows if covers(driver_work_regions(r["id"]), rg["id"])]
+        n, line = 0, []
+        for r in members:
+            full = r["load"] >= (r["max_stack"] or 1)
+            if full and len(members) > 1:
+                line.append({"id": r["id"], "name": r["name"], "pos": None})
+            else:
+                n += 1
+                line.append({"id": r["id"], "name": r["name"], "pos": n})
+        out[rg["id"]] = {"name": rg["name"], "line": line}
+    return out
+
+
+def driver_region_lines(lineups, did):
+    """[{region_id, region, pos}] for one driver; pos None = holding their stack limit there."""
+    return [{"region_id": rid, "region": v["name"], "pos": x["pos"]}
+            for rid, v in lineups.items() for x in v["line"] if x["id"] == did]
 
 
 def recompute_queue():
@@ -1848,7 +1935,7 @@ def order_dict(o):
 @app.route("/")
 def home():
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
-    biz = business_is_open() and business_in_hours()
+    biz_on = business_is_open()
     # region picker: only regions that actually have restaurants
     used = {r["region_id"] for r in rs if r["region_id"]}
     paused = paused_region_ids()
@@ -1862,10 +1949,17 @@ def home():
     if sel_id:
         # restaurants with no region show in every area
         rs = [r for r in rs if not r["region_id"] or r["region_id"] == sel_id]
-    cards = [{"r": r, "open": biz and is_open(r), "hours": hours_label(r)} for r in rs]
+    cards = [{"r": r, "open": biz_on and business_in_hours(rid=r["region_id"]) and is_open(r),
+              "hours": hours_label(r)} for r in rs]
     sel_name = next((g["name"] for g in regions if g["id"] == sel_id), "")
+    if sel_id:
+        biz = biz_on and business_in_hours(rid=sel_id)
+    else:
+        biz = biz_on and (business_in_hours() or any(business_in_hours(rid=g["id"]) for g in regions))
     return render_template("index.html", cards=cards, biz_open=biz, regions=regions,
                            sel_region=sel_id, sel_region_name=sel_name,
+                           hours_text=business_hours_label(sel_id or None),
+                           closed_text=closed_dates_label(sel_id) if sel_id else "",
                            any_on=any_rest_on(), any_open=biz and any_rest_open())
 
 @app.route("/r/<slug>")
@@ -1876,7 +1970,7 @@ def menu(slug):
     if r["slug"] == "oneoff" and not any_rest_on():
         return redirect(url_for("home"))
     items = db().execute("SELECT * FROM menu_items WHERE restaurant_id=? AND active=1", (r["id"],)).fetchall()
-    biz = business_is_open() and business_in_hours()
+    biz = business_is_open() and business_in_hours(rid=r["region_id"])
     open_now = biz and (any_rest_open() if r["slug"] == "oneoff" else is_open(r))
     return render_template("menu.html", r=r, items=items, open=open_now, biz_open=biz,
                            hours=hours_label(r), custom=(r["slug"] == "oneoff"),
@@ -2377,6 +2471,15 @@ def pp_void(o, why="cancelled"):
     st, j = pp_api("POST", "/v2/payments/authorizations/" + o["pp_auth_id"] + "/void")
     if st in (200, 204):
         db().execute("UPDATE orders SET pp_state='voided', paid_cents=0, pp_error=NULL WHERE id=?", (o["id"],))
+        if o["dispatch_status"] not in ("delivered", "cancelled"):
+            # Order is still open: it is unpaid again, so a new card can go on.
+            db().execute("""UPDATE orders SET pp_state=NULL, pp_auth_id=NULL, pp_auth_cents=NULL, pp_order_id=NULL,
+                            pp_source=NULL, payment_status='unpaid', paid_at=NULL, pay_method=NULL, pay_ref=NULL
+                            WHERE id=?""", (o["id"],))
+            if o["dispatch_status"] == "scheduled":
+                # a future order must not go to the kitchen without a card on it
+                db().execute("""UPDATE orders SET sched_dispatch='awaiting_payment', sched_kitchen='waiting',
+                                sched_hold='waiting on card' WHERE id=?""", (o["id"],))
         db().commit()
         log("payment", o["code"] + " PayPal hold released (" + why + ")")
         return {"ok": True, "voided": True}
@@ -2683,7 +2786,7 @@ def future_slots(r, day):
     t = dt.datetime.combine(day, dt.time(0, 0))
     end = t + dt.timedelta(days=1)
     while t < end:
-        if (t >= earliest and is_open(r, t) and business_in_hours(t) and
+        if (t >= earliest and is_open(r, t) and business_in_hours(t, r["region_id"]) and
                 (r["slug"] != "oneoff" or dispatcher_required() or item_available(any_rest_row(), t))):
             out.append(t.strftime("%Y-%m-%dT%H:%M"))
         t += dt.timedelta(minutes=15)
@@ -2876,9 +2979,11 @@ def checkout():
         if sched > dt.datetime.now() + dt.timedelta(days=FUTURE_MAX_DAYS):
             return jsonify({"ok": False, "error": "Future orders can be up to " +
                             str(FUTURE_MAX_DAYS) + " days out."}), 400
-        if not is_disp and not business_in_hours(sched):
-            return jsonify({"ok": False, "error": "We are not open at " + when_label(sched.isoformat()) +
-                            ". Our hours are " + business_hours_label() + "."}), 400
+        if not is_disp and not business_in_hours(sched, r["region_id"]):
+            cl = closed_dates_label(r["region_id"])
+            return jsonify({"ok": False, "error": "We are not open at " + when_label(sched.isoformat()) + "." +
+                            ((" Our hours are " + business_hours_label(r["region_id"]) + ".") if business_hours_label(r["region_id"]) else "") +
+                            ((" " + cl + ".") if cl else "")}), 400
         if not is_disp and not is_open(r, sched):
             return jsonify({"ok": False, "error": r["name"] + " is not open at " +
                             when_label(sched.isoformat()) + ". Pick another time."}), 400
@@ -2988,7 +3093,7 @@ def checkout():
                 db().execute("UPDATE orders SET issue=?, issue_note=? WHERE id=?",
                              (issue_label, issue_note, src["id"]))
 
-    if not sched and (not business_is_open() or (not dispatcher_required() and not business_in_hours())):
+    if not sched and (not business_is_open() or (not dispatcher_required() and not business_in_hours(rid=r["region_id"]))):
         # closed business: nothing goes out now, but future orders are still welcome
         msg = ("The business is closed. Open the business first, or schedule this order for later."
                if dispatcher_required() else
@@ -3810,6 +3915,7 @@ def api_board():
                               FROM drivers d ORDER BY d.name""").fetchall()
     lines = line_positions()
     rotation = {k: v["pos"] for k, v in lines.items()}
+    lineups = region_lineups()
     unread = {r["driver_id"]: r["c"] for r in db().execute(
         """SELECT driver_id, COUNT(*) c FROM messages
            WHERE sender='driver' AND seen_by_dispatch=0 GROUP BY driver_id""").fetchall()}
@@ -3860,6 +3966,11 @@ def api_board():
                      "pending_request": d["pending_request"], "load": d["load"],
                      "unread": unread.get(d["id"], 0),
                      "max_stack": d["max_stack"], "up_next": rotation.get(d["id"]),
+                     "region_lines": driver_region_lines(lineups, d["id"]),
+                     "work_regions": sorted(driver_work_regions(d["id"])),
+                     "work_region_names": region_names(driver_work_regions(d["id"])) if all_regions() else "",
+                     "region_choices": driver_region_choices(d["id"], session.get("dispatcher_id")),
+                     "region_locked": sorted(driver_locked_regions(d["id"])),
                      "at_limit": (lines.get(d["id"]) or {}).get("at_limit", False),
                      "roster": d["roster"], "group": driver_group(d),
                      "today_shift": ", ".join(scheduled_today(d["id"])),
@@ -3887,8 +3998,40 @@ def api_driver_status():
     status = data["status"]
     if status not in ("online", "break", "offline"):
         return jsonify({"ok": False, "error": "bad status"}), 400
-    set_driver_status(data["driver_id"], status, "Dispatch set you " + status + ".")
-    return jsonify({"ok": True})
+    did = data["driver_id"]
+    msg = "Dispatch set you " + status + "."
+    if "regions" in data:
+        drow = db().execute("SELECT name FROM drivers WHERE id=?", (did,)).fetchone()
+        if not drow:
+            return jsonify({"ok": False, "error": "Unknown driver."}), 404
+        allowed = {c["id"] for c in driver_region_choices(did, session.get("dispatcher_id"))}
+        chosen = set()
+        for x in data.get("regions") or []:
+            try:
+                chosen.add(int(x))
+            except (TypeError, ValueError):
+                pass
+        if chosen - allowed:
+            return jsonify({"ok": False, "error": drow["name"] + " is only eligible for: " +
+                            (region_names(allowed) if allowed else "no regions you work") + "."}), 400
+        locked = driver_locked_regions(did)
+        keep = locked - chosen if chosen else set()
+        if keep:
+            return jsonify({"ok": False, "error": drow["name"] + " has an order in " + region_names(keep) +
+                            ", so " + region_names(keep) + " has to stay checked until it is delivered."}), 400
+        if chosen:
+            db().execute("INSERT OR REPLACE INTO day_picks(kind,person_id,day,region_ids) VALUES('driver_set',?,?,?)",
+                         (did, dt.date.today().isoformat(), ",".join(str(x) for x in sorted(chosen))))
+            where = region_names(chosen)
+            msg = "Dispatch set you " + status + " in " + where + "."
+        else:
+            clear_dispatch_driver_pick(did)
+            where = "their usual regions"
+        db().commit()
+        log("region", (session.get("dispatcher_name") or "dispatch") + " put " + drow["name"] + " " + status + " in " + where)
+    set_driver_status(did, status, msg)
+    auto_assign()
+    return jsonify({"ok": True, "work_regions": sorted(driver_work_regions(did))})
 
 @app.post("/api/dispatch/pause-region")
 def api_pause_region():
@@ -5660,6 +5803,9 @@ def regions_payload():
     regs = all_regions()
     return {"ok": True, "me": session.get("dispatcher_id"), "owner": is_owner(),
             "regions": [{"id": r["id"], "name": r["name"],
+                         "own_hours": bool(region_own_hours(r["id"])),
+                         "hours_label": business_hours_label(r["id"]) or "no hours limit",
+                         "closed_label": closed_dates_label(r["id"]),
                          "restaurants": con.execute("SELECT COUNT(*) c FROM restaurants WHERE region_id=? AND slug!='oneoff'",
                                                     (r["id"],)).fetchone()["c"]} for r in regs],
             "restaurants": [{"id": r["id"], "name": r["name"], "address": r["address"] or "",
@@ -5810,11 +5956,97 @@ def api_day_regions():
     err = save_day_pick(kind, pid, b.get("regions"))
     if err:
         return jsonify({"ok": False, "error": err}), 400
+    if as_driver:
+        clear_dispatch_driver_pick(pid)
+        db().commit()
     chosen = day_pick(kind, pid)
     nm = (db().execute("SELECT name FROM drivers WHERE id=?", (pid,)).fetchone()["name"] if as_driver
           else (session.get("dispatcher_name") or "dispatch"))
     log("region", nm + " is working " + (region_names(chosen) if chosen else "every region on today's availability") + " today")
     return jsonify({"ok": True, "today_pick": sorted(chosen)})
+
+
+def _can_edit_region(rid):
+    if is_owner():
+        return True
+    mine = dispatcher_view_regions(session.get("dispatcher_id"))
+    return not mine or rid in mine
+
+
+@app.get("/api/dispatch/region-hours")
+def api_region_hours_get():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    try:
+        rid = int(request.args.get("region_id") or 0)
+    except ValueError:
+        rid = 0
+    r = _region(rid)
+    if not r:
+        return jsonify({"ok": False, "error": "Unknown region."}), 404
+    own = bool(region_own_hours(rid))
+    return jsonify({"ok": True, "region": r["name"], "own": own, "can_edit": _can_edit_region(rid),
+                    "rows": business_hours_rows(rid) if own else business_hours_rows(),
+                    "business_label": business_hours_label() or "no hours limit",
+                    "closed_dates": region_closed_dates(rid), "days": BH_DAYS})
+
+
+@app.post("/api/dispatch/region-hours")
+def api_region_hours_save():
+    """Set a region's own hours (or go back to the business hours) and its closed dates."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    try:
+        rid = int(b.get("region_id") or 0)
+    except (TypeError, ValueError):
+        rid = 0
+    r = _region(rid)
+    if not r:
+        return jsonify({"ok": False, "error": "Unknown region."}), 404
+    if not _can_edit_region(rid):
+        return jsonify({"ok": False, "error": "You can only change hours for regions you are assigned to."}), 403
+    hours_json = ""
+    if b.get("own"):
+        hrs, bad = {}, []
+        src = b.get("hours") or {}
+        for k, name in enumerate(BH_DAYS):
+            d = src.get(str(k)) or {}
+            if d.get("closed"):
+                hrs[str(k)] = ["", ""]
+                continue
+            o = (d.get("open") or "").strip()[:5]
+            c = (d.get("close") or "").strip()[:5]
+            if _hm(o) is None or _hm(c) is None or _hm(o) == _hm(c):
+                bad.append(name)
+            else:
+                hrs[str(k)] = [o, c]
+        if bad:
+            return jsonify({"ok": False, "error": "Give " + ", ".join(bad) + " an open and a close time, or check Closed."}), 400
+        if not any(v[0] for v in hrs.values()):
+            return jsonify({"ok": False, "error": "Every day is closed. Leave at least one day open, or use closed dates."}), 400
+        hours_json = json.dumps(hrs)
+    today = dt.date.today()
+    dates = set()
+    for x in b.get("closed_dates") or []:
+        try:
+            d = dt.date.fromisoformat(str(x).strip()[:10])
+        except ValueError:
+            return jsonify({"ok": False, "error": "That closed date is not a real date: " + str(x)[:12]}), 400
+        if d < today:
+            continue
+        if d > today + dt.timedelta(days=730):
+            return jsonify({"ok": False, "error": "Closed dates can be up to 2 years out."}), 400
+        dates.add(d.isoformat())
+    if len(dates) > 60:
+        return jsonify({"ok": False, "error": "Keep it to 60 closed dates or fewer."}), 400
+    db().execute("UPDATE regions SET hours=?, closed_dates=? WHERE id=?", (hours_json, ",".join(sorted(dates)), rid))
+    db().commit()
+    who = session.get("dispatcher_name", "dispatch")
+    log("region_hours", r["name"] + ": " + ("own hours " + business_hours_label(rid) if hours_json else "business hours") +
+        ("; closed " + ", ".join(sorted(dates)) if dates else "") + " by " + who)
+    return jsonify({"ok": True, "label": business_hours_label(rid) or "no hours limit",
+                    "closed": closed_dates_label(rid, 60)})
 
 
 @app.get("/dispatch/regions")
@@ -6656,6 +6888,7 @@ def api_driver_state():
     recompute_queue()
     lines = line_positions()
     rotation = {k: v["pos"] for k, v in lines.items()}
+    lineups = region_lineups()
     dr = driver_work_regions(did)
     waiting = len([1 for o in db().execute("""SELECT region_id FROM orders
                               WHERE dispatch_status IN ('queued','held')""").fetchall() if covers(dr, o["region_id"])])
@@ -6678,6 +6911,7 @@ def api_driver_state():
                     "driver": {"name": d["name"], "status": d["status"],
                                "pending_request": d["pending_request"], "max_stack": d["max_stack"],
                                "up_next": rotation.get(d["id"]), "waiting_count": waiting,
+                               "region_lines": driver_region_lines(lineups, d["id"]),
                                "at_limit": (lines.get(d["id"]) or {}).get("at_limit", False),
                                "roster": d["roster"],
                                "region_queues": region_queues(dr, detail=False)},
@@ -7797,8 +8031,42 @@ def purge_chats():
 BH_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
-def business_hours():
-    """{"0": ["10:00", "22:00"], ...} Monday is 0. Empty means no hours limit is set."""
+def _region(rid):
+    if not rid:
+        return None
+    try:
+        return db().execute("SELECT * FROM regions WHERE id=?", (int(rid),)).fetchone()
+    except Exception:
+        return None
+
+
+def region_own_hours(rid):
+    """A region's own hours, or {} when it uses the business hours."""
+    r = _region(rid)
+    if not r:
+        return {}
+    try:
+        h = json.loads(r["hours"] or "{}")
+    except Exception:
+        h = {}
+    return h if isinstance(h, dict) else {}
+
+
+def region_closed_dates(rid):
+    """Dates a region is closed all day, like holidays. Past dates drop off."""
+    r = _region(rid)
+    if not r:
+        return []
+    today = dt.date.today().isoformat()
+    return sorted({d for d in (r["closed_dates"] or "").split(",") if d and d >= today})
+
+
+def business_hours(rid=None):
+    """{"0": ["10:00", "22:00"], ...} Monday is 0. Empty means no hours limit is set.
+    A region with its own hours uses those; otherwise the business hours."""
+    own = region_own_hours(rid) if rid else {}
+    if own:
+        return own
     try:
         h = json.loads(setting("business_hours", str) or "{}")
     except Exception:
@@ -7806,30 +8074,30 @@ def business_hours():
     return h if isinstance(h, dict) else {}
 
 
-def business_in_hours(when=None):
-    """Inside the business's operating hours? True when no hours are set."""
-    h = business_hours()
-    if not h:
-        return True
+def business_in_hours(when=None, rid=None):
+    """Inside operating hours (the region's when it has its own) and not on one of the
+    region's closed dates? True when no hours are set and no closed date applies."""
     when = when or dt.datetime.now()
+    closed = set(region_closed_dates(rid)) if rid else set()
+    h = business_hours(rid)
+    if not h:
+        return when.date().isoformat() not in closed
     m = when.hour * 60 + when.minute
     span = h.get(str(when.weekday())) or ["", ""]
     o, c = _hm(span[0]) if span[0] else None, _hm(span[1]) if span[1] else None
     if o is not None and c is not None:
-        if c > o and o <= m < c:
-            return True
-        if c <= o and m >= o:
-            return True
-    # the night before running past midnight
+        if (c > o and o <= m < c) or (c <= o and m >= o):
+            return when.date().isoformat() not in closed
+    # the night before running past midnight belongs to the day before
     y = h.get(str((when.weekday() - 1) % 7)) or ["", ""]
     yo, yc = _hm(y[0]) if y[0] else None, _hm(y[1]) if y[1] else None
     if yo is not None and yc is not None and yc <= yo and m < yc:
-        return True
+        return (when.date() - dt.timedelta(days=1)).isoformat() not in closed
     return False
 
 
-def business_hours_rows():
-    h = business_hours()
+def business_hours_rows(rid=None):
+    h = business_hours(rid)
     rows = []
     for k, name in enumerate(BH_DAYS):
         span = h.get(str(k))
@@ -7839,9 +8107,9 @@ def business_hours_rows():
     return rows
 
 
-def business_hours_label():
+def business_hours_label(rid=None):
     """'Mon - Fri 10:00 AM - 10:00 PM, Sat 11:00 AM - 11:00 PM, Sun closed'."""
-    h = business_hours()
+    h = business_hours(rid)
     if not h:
         return ""
     def one(k):
@@ -7856,6 +8124,17 @@ def business_hours_label():
         out.append(short + " " + one(k))
         k = j + 1
     return ", ".join(out)
+
+
+def closed_dates_label(rid, limit=3):
+    """'Closed Thu Nov 26, Fri Dec 25' for the next few closed dates."""
+    ds = region_closed_dates(rid)[:limit]
+    if not ds:
+        return ""
+    return "Closed " + ", ".join(dt.date.fromisoformat(d).strftime("%a %b %-d") for d in ds)
+
+
+app.jinja_env.globals["closed_dates_label"] = closed_dates_label
 
 
 app.jinja_env.globals["business_hours_label"] = business_hours_label

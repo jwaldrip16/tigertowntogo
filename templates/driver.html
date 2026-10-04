@@ -201,6 +201,7 @@ function soundNote(){
   document.getElementById('soundNote').textContent = ffSound.armed() ? '' :
     'Tap anywhere once so your phone lets the app play the new order alert.';
 }
+function ffEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 function ordinal(n){
   const s = ['th','st','nd','rd'], v = n % 100;
   return n + (s[(v-20)%10] || s[v] || s[0]);
@@ -208,6 +209,9 @@ function ordinal(n){
 function turnPill(d){
   if (d.status === 'offline') return '<span class="pill grey">off shift, not in line</span>';
   if (d.status === 'break')   return '<span class="pill amber">on break, not in line</span>';
+  if ((d.region_lines||[]).length) return d.region_lines.map(x => x.pos
+      ? '<span class="pill '+(x.pos===1?'green':'blue')+'">'+ffEsc(x.region)+': you are '+(x.pos===1?'first':ordinal(x.pos))+' in line</span>'
+      : '<span class="pill amber">'+ffEsc(x.region)+': at your stack limit</span>').join(' ');
   if (!d.up_next)             return '<span class="pill amber">at your stack limit</span>';
   if (d.up_next === 1)        return '<span class="pill green">You are first in line</span>';
   return '<span class="pill blue">You are ' + ordinal(d.up_next) + ' in line for the next order</span>';
@@ -284,8 +288,11 @@ function renderStatus(d){
     ' '+turnPill(d)+
     '<div class="muted small">'+
     (d.status==='online'
-      ? (d.up_next ? (d.up_next===1 ? 'You are first in line for the next order. ' : 'You are '+ordinal(d.up_next)+' in line for the next order. ')
-                   : 'You are holding your stack limit, so you are out of line until a stop clears. ')
+      ? ((d.region_lines||[]).length
+          ? d.region_lines.map(x => x.pos ? 'In '+x.region+' you are '+(x.pos===1?'first':ordinal(x.pos))+' in line for the next order. '
+                                          : 'In '+x.region+' you are at your stack limit until a stop clears. ').join('')
+          : (d.up_next ? (d.up_next===1 ? 'You are first in line for the next order. ' : 'You are '+ordinal(d.up_next)+' in line for the next order. ')
+                   : 'You are holding your stack limit, so you are out of line until a stop clears. '))
       : 'Dispatch has you '+d.status+', so you are out of the rotation. ')+
     'Stacking up to '+d.max_stack+' orders. '+
     d.waiting_count+' order'+(d.waiting_count===1?'':'s')+' waiting to go out.'+

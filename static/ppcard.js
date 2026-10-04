@@ -38,9 +38,16 @@
     document.body.appendChild(box);
     const msg = box.querySelector('#ppcfMsg'), go = box.querySelector('#ppcfGo');
     function say(t, bad){ msg.textContent = t; msg.style.color = bad ? '#c0392b' : ''; }
-    function close(){ box.remove(); if (o.onClose) o.onClose(); }
+    let fields = [];
+    function close(){
+      // shut PayPal's card boxes down properly so the next card form starts clean
+      fields.forEach(function(f){ try { f.close(); } catch(e){} });
+      fields = [];
+      box.remove(); if (o.onClose) o.onClose();
+    }
     box.querySelector('#ppcfClose').onclick = close;
     loadSdk().then(function(pp){
+      if (!document.body.contains(box)) return;
       const cf = pp.CardFields({
         createOrder: async function(){
           const r = await jpost('/api/paypal/create', {code: o.code});
@@ -62,15 +69,19 @@
         }
       });
       if (!cf.isEligible()){
+        if (o.onPage){
+          say('Card boxes are not turned on for this PayPal account yet. Close this and use the PayPal button.', true);
+          go.textContent = 'Unavailable'; return;
+        }
         say('Typed card payments are not turned on for this PayPal account yet. Use the pay page instead.', true);
         go.textContent = 'Open pay page'; go.disabled = false;
         go.onclick = function(){ window.open('/pay/' + encodeURIComponent(o.code), '_blank'); };
         return;
       }
-      cf.NameField({placeholder: 'Name on card'}).render('#ppcfName');
-      cf.NumberField().render('#ppcfNum');
-      cf.ExpiryField().render('#ppcfExp');
-      cf.CVVField().render('#ppcfCvv');
+      [[cf.NameField({placeholder: 'Name on card'}), '#ppcfName'], [cf.NumberField(), '#ppcfNum'],
+       [cf.ExpiryField(), '#ppcfExp'], [cf.CVVField(), '#ppcfCvv']].forEach(function(x){
+        fields.push(x[0]); x[0].render(x[1]);
+      });
       go.disabled = false; go.textContent = 'Run card';
       go.onclick = function(){
         const zip = box.querySelector('#ppcfZip').value.trim();

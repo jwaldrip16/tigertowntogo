@@ -485,8 +485,12 @@ function renderDrivers(list){
       'onclick="openChatWith('+d.id+')">'+d.unread+' new message'+(d.unread===1?'':'s')+
       '</button>' : '';
     const ord = ['1st up','2nd up','3rd up'];
-    const turn = d.up_next ? '<span class="pill '+(d.up_next===1?'green':'blue')+'">'+
-      (ord[d.up_next-1] || d.up_next+'th up')+'</span>' :
+    const ordOf = n => (ord[n-1] || n+'th up');
+    const turn = (d.status==='online' && (d.region_lines||[]).length)
+      ? d.region_lines.map(x => x.pos
+          ? '<span class="pill '+(x.pos===1?'green':'blue')+'">'+esc(x.region)+' '+ordOf(x.pos)+'</span>'
+          : '<span class="pill grey">'+esc(x.region)+': at stack limit</span>').join(' ')
+      : d.up_next ? '<span class="pill '+(d.up_next===1?'green':'blue')+'">'+ordOf(d.up_next)+'</span>' :
       (d.status==='online' ? '<span class="pill grey">on a run</span>' : '');
     const run = (d.on_orders||[]).length
       ? '<div class="runlist" ondragover="allowDrop(event)">'+d.on_orders.map((x,i,arr)=>
@@ -525,7 +529,7 @@ function renderDrivers(list){
     return '<div class="driver dropzone" ondragover="allowDrop(event)" ondragleave="dragLeave(event)" '+
       'ondrop="dropOnDriver(event,'+d.id+')"><div class="drvhead"><strong>'+d.name+'</strong> <span class="pill '+
       (d.status==='online'?'green':d.status==='break'?'amber':'grey')+'">'+
-      (d.status_label || d.status)+'</span> '+turn+
+      (d.status_label || d.status)+'</span> '+turn+(d.work_region_names ? ' <span class="pill grey" title="Regions this driver is in today">Region: '+esc(d.work_region_names)+'</span>' : '')+
       ' <span class="pill '+(grp(d)==='unavailable'?
         (d.status!=='offline'?'amber':'red'):'grey')+'">'+
       (d.roster_label || d.roster)+'</span>'+
@@ -1342,7 +1346,55 @@ async function hold(id){
 }
 async function open24(id){ await jpost('/api/restaurant/open24', {restaurant_id:id}); board(true); }
 async function pauseRest(id){ await jpost('/api/dispatch/pause-restaurant', {restaurant_id:id}); board(true); }
-async function setStatus(id, st){ await jpost('/api/dispatch/driver-status', {driver_id:id, status:st}); board(true); }
+async function setStatus(id, st, regions){
+  const d = ((LAST && LAST.drivers) || []).find(x => x.id === id);
+  // Online and Off ask which of the driver's eligible regions to put them in
+  if (regions === undefined && d && (st === 'online' || st === 'offline') && (d.region_choices||[]).length > 1){
+    regionPickFor(d, st); return false;
+  }
+  const body = {driver_id:id, status:st};
+  if (regions !== undefined) body.regions = regions;
+  const res = await jpost('/api/dispatch/driver-status', body);
+  if (res && res.ok === false){
+    const er = document.getElementById('drvRgErr');
+    if (er) er.textContent = res.error || 'Could not change that.'; else alert(res.error || 'Could not change that.');
+    return false;
+  }
+  board(true); return true;
+}
+function regionPickFor(d, st){
+  const old = document.getElementById('drvRgModal'); if (old) old.remove();
+  const choices = d.region_choices || [];
+  const locked = new Set(d.region_locked || []);
+  const cur = new Set((d.work_regions||[]).length ? d.work_regions : choices.map(c => c.id));
+  const box = document.createElement('div');
+  box.id = 'drvRgModal';
+  box.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center';
+  box.innerHTML = '<div style="background:#fff;border-radius:12px;padding:18px;max-width:380px;width:92%">' +
+    '<h3 style="margin:0 0 6px">Put ' + esc(d.name) + (st === 'online' ? ' online' : ' offline') + '</h3>' +
+    '<div class="muted small" style="margin-bottom:8px">' +
+      (st === 'online' ? 'Pick the regions they go in line for. Only regions they are eligible for are listed.'
+                       : 'Pick the regions they will be in when they come back on. Only regions they are eligible for are listed.') +
+    '</div>' +
+    choices.map(c => '<label style="display:block;padding:5px 0"><input type="checkbox" value="' + c.id + '"' +
+      ((cur.has(c.id) || locked.has(c.id)) ? ' checked' : '') + (locked.has(c.id) ? ' disabled' : '') + '> ' + esc(c.name) +
+      (locked.has(c.id) ? ' <span class="muted small">(has an order here until it is delivered)</span>' : '') + '</label>').join('') +
+    '<div class="small" id="drvRgErr" style="color:#b42318;min-height:1em"></div>' +
+    '<div class="btnrow" style="margin-top:10px">' +
+      '<button class="btn" id="drvRgOk">' + (st === 'online' ? 'Put online' : 'Put offline') + '</button> ' +
+      '<button class="btn tiny" id="drvRgUsual" title="Go back to the regions on their availability or profile">Usual regions</button> ' +
+      '<button class="btn tiny" id="drvRgCancel">Cancel</button></div></div>';
+  document.body.appendChild(box);
+  const close = () => box.remove();
+  box.querySelector('#drvRgCancel').onclick = close;
+  box.onclick = e => { if (e.target === box) close(); };
+  box.querySelector('#drvRgUsual').onclick = async () => { if (await setStatus(d.id, st, [])) close(); };
+  box.querySelector('#drvRgOk').onclick = async () => {
+    const ids = [...box.querySelectorAll('input[type=checkbox]')].filter(i => i.checked).map(i => +i.value);
+    if (!ids.length){ box.querySelector('#drvRgErr').textContent = 'Pick at least one region.'; return; }
+    if (await setStatus(d.id, st, ids)) close();
+  };
+}
 async function reopen(id, code, keep){
   if (ownerLocked(id)) return;
   if(!confirm('Reopen '+code+'? It goes back on the live board'+
