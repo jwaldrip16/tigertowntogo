@@ -1,0 +1,44 @@
+{% extends "base.html" %}{% block title %}Customers{% endblock %}{% block body %}
+<h1>Customers</h1>
+<p class="muted small">Existing customers skip the confirm call on website orders. A customer becomes existing when you add them here as existing, tap Customer called on one of their orders, or once an order of theirs is delivered.</p>
+<div class="grid" style="grid-template-columns:minmax(280px,360px) 1fr">
+<div class="panel">
+  <h2 id="fTitle">Add a customer</h2>
+  <input type="hidden" id="cId">
+  <label>Name</label><input id="cName"><label>Phone</label><input id="cPhone" type="tel">
+  <label>Address</label><input id="cAddr"><label>Email (optional)</label><input id="cEmail">
+  <label>Notes (optional)</label><input id="cNotes" maxlength="300">
+  <label><input type="checkbox" id="cExisting" checked> Existing customer (no confirm call)</label>
+  <div class="row"><button class="btn primary" onclick="saveCust()">Save</button><button class="btn" onclick="clearForm()">New</button></div>
+  <div id="cMsg" class="small"></div>
+</div>
+<div class="panel">
+  <div class="row"><input id="q" placeholder="Search name, phone or address" oninput="clearTimeout(window._t);window._t=setTimeout(load,300)"><span id="tot" class="muted small"></span></div>
+  <div id="list"></div>
+</div>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+let ROWS = [];
+function esc(x){ return String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+async function load(){
+  const r = await jget('/api/dispatch/customers?q='+encodeURIComponent(q.value)); ROWS = r.customers||[];
+  tot.textContent = r.total + ' on file';
+  list.innerHTML = ROWS.map(c=>'<div class="custrow"><div><b>'+esc(c.name)+'</b> '+esc(c.phone)+
+    (c.existing?' <span class="pill green">Existing</span>':' <span class="pill amber">New</span>')+(c.online?' <span class="pill grey">Online account</span>':'')+
+    '<div class="small muted">'+esc(c.address)+(c.notes?' &middot; '+esc(c.notes):'')+'</div><div class="small muted">'+c.orders+' orders &middot; '+c.points+' points &middot; added '+esc(c.added)+(c.added_by?' by '+esc(c.added_by):'')+'</div></div>'+
+    '<div class="row"><button class="btn tiny" onclick="edit('+c.id+')">Edit</button><button class="btn tiny" onclick="resetCode('+c.id+')">Password reset code</button></div></div>').join('') || '<p class="muted">No customers found.</p>';
+}
+function edit(id){ const c = ROWS.find(x=>x.id===id); fTitle.textContent='Edit customer'; cId.value=c.id; cName.value=c.name; cPhone.value=c.phone_digits; cAddr.value=c.address; cEmail.value=c.email; cNotes.value=c.notes; cExisting.checked=c.marked_existing||c.existing; window.scrollTo({top:0,behavior:'smooth'}); }
+function clearForm(){ fTitle.textContent='Add a customer'; [cId,cName,cPhone,cAddr,cEmail,cNotes].forEach(x=>x.value=''); cExisting.checked=true; cMsg.textContent=''; }
+async function saveCust(){
+  const r = await jpost('/api/dispatch/customer-save',{id:cId.value||null,name:cName.value,phone:cPhone.value,address:cAddr.value,email:cEmail.value,notes:cNotes.value,existing:cExisting.checked});
+  cMsg.textContent = r.ok ? r.message : r.error; if(r.ok){ cId.value = r.customer.id; load(); }
+}
+async function resetCode(id){
+  if(!confirm('Make a password reset code for this customer? Only give it to the customer themselves.')) return;
+  const r = await jpost('/api/dispatch/customer-reset-code',{id:id}); alert(r.ok ? ('Code: '+r.code+'\n\n'+r.message) : r.error);
+}
+try { attachAddressPicker('cAddr', ()=>{}); } catch(e){}
+load();
+</script>{% endblock %}

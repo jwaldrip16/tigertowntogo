@@ -1,37 +1,59 @@
 {% extends "base.html" %}{% block body %}
+<section class="hero fullbleed" style="background-image:linear-gradient(rgba(0,0,0,.38),rgba(0,0,0,.38)),url('/static/home-hero.jpg')">
+  <h1>{{ home_headline or 'Delivering the area\'s finest restaurants to your door!' }}</h1>
+  <div class="heromode"><span class="on">Delivery</span></div>
+  <form class="herosearch" onsubmit="homeSearch();return false">
+    <input id="homeAddr" placeholder="Enter your delivery address" autocomplete="street-address">
+    <button type="submit" aria-label="Search">&#128269;</button>
+  </form>
+  <div id="savedAddr">{% if not session.get('customer_id') %}<a class="herolink" href="/account/login?next=/">Sign in to use your saved addresses</a>{% endif %}</div>
+  <button class="btn primary herobtn" onclick="homeSearch()">Search</button>
+  <div id="searchMsg" class="heromsg"></div>
+</section>
+
+<section class="how">
+  <h2>How it works</h2>
+  <div class="howgrid">
+    <div><div class="howicon"><svg viewBox="0 0 24 24" width="30" height="30" fill="#fff"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg></div>
+      <h3>Tell us where you are</h3><p>Type your delivery address above and we show you who delivers to you and what the delivery fee is.</p></div>
+    <div><div class="howicon"><svg viewBox="0 0 24 24" width="30" height="30" fill="#fff"><path d="M7 2v9a2 2 0 0 1-1.5 1.94V22h-1v-9.06A2 2 0 0 1 3 11V2h1v6h1V2h1v6h1V2zm9 0c2 0 3.5 2.5 3.5 6 0 2.4-1 4-2.5 4.6V22h-1V2z"/></svg></div>
+      <h3>Fill your basket</h3><p>Pick a restaurant below and tell us what you'd like. Order now or schedule it for later.</p></div>
+    <div><div class="howicon"><svg viewBox="0 0 24 24" width="30" height="30" fill="#fff"><path d="M7 18a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm10 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM5.2 4H2V2h4.6l.9 2H21l-3.4 8H8.1l-.9 2H19v2H4l2.2-4.4z"/></svg></div>
+      <h3>Sit back and relax</h3><p>Check out, and you'll usually have your food in 30 to 60 minutes. Track your driver the whole way.</p></div>
+  </div>
+</section>
+
+<section id="restaurants">
 <div class="panel" id="trackbox">
-  <h2>Track an order</h2>
-  <p class="muted small">Enter the order code from your confirmation (it looks like FF123456789).</p>
-  <div class="row"><input id="trackcode" placeholder="FF123456789">
-    <button class="btn primary" onclick="goTrack()">Track it</button></div>
+  <div class="row"><input id="trackcode" placeholder="Track an order: FF123456789">
+    <button class="btn" onclick="goTrack()">Track it</button></div>
   <div id="recent"></div>
 </div>
-
-<h1>Food delivery in Opelika, Auburn and Valley</h1>
-<p class="lede">Pick a restaurant, we validate your address, and the fee is calculated from how far
-the driver actually has to go.</p>
+<h2 class="secttitle">Restaurants</h2>
 {% if not biz_open %}<div class="panel" style="border-left:4px solid #b44a22"><b>We are closed right now.</b> You can still place a future order: pick a restaurant and choose Schedule for later.</div>{% endif %}
-{% if hours_text %}<p class="muted small" style="text-align:center">Delivery hours{% if sel_region_name %} in {{ sel_region_name }}{% endif %}: {{ hours_text }}</p>{% endif %}
+{% if hours_text %}<p class="muted small" style="text-align:center">Delivery hours{% if sel_region_name %} in {{ sel_region_name }}{% endif %}: {{ hours_text }}{% if biz_phone %} &middot; Call <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>{% endif %}</p>{% endif %}
 {% if closed_text %}<p class="muted small" style="text-align:center">{{ closed_text }}</p>{% endif %}
 {% if regions|length > 1 %}
 <div class="regionpick">
   <span class="muted small">Where are you?</span>
-  <a class="chip {{ 'on' if not sel_region else '' }}" href="/?region=all">All areas</a>
+  <a class="chip {{ 'on' if not sel_region else '' }}" href="/?region=all#restaurants">All areas</a>
   {% for g in regions %}
-  <a class="chip {{ 'on' if sel_region == g.id else '' }}" href="/?region={{ g.id }}">{{ g.name }}{% if g.paused %} (not taking orders){% endif %}</a>
+  <a class="chip {{ 'on' if sel_region == g.id else '' }}" href="/?region={{ g.id }}#restaurants">{{ g.name }}{% if g.paused %} (not taking orders){% endif %}</a>
   {% endfor %}
 </div>
 {% endif %}
 {% if sel_region and not cards %}<div class="panel">No restaurants in {{ sel_region_name }} yet. <a href="/?region=all">See all areas</a>.</div>{% endif %}
-<div class="grid">
+<div id="reachNote" class="muted small"></div>
+<div class="grid" id="restGrid">
   {% for c in cards %}
-  <a class="card {{ 'closed' if not c.open else '' }}" href="/r/{{ c.r['slug'] }}">
+  <a class="card {{ 'closed' if not c.open else '' }}" data-slug="{{ c.r['slug'] }}" href="/r/{{ c.r['slug'] }}">
     {% if c.r['image'] %}<img class="cardimg" src="/media/{{ c.r['image'] }}" alt="" loading="lazy">{% endif %}
     <h3>{{ c.r['name'] }}</h3>
     <p class="muted">{{ c.r['address'] }}</p>
     <p class="muted">{{ c.hours }}</p>
     {% if c.rules and (c.rules.min_cents or c.rules.max_miles) %}<p class="muted small">{% if c.rules.min_cents %}{{ c.rules.min_cents|money }} minimum{% endif %}{% if c.rules.min_cents and c.rules.max_miles %} &middot; {% endif %}{% if c.rules.max_miles %}Delivers within {{ '%g' % c.rules.max_miles }} mi{% endif %}</p>{% endif %}
     <span class="pill {{ 'green' if c.open else 'grey' }}">{{ 'Open now' if c.open else 'Closed' }}</span>
+    <span class="pill grey reach hidden"></span>
   </a>
   {% endfor %}
   {% if any_on %}
@@ -44,8 +66,17 @@ the driver actually has to go.</p>
   </a>
   {% endif %}
 </div>
-<p class="muted small">Already ordered? <a href="/track/FF000000">Track an order</a> by putting your
-code in the address bar, e.g. /track/FF123456.</p>
+</section>
+
+<section class="pocket">
+  <div class="phone"><div class="phonescreen" style="background-image:url('/static/home-burger.jpg')"><img src="{{ logo_url }}" alt=""></div></div>
+  <div class="pockettext">
+    <h2>From your pocket to your front porch</h2>
+    <p>Order from your phone in a few taps. Add {{ biz_name }} to your home screen and it opens like an app.</p>
+    <p class="small"><b>iPhone:</b> tap Share, then Add to Home Screen.<br><b>Android:</b> tap the &#8942; menu, then Add to Home screen.</p>
+    <p><a class="btn primary" href="/account/login?mode=signup">Join online rewards</a> <a class="btn" href="/gift-cards">Gift cards</a></p>
+  </div>
+</section>
 {% endblock %}
 {% block scripts %}<script>
 function goTrack(){
@@ -58,5 +89,36 @@ function goTrack(){
   if(!seen.length) return;
   document.getElementById('recent').innerHTML = '<p class="muted small">Your recent orders: '+
     seen.map(c=>'<a href="/track/'+c+'">'+c+'</a>').join(' &middot; ')+'</p>';
+})();
+
+function homeSearch(){
+  const a = document.getElementById('homeAddr').value.trim(), m = document.getElementById('searchMsg');
+  if(!a){ m.textContent = 'Type your delivery address.'; return; }
+  m.textContent = 'Checking who delivers to you...';
+  jpost('/api/home-search', {address:a}).then(r=>{
+    if(!r.ok){ m.textContent = r.error; return; }
+    try { localStorage.setItem('ffAddr', r.formatted); } catch(e){}
+    m.textContent = r.count ? (r.count + ' restaurant' + (r.count===1?'':'s') + ' deliver to ' + r.formatted) : ('Sorry, no restaurants deliver to ' + r.formatted + ' yet. Call us and we may still be able to help.');
+    const by = {}; r.restaurants.forEach(x=>by[x.slug]=x);
+    document.querySelectorAll('#restGrid .card[data-slug]').forEach(c=>{
+      const x = by[c.dataset.slug], pill = c.querySelector('.reach');
+      if(!x){ return; }
+      c.style.display = x.ok ? '' : 'none';
+      if(pill){ pill.classList.remove('hidden'); pill.textContent = x.miles + ' mi \u00b7 ' + x.fee + ' delivery'; }
+    });
+    document.getElementById('reachNote').innerHTML = 'Showing restaurants that deliver to you. <a href="#" onclick="showAll();return false">Show all</a>';
+    document.getElementById('restaurants').scrollIntoView({behavior:'smooth'});
+  });
+}
+function showAll(){ document.querySelectorAll('#restGrid .card').forEach(c=>c.style.display=''); document.getElementById('reachNote').textContent=''; }
+(function(){
+  try { const s = localStorage.getItem('ffAddr'); if(s) document.getElementById('homeAddr').value = s; } catch(e){}
+  try { attachAddressPicker('homeAddr', ()=>homeSearch()); } catch(e){}
+  jget('/api/account/me').then(a=>{
+    if(a.me && a.me.address){
+      document.getElementById('savedAddr').innerHTML = '<a class="herolink" href="#" id="useSaved">Use my saved address: '+a.me.address.replace(/[<>&"]/g,'')+'</a>';
+      document.getElementById('useSaved').onclick = function(e){ e.preventDefault(); document.getElementById('homeAddr').value = a.me.address; homeSearch(); };
+    }
+  }).catch(()=>{});
 })();
 </script>{% endblock %}

@@ -1,0 +1,42 @@
+{% extends "base.html" %}{% block title %}My rewards{% endblock %}{% block body %}
+<h1>Hi {{ me.name }}</h1>
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+<div class="panel">
+  <h2>Rewards</h2>
+  {% if me.loyalty_on %}
+  <p style="font-size:1.6em;margin:4px 0"><b>{{ me.points }}</b> points</p>
+  <p>{% if me.rewards %}You have <b>{{ me.rewards }}</b> reward{{ '' if me.rewards == 1 else 's' }} ready ({{ me.reward_value }} off each). Use them at checkout.
+  {% else %}{{ me.next_reward_in }} more points until your next {{ me.reward_value }} reward.{% endif %}</p>
+  {% else %}<p class="muted">Rewards are paused right now.</p>{% endif %}
+  <h3>Points history</h3>
+  {% for p in plog %}<div class="small row" style="justify-content:space-between"><span>{{ p['note'] }}</span><span>{{ '+' if p['points'] > 0 else '' }}{{ p['points'] }}</span></div>
+  {% else %}<p class="muted small">No points yet. Order while signed in to start earning.</p>{% endfor %}
+</div>
+<div class="panel">
+  <h2>Cards on file</h2>
+  <div id="cards">{% for c in me.cards %}<div class="row" style="justify-content:space-between"><span>{{ c.label }}{% if c.expiry %} <span class="muted small">exp {{ c.expiry }}</span>{% endif %}</span>
+    <button class="btn tiny" onclick="delCard({{ c.id }})">Remove</button></div>
+  {% else %}<p class="muted small">No cards saved. Tick "Save this card" at checkout and it will show here.</p>{% endfor %}</div>
+  <p class="small muted">Cards are kept by PayPal. This site only keeps the last 4 digits.</p>
+  <h2>Your details</h2>
+  <label>Name</label><input id="aName" value="{{ me.name }}">
+  <label>Email</label><input id="aEmail" value="{{ me.email }}">
+  <details><summary class="small">Change password</summary>
+    <input id="aPw" type="password" placeholder="Current password"><input id="aNew" type="password" placeholder="New password (6+ characters)"></details>
+  <button class="btn" onclick="saveMe()">Save</button> <span id="aMsg" class="small"></span>
+  <p class="small"><a href="/account/logout">Sign out</a></p>
+</div>
+<div class="panel">
+  <h2>Recent orders</h2>
+  {% for o in orders %}<div class="small row" style="justify-content:space-between"><a href="/track/{{ o['code'] }}">{{ o['code'] }}</a>
+    <span>{{ o['rname'] or '' }}</span><span>{{ money(o['total_cents']) }}</span><span class="muted">{{ o['dispatch_status'] }}</span></div>
+  {% else %}<p class="muted small">No orders yet.</p>{% endfor %}
+  <p><a class="btn primary" href="/">Order food</a> <a class="btn" href="/gift-cards">Gift cards</a></p>
+</div>
+</div>
+{% endblock %}
+{% block scripts %}<script>
+async function delCard(id){ if(!confirm('Remove this card?')) return; const r = await jpost('/api/account/card-delete',{id:id}); if(!r.ok){ alert(r.error); return; } location.reload(); }
+async function saveMe(){ const r = await jpost('/api/account/update',{name:aName.value,email:aEmail.value,password:aPw.value,new_password:aNew.value});
+  aMsg.textContent = r.ok ? 'Saved.' : r.error; }
+</script>{% endblock %}

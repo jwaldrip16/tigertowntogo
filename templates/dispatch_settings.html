@@ -32,6 +32,26 @@ async function setLogo(inp){
   <label>Dispatch phone number</label>
   <input name="dispatch_phone" type="tel" value="{{ s['dispatch_phone'] }}" placeholder="334-209-2844">
   <div class="muted small">The number drivers and restaurants tap to call dispatch, and the one customers see.</div>
+  <h2>Rewards, gift cards and confirm calls</h2>
+  <input type="hidden" name="loyalty_present" value="1">
+  <label><input type="checkbox" name="loyalty_on" value="1" {{ 'checked' if s.get('loyalty_on','1') == '1' else '' }}> Rewards program on</label>
+  <div class="row"><label>Points per $1 of food <input name="points_per_dollar" type="number" min="0" max="20" value="{{ s.get('points_per_dollar','1') }}" style="max-width:90px"></label>
+    <label>Points per reward <input name="reward_points" type="number" min="10" max="10000" value="{{ s.get('reward_points','100') }}" style="max-width:100px"></label>
+    <label>Reward value ($) <input name="reward_value" type="number" min="0.5" max="100" step="0.5" value="{{ '%.2f' % ((s.get('reward_value_cents','500')|int)/100) }}" style="max-width:100px"></label></div>
+  <div class="row"><label>Gift card minimum ($) <input name="gift_min" type="number" min="1" max="500" value="{{ (s.get('gift_min_cents','1000')|int)//100 }}" style="max-width:90px"></label>
+    <label>Gift card maximum ($) <input name="gift_max" type="number" min="5" max="2000" value="{{ (s.get('gift_max_cents','50000')|int)//100 }}" style="max-width:100px"></label></div>
+  <label><input type="checkbox" name="confirm_call" value="1" {{ 'checked' if s.get('confirm_call','1') == '1' else '' }}> New customers' website orders: ask them to call dispatch to confirm before the order goes to the kitchen</label>
+  <div class="muted small">Existing customers never have to call. New customers see your dispatch number with a Call button, and the order waits on the board with a "Waiting for confirm call" tag until you tap Customer called or Send to kitchen. Mark customers existing on the Customers page.</div>
+  <h2>Customer website</h2>
+  <input type="hidden" name="site_present" value="1">
+  <label>Home page headline</label><input name="home_headline" maxlength="120" value="{{ s.get('home_headline','') }}">
+  <label>Business email (shown in the footer and FAQ's)</label><input name="business_email" type="email" value="{{ s.get('business_email','') }}">
+  <div class="row"><label>X link <input name="social_x" value="{{ s.get('social_x','') }}"></label>
+    <label>Facebook link <input name="social_facebook" value="{{ s.get('social_facebook','') }}"></label>
+    <label>Instagram link <input name="social_instagram" value="{{ s.get('social_instagram','') }}"></label></div>
+  <label>FAQ's</label>
+  <textarea name="faq_text" rows="12" placeholder="Leave blank to use the standard FAQ's">{{ s.get('faq_text','') }}</textarea>
+  <div class="muted small">Start each question with Q: and each answer with A:. You can type {business}, {phone}, {email} or {address} and the site fills them in. Leave it blank to use the standard FAQ's.</div>
   <h2>Business hours</h2>
   <input type="hidden" name="bh_present" value="1">
   <label><input type="checkbox" name="bh_on" value="1" {% if bh_on %}checked{% endif %}> Only take customer orders during these hours</label>

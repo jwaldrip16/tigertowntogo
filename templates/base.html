@@ -15,8 +15,9 @@ async function jget(url){ const r = await fetch(url); return r.json(); }
 function money(c){ return '$' + (c/100).toFixed(2); }
 </script>
 {% block head %}{% endblock %}
-</head><body class="{% block bodyclass %}{% endblock %}">
+</head>
 {% set staff_area = request.path.startswith('/dispatch') or request.path.startswith('/driver') or request.path.startswith('/restaurant') %}
+<body class="{% if not portal and not staff_area %}cust {% endif %}{% block bodyclass %}{% endblock %}">
 <header class="topbar">
   <a class="brand" href="{% if portal == 'dispatch' %}/dispatch{% elif portal == 'driver' %}/driver{% elif portal == 'kitchen' %}/restaurant{% elif staff_area %}{{ request.path }}{% else %}/{% endif %}"><img class="brandlogo" src="{{ logo_url }}" alt="">{{ biz_name }}{% if portal %} {{ portal|capitalize if portal != "kitchen" else "Kitchen" }}{% endif %}</a>
   <nav>
@@ -25,6 +26,9 @@ function money(c){ return '$' + (c/100).toFixed(2); }
       <a href="/dispatch/manage">Manage</a>
       <a href="/dispatch/schedule">Schedule</a>
       <a href="/dispatch/map">Map</a>
+      <a href="/dispatch/gift-cards">Gift cards</a>
+      <a href="/dispatch/customers">Customers</a>
+      <a href="/dispatch/applications">Applications{% if app_new %} <span class="pill amber">{{ app_new }}</span>{% endif %}</a>
       <a href="/dispatch/gps-log">GPS log</a>
       <a href="/dispatch/settings">Settings</a>
       <a href="/dispatch/account">Account</a>
@@ -36,13 +40,30 @@ function money(c){ return '$' + (c/100).toFixed(2); }
       <a href="/restaurant">Orders</a>
       <a href="/restaurant/logout">Sign out</a>
     {% elif not portal and not staff_area %}
-      <a href="/">Order food</a>
+      <a href="/account">Accounts</a>
+      <a href="/drive">Drive</a>
+      <a href="/partner">Partner</a>
+      <a href="{{ '/account' if session.get('customer_id') else '/account/login?mode=signup' }}">Online rewards</a>
+      <a href="/gift-cards">Gift cards</a>
+      <a href="/faq">FAQ's</a>
     {% endif %}
   </nav>
 </header>
 <main>{% block body %}{% endblock %}</main>
-{% if not portal and not staff_area %}<footer class="muted small" style="text-align:center;padding:18px 12px">
-  {{ biz_name }}{% if biz_address %} &middot; {{ biz_address }}{% endif %}{% if biz_phone %} &middot; <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>{% endif %}
+{% if not portal and not staff_area %}<footer class="custfoot">
+  <div class="custfoot-in">
+    <div><h3>Hours</h3><p>{{ biz_hours or 'Call us for today\'s hours.' }}</p></div>
+    <div><h3>Contact</h3>
+      {% if biz_address %}<p><b>Address:</b> {{ biz_address }}</p>{% endif %}
+      {% if biz_phone %}<p><b>Phone:</b> <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a></p>{% endif %}
+      {% if biz_email %}<p><b>Email:</b> <a href="mailto:{{ biz_email }}">{{ biz_email }}</a></p>{% endif %}</div>
+    {% if biz_address %}<div class="custmap"><iframe title="Map" loading="lazy" referrerpolicy="no-referrer-when-downgrade"
+      src="https://maps.google.com/maps?q={{ biz_address|urlencode }}&z=11&output=embed"></iframe></div>{% endif %}
+  </div>
+  <div class="custfoot-bottom">
+    {% for k, u in socials %}<a class="social" href="{{ u }}" target="_blank" rel="noopener">{{ {'x':'X','facebook':'Facebook','instagram':'Instagram'}[k] }}</a>{% endfor %}
+    <p>&copy; {{ year }} {{ biz_name }}. All rights reserved. &middot; <a href="/faq">FAQ's</a> &middot; <a href="/drive">Drive with us</a> &middot; <a href="/partner">Partner with us</a></p>
+  </div>
 </footer>{% endif %}
 <div class="poweredby">Powered by FleetFoot Delivery</div>
 <script src="{{ url_for('static', filename='alert.js') }}"></script>

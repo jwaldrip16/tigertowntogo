@@ -74,6 +74,9 @@
       <input id="tipCustom" type="number" min="0" step="0.50" placeholder="$ custom"
              oninput="customTip()" style="max-width:120px">
     </div>
+    <h3>Rewards and gift cards</h3>
+    <div id="acctBox" class="small muted">Checking your rewards account...</div>
+    <input id="giftCode" placeholder="Gift card number (optional)" autocomplete="off">
     {% if pp_enabled %}
     <h3>How to pay</h3>
     <div class="paychoice">
@@ -358,8 +361,13 @@ async function placeOrder(){
     customer_phone: document.getElementById('phone').value,
     address: document.getElementById('address').value,
     note: document.getElementById('note').value, items: cart, tip_cents: tipCents,
-    scheduled_for: document.getElementById('whenMode').value === 'later' ? document.getElementById('whenTime').value : ''}));
+    scheduled_for: document.getElementById('whenMode').value === 'later' ? document.getElementById('whenTime').value : '',
+    gift_code: document.getElementById('giftCode').value.trim(),
+    redeem_rewards: parseInt((document.getElementById('useRewards')||{}).value||'0',10) || 0,
+    saved_card_id: (document.getElementById('savedCard')||{}).value || null,
+    save_card: !!(document.getElementById('saveCard')||{}).checked}));
   if(!res.ok){ alert(res.error); return; }
+  if(res.confirm_call) alert('Order '+res.code+' placed. Please call dispatch at '+res.confirm_call.phone+' to confirm it. Your order goes to the kitchen once you call.');
   try{
     const seen = JSON.parse(localStorage.getItem('ffOrders')||'[]');
     seen.unshift(res.code); localStorage.setItem('ffOrders', JSON.stringify(seen.slice(0,10)));
@@ -369,6 +377,36 @@ async function placeOrder(){
   if(res.message) alert(res.message);
   window.location = '/track/' + res.code;
 }
+async function drawAcct(){
+  const box = document.getElementById('acctBox');
+  let a; try { a = await jget('/api/account/me'); } catch(e){ box.textContent=''; return; }
+  const back = encodeURIComponent(location.pathname);
+  if(!a.me){
+    box.innerHTML = a.rules.on ? ('<a href="/account/login?next='+back+'">Sign in</a> or <a href="/account/login?mode=signup&next='+back+'">make an account</a> to earn rewards ('+a.rules.points+' points = '+a.reward_value+' off) and keep a card on file.') : '';
+    return;
+  }
+  const me = a.me;
+  if(!document.getElementById('name').value) document.getElementById('name').value = me.name;
+  if(!document.getElementById('phone').value) document.getElementById('phone').value = me.phone;
+  if(!document.getElementById('address').value && me.address){ document.getElementById('address').value = me.address; try{ validate(); }catch(e){} }
+  let h = 'Signed in as <b>'+me.name+'</b>'+(me.loyalty_on?' · '+me.points+' points':'')+' · <a href="/account/logout">Sign out</a>';
+  if(me.loyalty_on && me.rewards > 0){
+    h += '<div class="row">Use rewards <select id="useRewards" style="max-width:200px"><option value="0">None</option>';
+    for(let i=1;i<=me.rewards;i++) h += '<option value="'+i+'">'+i+' ('+money(i*a.rules.value_cents)+' off)</option>';
+    h += '</select></div>';
+  }
+  if(a.cards_on){
+    if(me.cards.length){
+      h += '<div class="row">Pay with <select id="savedCard" style="max-width:240px" onchange="savedToggle()"><option value="">A new card or PayPal</option>' +
+        me.cards.map(c=>'<option value="'+c.id+'">'+c.label+'</option>').join('') + '</select></div>';
+    }
+    h += '<label class="small" id="saveCardRow"><input type="checkbox" id="saveCard"> Save this card for next time</label>';
+  }
+  box.innerHTML = h; box.classList.remove('muted');
+}
+function savedToggle(){ const s=document.getElementById('savedCard'), r=document.getElementById('saveCardRow'); if(s&&r) r.style.display = s.value ? 'none' : ''; }
+try { const _a = localStorage.getItem('ffAddr'); if(_a && !document.getElementById('address').value){ document.getElementById('address').value = _a; setTimeout(()=>{ try{ validate(); }catch(e){} }, 300); } } catch(e){}
+drawAcct();
 attachAddressPicker('address', ()=>validate());
 drawMenu();
 whenToggle();

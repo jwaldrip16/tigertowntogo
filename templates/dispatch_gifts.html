@@ -1,0 +1,51 @@
+{% extends "base.html" %}{% block title %}Gift cards{% endblock %}{% block body %}
+<h1>Gift cards</h1>
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+<div class="panel">
+  <h2>Sell a gift card</h2>
+  <label>Amount ($, {{ lo }} to {{ hi }})</label><input id="sAmt" type="number" min="{{ lo }}" max="{{ hi }}" value="25">
+  <label>Buyer name</label><input id="sName"><label>Buyer phone</label><input id="sPhone" type="tel">
+  <label>Buyer email (optional)</label><input id="sEmail"><label>For (optional)</label><input id="sTo">
+  <label>Message (optional)</label><input id="sMsg" maxlength="240">
+  <label>How they paid</label>
+  <select id="sMethod"><option value="cash">Cash</option><option value="card_terminal">Card, ran on our terminal</option>
+    <option value="house_account">House account</option>{% if pp_on %}<option value="link">Send them a pay link (card or PayPal)</option>{% endif %}
+    {% if owner %}<option value="comp">Free (owner)</option>{% endif %}</select>
+  <input id="sRef" placeholder="Receipt or reference number (optional)">
+  <button class="btn primary" onclick="sell()">Sell gift card</button>
+  <div id="sOut" class="panel mt" style="display:none"></div>
+</div>
+<div class="panel">
+  <h2>Look up a card</h2>
+  <input id="lCode" placeholder="FD-XXXX-XXXX-XXXX"><button class="btn" onclick="look()">Look up</button>
+  <div id="lOut"></div>
+</div>
+</div>
+<div class="panel mt"><h2>Recent cards</h2>
+{% for g in cards %}<div class="small row" style="justify-content:space-between;border-bottom:1px solid #eee;padding:4px 0">
+  <a href="#" onclick="lCode.value='{{ g.code }}';look();return false">{{ g.code }}</a><span>{{ g.balance }} of {{ g.initial }}</span>
+  <span>{{ g.buyer }}</span><span class="muted">{{ g.status }} · {{ g.pay_method }} · {{ g.sold_by }}</span></div>
+{% else %}<p class="muted">No gift cards yet.</p>{% endfor %}</div>
+{% endblock %}
+{% block scripts %}<script>
+const OWNER = {{ 'true' if owner else 'false' }};
+function esc(x){ return String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+async function sell(){
+  const r = await jpost('/api/dispatch/gift/sell',{amount:sAmt.value,buyer_name:sName.value,buyer_phone:sPhone.value,buyer_email:sEmail.value,to_name:sTo.value,message:sMsg.value,method:sMethod.value,pay_ref:sRef.value});
+  if(!r.ok){ alert(r.error); return; }
+  sOut.style.display='';
+  sOut.innerHTML = r.pending ? ('<b>Pay link</b><p class="small">'+esc(r.message)+'</p><input readonly value="'+esc(r.pay_link)+'" onclick="this.select()">')
+    : ('<b>Card number: '+esc(r.card.code)+'</b><p>Balance '+esc(r.card.balance)+'</p><p class="small">Read the number to the buyer. Their receipt page: <a target="_blank" href="'+esc(r.receipt)+'">'+esc(r.receipt)+'</a></p>');
+}
+async function look(){
+  const r = await jpost('/api/dispatch/gift/lookup',{code:lCode.value});
+  if(!r.ok){ lOut.innerHTML='<p class="cc-err">'+esc(r.error)+'</p>'; return; }
+  const g=r.card;
+  let h='<p><b>'+esc(g.code)+'</b> · '+esc(g.status)+'<br>Balance <b>'+esc(g.balance)+'</b> of '+esc(g.initial)+'<br><span class="small muted">Bought by '+esc(g.buyer)+' '+esc(g.buyer_phone)+(g.to?' for '+esc(g.to):'')+'</span></p>';
+  h+=g.history.map(t=>'<div class="small row" style="justify-content:space-between"><span>'+esc(t.note)+'</span><span>'+(t.cents<0?'-':'+')+esc(t.amount)+'</span></div>').join('');
+  if(OWNER && g.status!=='void') h+='<div class="row mt"><input id="adj" placeholder="+10 or -5" style="max-width:110px"><input id="adjNote" placeholder="Why"><button class="btn tiny" onclick="adjust()">Change balance</button><button class="btn tiny" onclick="voidCard()">Void</button></div>';
+  lOut.innerHTML=h;
+}
+async function adjust(){ const r=await jpost('/api/dispatch/gift/adjust',{code:lCode.value,amount:adj.value,note:adjNote.value}); if(!r.ok) alert(r.error); look(); }
+async function voidCard(){ if(!confirm('Void this card and zero its balance?')) return; const r=await jpost('/api/dispatch/gift/adjust',{code:lCode.value,void:true}); if(!r.ok) alert(r.error); look(); }
+</script>{% endblock %}

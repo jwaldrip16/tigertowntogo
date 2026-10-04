@@ -1,0 +1,31 @@
+{% extends "base.html" %}{% block title %}Become a driver{% endblock %}{% block body %}
+<div class="applybox">
+<h1 class="applytitle">Become a driver</h1>
+{% if done %}
+<div class="panel"><h2>Thanks, your application is in.</h2><p>We will contact you to talk about the details.{% if biz_phone %} Questions? Call <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>.{% endif %}</p></div>
+{% else %}
+<p>{{ biz_name }} is partnering with drivers!</p>
+<p>Just enter your information below to get started, and we will contact you to discuss the details.</p>
+{% for e in errs %}<p class="cc-err">{{ e }}</p>{% endfor %}
+<form method="post" class="applyform">
+  <input name="website" class="hp" tabindex="-1" autocomplete="off">
+  <label>First name</label><input name="first_name" value="{{ f.get('first_name','') }}" autocomplete="given-name" required>
+  <label>Last name</label><input name="last_name" value="{{ f.get('last_name','') }}" autocomplete="family-name" required>
+  <label>Date of birth</label><input name="dob" type="date" value="{{ f.get('dob','') }}" required>
+  <label>Address</label><input name="address" value="{{ f.get('address','') }}" autocomplete="street-address" required>
+  <label>Email</label><input name="email" type="email" value="{{ f.get('email','') }}" autocomplete="email" required>
+  <label>Phone number</label>
+  <div class="phone3">(<input name="phone1" maxlength="3" inputmode="numeric" value="{{ f.get('phone1','') }}">) <input name="phone2" maxlength="3" inputmode="numeric" value="{{ f.get('phone2','') }}"> - <input name="phone3" maxlength="4" inputmode="numeric" value="{{ f.get('phone3','') }}"></div>
+  <label>Your car</label>
+  <div class="carrow"><input name="car_color" placeholder="Color" value="{{ f.get('car_color','') }}"><input name="car_year" placeholder="Year" inputmode="numeric" maxlength="4" value="{{ f.get('car_year','') }}">
+    <select name="car_make"><option value="">Make</option>{% for m in makes %}<option {{ 'selected' if f.get('car_make') == m else '' }}>{{ m }}</option>{% endfor %}</select>
+    <input name="car_model" placeholder="Model" value="{{ f.get('car_model','') }}"></div>
+  <label>Where do you want to drive?</label>
+  <div class="regchecks"><label><input type="checkbox" name="regions" value="any" {{ 'checked' if 'any' in f.getlist('regions') or not f.getlist else '' }}> Any area</label>
+    {% for g in regions %}<label><input type="checkbox" name="regions" value="{{ g.id }}" {{ 'checked' if (g.id|string) in f.getlist('regions') else '' }}> {{ g.name }}</label>{% endfor %}</div>
+  <label>Anything else we should know? (optional)</label><textarea name="note" rows="2" maxlength="300">{{ f.get('note','') }}</textarea>
+  <button class="btn primary applybtn">Submit your application</button>
+</form>
+{% endif %}
+</div>
+{% endblock %}

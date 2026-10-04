@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% block title %}Reset your password{% endblock %}{% block body %}
+<div class="panel" style="max-width:440px;margin:20px auto">
+  <h1 style="margin-top:0">Reset your password</h1>
+  {% if err %}<p class="cc-err">{{ err }}</p>{% endif %}
+  {% if msg %}<p>{{ msg }}</p>{% endif %}
+  {% if step == 'verify' %}
+  <form method="post">
+    <input type="hidden" name="step" value="verify">
+    <label>Mobile number</label><input name="phone" type="tel" value="{{ phone }}" required>
+    <label>6 digit code</label><input name="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" required>
+    <label>New password</label><input name="password" type="password" minlength="6" autocomplete="new-password" required>
+    <label>New password again</label><input name="password2" type="password" minlength="6" autocomplete="new-password" required>
+    <button class="btn primary" style="width:100%;margin-top:10px">Set new password</button>
+  </form>
+  <p class="small"><a href="/account/reset">Get a new code</a></p>
+  {% else %}
+  <p class="muted">{% if texting %}Enter the phone number on your account and we'll text you a code.{% else %}Enter the phone number on your account. Then call dispatch{% if biz_phone %} at {{ biz_phone }}{% endif %} for your reset code.{% endif %}</p>
+  <form method="post">
+    <input type="hidden" name="step" value="send">
+    <label>Mobile number</label><input name="phone" type="tel" value="{{ phone }}" autocomplete="tel" required>
+    <button class="btn primary" style="width:100%;margin-top:10px">{{ 'Text me a code' if texting else 'Continue' }}</button>
+  </form>
+  <p class="small"><a href="/account/reset?step=verify">I already have a code</a></p>
+  {% endif %}
+  <p class="small"><a href="/account/login">Back to sign in</a></p>
+</div>
+{% endblock %}

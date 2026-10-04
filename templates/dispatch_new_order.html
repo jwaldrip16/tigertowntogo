@@ -59,7 +59,10 @@
     <h3>Customer</h3>
     <input id="ref" placeholder="Their order number (optional)">
     <input id="name" placeholder="Customer name">
-    <input id="phone" placeholder="Phone">
+    <input id="phone" placeholder="Phone" onchange="rewardsLookup()">
+    <div id="rwBox" class="small muted"></div>
+    <label class="small"><input type="checkbox" id="saveCust"> Save to the customer list as an existing customer</label>
+    <input id="giftCode" placeholder="Gift card number (optional)" autocomplete="off">
     <textarea id="address" rows="2" placeholder="Street, city, state, ZIP"></textarea>
     <input id="note" placeholder="Gate code, apartment, door instructions">
     <div id="quote" class="quote"></div>
@@ -293,8 +296,12 @@ async function placeOrder(){
     cash: document.getElementById('cashOrder').checked,
     house: document.getElementById('houseOrder').checked,
     house_account: document.getElementById('houseName').value,
+    gift_code: document.getElementById('giftCode').value.trim(),
+    save_customer: document.getElementById('saveCust').checked,
+    redeem_rewards: parseInt((document.getElementById('useRewards')||{}).value||'0',10) || 0,
     source: 'call_in'}));
   if(!res.ok){ alert(res.error); return; }
+  if(res.credit && res.credit.message) alert(res.code + ': ' + res.credit.message + (res.credit.paid ? ' Nothing left to pay.' : ''));
   if(res.send_note && res.cash) alert(res.code + ': ' + res.send_note);
   if(res.future_note) alert(res.code + ': ' + res.future_note + ' It waits on the Future orders tab until then.');
   if(!res.cash){
@@ -382,4 +389,20 @@ function showOnMap(res){
 drawMenu();
 
 attachAddressPicker('address', ()=>validate());
+async function rewardsLookup(){
+  const box = document.getElementById('rwBox'); box.innerHTML = '';
+  const ph = document.getElementById('phone').value; if(ph.replace(/\D/g,'').length < 10) return;
+  const r = await jget('/api/dispatch/customer-lookup?phone='+encodeURIComponent(ph));
+  if(!r.ok || !r.found){ box.textContent = 'Not on the customer list yet.'; return; }
+  const c = r.customer;
+  let h = (c.existing ? '<span class="pill green">Existing customer</span> ' : '') + '<b>'+c.name+'</b>'+(c.loyalty_on ? ', '+c.points+' points. This order earns points.' : '');
+  if(c.address && !document.getElementById('address').value) document.getElementById('address').value = c.address;
+  if(c.loyalty_on && c.rewards > 0){
+    h += ' <select id="useRewards" style="max-width:200px"><option value="0">Don\'t use rewards</option>';
+    for(let i=1;i<=c.rewards;i++) h += '<option value="'+i+'">Use '+i+' ('+c.reward_value+' each)</option>';
+    h += '</select>';
+  }
+  box.innerHTML = h;
+  if(!document.getElementById('name').value) document.getElementById('name').value = c.name;
+}
 </script>{% endblock %}

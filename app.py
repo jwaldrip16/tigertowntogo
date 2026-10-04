@@ -232,6 +232,9 @@ def init_db():
                  ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("kitchen_hold", "1"), ("keep_awake_driver", "1"), ("keep_awake_kitchen", "1"), ("auto_driver_pay", "1"), ("auto_pay_cap_cents", "2500"), ("auto_pay_delay_min", "15"), ("max_stack_default", "3"), ("sched_lead_min", "60"), ("stack_by_location", "1"), ("stack_pickup_mi", "0.5"), ("stack_detour_mi", "2"),
                  ("assign_on_pending", "0"), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
                  ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
+                 ("loyalty_on", "1"), ("points_per_dollar", "1"), ("reward_points", "100"),
+                 ("reward_value_cents", "500"), ("confirm_call", "1"),
+                 ("gift_min_cents", "1000"), ("gift_max_cents", "50000"),
                  ("business_name", "Fleet Delivery"),
                  ("business_address", "216 S 8th St, Opelika, AL 36801"),
                  ("order_tokens", "Online,App,Phone call,Third party"),
@@ -369,6 +372,27 @@ def init_db():
     ensure_column(con, "drivers", "last_addr_lng", "REAL")
     ensure_column(con, "drivers", "track_id", "TEXT")
     ensure_column(con, "drivers", "last_bg_at", "TEXT")
+    # customer accounts, saved cards (kept at PayPal), rewards points and gift cards
+    con.executescript("""
+    CREATE TABLE IF NOT EXISTS customers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, phone TEXT UNIQUE,
+        email TEXT, pw_hash TEXT, points INTEGER NOT NULL DEFAULT 0, pp_customer_id TEXT,
+        created_at TEXT, last_login_at TEXT);
+    CREATE TABLE IF NOT EXISTS saved_cards (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL,
+        vault_id TEXT UNIQUE, brand TEXT, last4 TEXT, expiry TEXT, created_at TEXT);
+    CREATE TABLE IF NOT EXISTS points_log (id INTEGER PRIMARY KEY AUTOINCREMENT, customer_id INTEGER NOT NULL,
+        order_id INTEGER, points INTEGER NOT NULL, note TEXT, created_at TEXT);
+    CREATE TABLE IF NOT EXISTS gift_cards (id INTEGER PRIMARY KEY AUTOINCREMENT, code TEXT UNIQUE, ref TEXT UNIQUE,
+        initial_cents INTEGER NOT NULL, balance_cents INTEGER NOT NULL DEFAULT 0, buyer_name TEXT, buyer_phone TEXT,
+        buyer_email TEXT, to_name TEXT, message TEXT, status TEXT NOT NULL DEFAULT 'pending', pay_method TEXT,
+        pay_ref TEXT, pp_order_id TEXT, sold_by TEXT, customer_id INTEGER, created_at TEXT, activated_at TEXT);
+    CREATE TABLE IF NOT EXISTS gift_txns (id INTEGER PRIMARY KEY AUTOINCREMENT, gift_card_id INTEGER NOT NULL,
+        order_id INTEGER, cents INTEGER NOT NULL, note TEXT, by_name TEXT, created_at TEXT);
+    """)
+    for _c, _t in (("customer_id", "INTEGER"), ("gift_card_id", "INTEGER"),
+                   ("gift_cents", "INTEGER NOT NULL DEFAULT 0"), ("reward_cents", "INTEGER NOT NULL DEFAULT 0"),
+                   ("reward_points", "INTEGER NOT NULL DEFAULT 0"), ("credits_settled", "INTEGER NOT NULL DEFAULT 0"),
+                   ("points_awarded", "INTEGER"), ("confirm_state", "TEXT"), ("save_card", "INTEGER NOT NULL DEFAULT 0")):
+        ensure_column(con, "orders", _c, _t)
     con.execute("CREATE TABLE IF NOT EXISTS revgeo (k TEXT PRIMARY KEY, address TEXT, created_at TEXT)")
     con.execute("""CREATE TABLE IF NOT EXISTS regions (id INTEGER PRIMARY KEY AUTOINCREMENT,
                    name TEXT UNIQUE NOT NULL, sort INTEGER DEFAULT 0, created_at TEXT)""")
@@ -425,6 +449,17 @@ def init_db():
     # even after it is paid. kitchen_go=1 means dispatch released it (old orders count as released).
     ensure_column(con, "orders", "kitchen_go", "INTEGER NOT NULL DEFAULT 1")
     ensure_column(con, "orders", "auto_pay_note", "TEXT")
+    # customer list: dispatch can enter customers as existing (existing customers skip the confirm call)
+    for _c, _d in (("address", "TEXT"), ("verified", "INTEGER NOT NULL DEFAULT 0"), ("notes", "TEXT"),
+                   ("source", "TEXT"), ("added_by", "TEXT"), ("reset_hash", "TEXT"), ("reset_expires", "TEXT"),
+                   ("reset_tries", "INTEGER NOT NULL DEFAULT 0")):
+        ensure_column(con, "customers", _c, _d)
+    con.execute("""CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
+                   name TEXT, phone TEXT, email TEXT, region_ids TEXT, data TEXT, status TEXT NOT NULL DEFAULT 'new',
+                   notes TEXT, created_at TEXT, updated_at TEXT, updated_by TEXT)""")
+    for _k, _v in (("business_email", ""), ("social_x", ""), ("social_facebook", ""), ("social_instagram", ""),
+                   ("home_headline", "Delivering the area's finest restaurants to your door!"), ("faq_text", "")):
+        con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (_k, _v))
     con.executescript("""
     CREATE TRIGGER IF NOT EXISTS trg_kitchen_gate AFTER UPDATE OF kitchen_status ON orders
       WHEN NEW.kitchen_go=0 AND NEW.kitchen_status='pending'
@@ -2146,6 +2181,11 @@ def order_dict(o):
         "subtotal_cents": int(o["subtotal_cents"] or 0),
         "subtotal": money(o["subtotal_cents"]), "fee": money(o["fee_cents"]),
         "tax": money(o["tax_cents"]), "tip": money(o["tip_cents"]), "total": money(o["total_cents"]),
+        "gift": money(o["gift_cents"]) if ("gift_cents" in o.keys() and o["gift_cents"]) else "",
+        "reward": money(o["reward_cents"]) if ("reward_cents" in o.keys() and o["reward_cents"]) else "",
+        "due": money(due_cents(o)), "due_cents": due_cents(o),
+        "confirm_waiting": confirm_needed(o), "confirm_call": confirm_call_info(o),
+        "rewards_member": bool("customer_id" in o.keys() and o["customer_id"]),
         "drv_pay": drv_pay_info(o),
         "service_cents": int(o["service_cents"] or 0) if "service_cents" in o.keys() else 0,
         "service": money((o["service_cents"] or 0) if "service_cents" in o.keys() else 0),
@@ -2154,7 +2194,7 @@ def order_dict(o):
         "source": o["source"], "source_label": SOURCES.get(o["source"], "Web"),
         "token": (o["token"] or ""),
         "needs_address_approval": not o["address_ok"],
-        "dispatch_status": o["dispatch_status"], "hold_reason": called_in_words(o, ("tap Send to kitchen" if ("kitchen_go" in o.keys() and o["kitchen_go"] == 0 and o["kitchen_status"] == "waiting" and o["dispatch_status"] in ("held", "queued") and o["address_ok"]) else o["hold_reason"])),
+        "dispatch_status": o["dispatch_status"], "hold_reason": ("customer must call to confirm" if (confirm_needed(o) and o["dispatch_status"] in ("held", "queued", "awaiting_payment")) else None) or called_in_words(o, ("tap Send to kitchen" if ("kitchen_go" in o.keys() and o["kitchen_go"] == 0 and o["kitchen_status"] == "waiting" and o["dispatch_status"] in ("held", "queued") and o["address_ok"]) else o["hold_reason"])),
         "issue": o["issue"] or "", "issue_note": o["issue_note"] or "",
         "cloned_from": o["cloned_from"] or "",
         "driver": d["name"] if d else None, "driver_id": o["driver_id"], "stack_seq": o["stack_seq"],
@@ -2591,11 +2631,11 @@ def balance_cents(o):
     """What is still owed: order total less what was collected, plus refunds.
     Negative means the customer was charged more than the order now comes to."""
     kept = int(o["paid_cents"] or 0) - int(o["refunded_cents"] or 0)
-    return int(o["total_cents"] or 0) - kept
+    return int(o["total_cents"] or 0) - credits_cents(o) - kept
 
 def mark_paid(o, method="recorded", ref="", cents=None):
     """Payment landed: record it and let the order into the queue."""
-    cents = int(o["total_cents"]) if cents is None else int(cents)
+    cents = due_cents(o) if cents is None else int(cents)
     released = o["dispatch_status"] == "awaiting_payment"
     if o["dispatch_status"] == "scheduled" and (o["sched_dispatch"] or "") == "awaiting_payment":
         db().execute("""UPDATE orders SET sched_dispatch='held', sched_kitchen=?, sched_hold=? WHERE id=?""",
@@ -2705,7 +2745,7 @@ def pp_settle(o, why="after delivery"):
     if (o["pp_state"] or "") != "authorized" or not o["pp_auth_id"]:
         return {"ok": False, "error": "No PayPal hold on this order."}
     auth = int(o["pp_auth_cents"] or 0)
-    due = int(o["total_cents"] or 0) - int(o["refunded_cents"] or 0)
+    due = int(o["total_cents"] or 0) - credits_cents(o) - int(o["refunded_cents"] or 0)
     if due <= 0:
         return pp_void(o, "nothing owed")
     amt = min(due, pp_cap_cents(auth))
@@ -2858,7 +2898,9 @@ def api_pp_create():
     if kind == "order":
         if not pp_can_pay(o):
             return jsonify({"ok": False, "error": "This order is already paid."}), 400
-        cents, intent = int(o["total_cents"]), "AUTHORIZE"
+        cents, intent = due_cents(o), "AUTHORIZE"
+        if cents <= 0:
+            return jsonify({"ok": False, "error": "Nothing is owed on this order."}), 400
     else:
         cents, intent = pp_info(o)["owed_cents"], "CAPTURE"
         if cents <= 0:
@@ -2869,7 +2911,8 @@ def api_pp_create():
                             "description": ("Delivery order " if kind == "order" else "Rest of tip, order ") + o["code"],
                             "amount": pp_money(cents)}],
         "application_context": {"shipping_preference": "NO_SHIPPING", "user_action": "PAY_NOW",
-                                "brand_name": (setting("business_name", str) or "Fleet Delivery")[:120]}})
+                                "brand_name": (setting("business_name", str) or "Fleet Delivery")[:120]}}
+        | ({"payment_source": pp_vault_source(o)} if (kind == "order" and b.get("card") and pp_vault_source(o)) else {}))
     if st not in (200, 201) or not j.get("id"):
         return jsonify({"ok": False, "error": pp_err(j, "PayPal could not start the payment.")}), 400
     if kind == "order":
@@ -2920,9 +2963,11 @@ def api_pp_approve():
     db().execute("""UPDATE orders SET pp_auth_id=?, pp_auth_cents=?, pp_state='authorized', pp_source=?,
                     pp_error=NULL, pp_auth_at=? WHERE id=?""", (auth["id"], cents, src, now(), o["id"]))
     db().commit()
+    saved = pp_keep_vaulted(o, j)
     o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
     mark_paid(o, src if src in ("venmo", "paypal") else "card_paypal", auth["id"], cents)
-    return jsonify({"ok": True, "held": money(cents), "source": PP_SOURCES.get(src, "PayPal")})
+    return jsonify({"ok": True, "held": money(cents), "source": PP_SOURCES.get(src, "PayPal"),
+                    "saved_card": saved})
 
 def pp_refund(o, cents, note=""):
     """Refund money PayPal already charged, newest-first over the main charge and any
@@ -3289,7 +3334,8 @@ def checkout():
                                 ". Take it out of your bag or pick a time when it is available."}), 400
     card = None
     use_pp = (bool(payload.get("paypal")) or placed_by == "customer") and pp_enabled()
-    if placed_by == "customer" and not use_pp:
+    _credit_try = bool(payload.get("gift_code") or payload.get("redeem_rewards") or payload.get("saved_card_id"))
+    if placed_by == "customer" and not use_pp and not _credit_try:
         card, card_err = check_card(payload.get("card"))
         if not card:
             return jsonify({"ok": False, "error": card_err, "field": "card"}), 400
@@ -3367,6 +3413,15 @@ def checkout():
     service = int(round(subtotal * setting("service_fee_bp") / 10000.0))
     tip = int(payload.get("tip_cents", 0))
     total = subtotal + fee + ifee + tax + service + tip
+    # rewards account, rewards, gift card and saved card
+    cr = checkout_credits(payload, placed_by, dg, subtotal, total)
+    if cr.get("error"):
+        return jsonify({"ok": False, "error": cr["error"]}), 400
+    due_now = max(0, total - cr["gift_cents"] - cr["reward_cents"])
+    if placed_by == "customer" and not use_pp and card is None and due_now > 0 and not cr["saved_card"]:
+        card, card_err = check_card(payload.get("card"))
+        if not card:
+            return jsonify({"ok": False, "error": card_err, "field": "card"}), 400
 
     issue_key = (payload.get("issue") or "").strip()
     issue_label, issue_note, from_code = "", (payload.get("issue_note") or "").strip(), ""
@@ -3470,6 +3525,7 @@ def checkout():
         future_note = "Scheduled for " + when_label(sched.isoformat()) + "."
         if dispatcher_required() and not is_open(r, sched):
             future_note += " Heads up: " + r["name"] + " is not normally open then."
+    credit_note = apply_checkout_credits(oid, code, cr, placed_by)
     send_note = ""
     if src_id and dispatcher_required() and payload.get("send_to") == "driver":
         srow = db().execute("SELECT driver_id FROM orders WHERE id=?", (src_id,)).fetchone()
@@ -3484,11 +3540,16 @@ def checkout():
     if house:
         mark_paid(db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone(), method="house_account",
                   ref=("House account " + str(payload.get("house_account") or "").strip()[:60]).strip()[:80])
-    return jsonify({"pay_url": ("/pay/" + code) if (use_pp and not cash) else "",
+    paid_by_credit = credit_note.get("paid", False)
+    _orow = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+    confirm = confirm_call_info(_orow)
+    return jsonify({"pay_url": ("/pay/" + code) if (use_pp and not cash and not paid_by_credit) else "",
+                    "credit": credit_note, "confirm_call": confirm,
                     "future_note": future_note, "ok": True, "cash": cash, "code": code, "order_id": oid, "total": money(total),
                     "send_note": send_note,
                     "address_ok": bool(address_ok),
-                    "message": ("" if address_ok and cash else
+                    "message": (("Call dispatch at " + confirm["phone"] + " to confirm your order. It won't go to the "
+                                 "kitchen until you call. ") if confirm else "") + (credit_note.get("message", "") + " " if credit_note.get("message") else "") + ("" if address_ok and cash else
                                 "Thanks! Waiting on payment. Your order has not gone to the "
                                 "kitchen yet. It goes as soon as your payment is marked paid." if address_ok else
                                 "We could not verify that address, so dispatch will confirm it shortly. "
@@ -3553,7 +3614,8 @@ def track(code):
 TRACK_FIELDS = ("code", "dispatch_status", "kitchen_status", "restaurant", "restaurant_nav", "address",
                 "scheduled_label", "needs_address_approval", "timeline", "timer_seconds",
                 "queue_position", "hold_reason", "miles", "subtotal", "fee", "service", "service_cents",
-                "tax", "tip", "total", "delivered_time", "lines", "uses_app", "manual_state")
+                "tax", "tip", "total", "delivered_time", "lines", "uses_app", "manual_state",
+                "gift", "reward", "due", "confirm_call")
 TRACK_AVG_MPH = 25.0       # town driving speed used for the customer's rough arrival time
 TRACK_FIX_FRESH_MIN = 10   # an older GPS fix is not shown to the customer
 ETA_STOP_MIN = 5           # minutes added for each stop a driver makes before this one
@@ -3786,6 +3848,7 @@ def api_track(code):
     if not o:
         return jsonify({"ok": False}), 404
     pp_sweep()
+    credit_sweep()
     o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
     return jsonify({"ok": True, "order": track_payload(o), "pay": pp_info(o)})
 
@@ -4266,6 +4329,7 @@ def api_board():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     auto_assign()   # safety net: anything an earlier event missed is placed on the next refresh
+    credit_sweep()
     pp_sweep()      # charge delivered PayPal/Venmo orders once the tip window is over
     payout_sweep()  # update driver pay that is still going through PayPal
     auto_driver_pay_sweep()  # pay drivers for delivered trips when auto pay is on
@@ -4631,7 +4695,7 @@ def api_send_kitchen():
         return jsonify({"ok": False, "error": "This is a future order. It comes to the board for sending at its release time."}), 400
     if not o["address_ok"]:
         return jsonify({"ok": False, "error": "Approve the address first."}), 400
-    db().execute("UPDATE orders SET kitchen_go=1 WHERE id=?", (o["id"],))
+    db().execute("UPDATE orders SET kitchen_go=1, confirm_state=CASE WHEN confirm_state='waiting' THEN 'confirmed' ELSE confirm_state END WHERE id=?", (o["id"],))
     if o["kitchen_status"] == "waiting":
         db().execute("""UPDATE orders SET kitchen_status='pending',
                         hold_reason=CASE WHEN dispatch_status IN ('held','queued') THEN 'waiting on kitchen' ELSE hold_reason END
@@ -5386,10 +5450,10 @@ def api_gps_traccar():
             and -90 <= x[0] <= 90 and -180 <= x[1] <= 180 and (x[2] is None or x[2] <= 1000)]
     if not good:
         return jsonify({"ok": False, "error": "no usable fix"})
-    db().execute("UPDATE drivers SET last_bg_at=? WHERE id=?", (now(), d["id"]))
     if d["status"] == "offline" or not (d["active"] if "active" in d.keys() and d["active"] is not None else 1):
-        db().commit()
+        # Off shift means no tracking: nothing from this fix is saved, logged, or shown.
         return jsonify({"ok": True, "tracking": False})
+    db().execute("UPDATE drivers SET last_bg_at=? WHERE id=?", (now(), d["id"]))
     lat, lng, acc, ts = max(good, key=lambda x: x[3] or dt.datetime.now())
     t = ts if ts and ts <= dt.datetime.now() else dt.datetime.now()
     if d["last_loc_at"]:
@@ -7296,6 +7360,32 @@ def dispatch_settings():
         return redirect(url_for("dispatch_login"))
     saved = False
     if request.method == "POST":
+        if "site_present" in request.form:
+            for _k, _n in (("business_email", 120), ("home_headline", 120), ("social_x", 200),
+                           ("social_facebook", 200), ("social_instagram", 200), ("faq_text", 12000)):
+                _v = (request.form.get(_k) or "").strip()[:_n]
+                if _k.startswith("social_") and _v and not _v.startswith("http"):
+                    _v = "https://" + _v
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, _v))
+        if "loyalty_present" in request.form:
+            def _num(k, lo, hi, mult=1):
+                try:
+                    v = int(round(float((request.form.get(k) or "").replace("$", "")) * mult))
+                except ValueError:
+                    return None
+                return v if lo <= v <= hi else None
+            _vals = {"loyalty_on": "1" if request.form.get("loyalty_on") else "0",
+                     "confirm_call": "1" if request.form.get("confirm_call") else "0"}
+            for _k, _sk, _lo, _hi, _m in (("points_per_dollar", "points_per_dollar", 0, 20, 1),
+                                          ("reward_points", "reward_points", 10, 10000, 1),
+                                          ("reward_value", "reward_value_cents", 50, 10000, 100),
+                                          ("gift_min", "gift_min_cents", 100, 50000, 100),
+                                          ("gift_max", "gift_max_cents", 500, 200000, 100)):
+                _v = _num(_k, _lo, _hi, _m)
+                if _v is not None:
+                    _vals[_sk] = str(_v)
+            for _k, _v in _vals.items():
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, _v))
         for _k in ("kitchen_accept_min", "driver_accept_min", "late_sound_after_min"):
             if _k in request.form:
                 try:
@@ -8808,6 +8898,16 @@ def inject_portal():
                "biz_tel": tel_digits(_d),
                "tax_bp": setting("tax_rate_bp") or 0, "service_bp": setting("service_fee_bp") or 0,
                "logo_url": logo_url()}
+        _cp = current_portal()
+        if not _cp:
+            biz.update({"biz_email": (setting("business_email", str) or "").strip(),
+                        "biz_hours": business_hours_label(None) or "",
+                        "home_headline": (setting("home_headline", str) or "").strip(),
+                        "socials": [(k, (setting("social_" + k, str) or "").strip()) for k in ("x", "facebook", "instagram")
+                                    if (setting("social_" + k, str) or "").strip().startswith("http")],
+                        "year": dt.date.today().year})
+        elif _cp == "dispatch" and session.get("dispatcher_id"):
+            biz["app_new"] = new_application_count()
     except Exception:
         biz = {"biz_name": "Fleet Delivery", "biz_address": "", "biz_phone": "", "biz_tel": "",
                "tax_bp": 900, "service_bp": 0, "logo_url": DEFAULT_LOGO}
@@ -9251,6 +9351,1005 @@ def api_alert_clear():
         db().execute("UPDATE call_alerts SET cleared_at=? WHERE cleared_at IS NULL", (now(),))
     db().commit()
     return jsonify({"ok": True, "alerts": open_call_alerts()})
+
+
+# ---------------------------------------------------------------- customer accounts, rewards, gift cards
+# Customers can make an account (phone + password) to earn rewards points and keep cards on file.
+# Cards on file live in PayPal's vault: the site only keeps the brand, last 4 and PayPal's token.
+from werkzeug.security import generate_password_hash, check_password_hash
+
+GIFT_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
+
+def _okeys(o):
+    try:
+        return o.keys()
+    except Exception:
+        return []
+
+def credits_cents(o):
+    k = _okeys(o)
+    g = int(o["gift_cents"] or 0) if "gift_cents" in k else 0
+    r = int(o["reward_cents"] or 0) if "reward_cents" in k else 0
+    return g + r
+
+def due_cents(o):
+    """What the customer still pays after gift cards and rewards."""
+    return max(0, int(o["total_cents"] or 0) - credits_cents(o))
+
+def phone_digits(p):
+    d = "".join(ch for ch in str(p or "") if ch.isdigit())
+    return d[1:] if (len(d) == 11 and d.startswith("1")) else d
+
+def current_customer():
+    cid = session.get("customer_id")
+    if not cid:
+        return None
+    return db().execute("SELECT * FROM customers WHERE id=?", (cid,)).fetchone()
+
+def loyalty_on():
+    return bool(setting("loyalty_on"))
+
+def reward_rules():
+    return {"on": loyalty_on(), "per_dollar": max(0, setting("points_per_dollar") or 0),
+            "points": max(1, setting("reward_points") or 100),
+            "value_cents": max(0, setting("reward_value_cents") or 0)}
+
+def rewards_available(points):
+    rr = reward_rules()
+    return (int(points or 0) // rr["points"]) if rr["on"] and rr["value_cents"] > 0 else 0
+
+def customer_public(c):
+    if not c:
+        return None
+    rr = reward_rules()
+    cards = db().execute("SELECT id, brand, last4, expiry FROM saved_cards WHERE customer_id=? ORDER BY id DESC",
+                         (c["id"],)).fetchall()
+    pts = int(c["points"] or 0)
+    return {"id": c["id"], "name": c["name"] or "", "phone": nice_phone(c["phone"]), "email": c["email"] or "",
+            "address": c["address"] or "", "existing": bool(c["verified"]),
+            "points": pts, "rewards": rewards_available(pts), "reward_value": money(rr["value_cents"]),
+            "reward_points": rr["points"], "loyalty_on": rr["on"],
+            "next_reward_in": (rr["points"] - (pts % rr["points"])) if rr["on"] else 0,
+            "cards": [{"id": x["id"], "label": (x["brand"] or "Card").title() + " ending " + (x["last4"] or "????"),
+                       "expiry": x["expiry"] or ""} for x in cards]}
+
+def gift_norm(code):
+    return "".join(ch for ch in str(code or "").upper() if ch.isalnum())
+
+def gift_find(code):
+    n = gift_norm(code)
+    if len(n) < 8:
+        return None
+    for g in db().execute("SELECT * FROM gift_cards WHERE status IN ('active','used','void')").fetchall():
+        if gift_norm(g["code"]) == n:
+            return g
+    return None
+
+def gift_new_code():
+    while True:
+        raw = "".join(secrets.choice(GIFT_ALPHABET) for _ in range(12))
+        code = "FD-" + raw[:4] + "-" + raw[4:8] + "-" + raw[8:]
+        if not db().execute("SELECT 1 FROM gift_cards WHERE code=?", (code,)).fetchone():
+            return code
+
+def gift_public(g, full=False):
+    out = {"code": g["code"] if full else ("FD-****-****-" + g["code"][-4:]), "balance": money(g["balance_cents"]),
+           "balance_cents": int(g["balance_cents"]), "initial": money(g["initial_cents"]), "status": g["status"]}
+    if full:
+        out.update({"id": g["id"], "buyer": g["buyer_name"] or "", "buyer_phone": nice_phone(g["buyer_phone"]),
+                    "to": g["to_name"] or "", "message": g["message"] or "", "sold_by": g["sold_by"] or "",
+                    "pay_method": (g["pay_method"] or "").replace("_", " "), "created": g["created_at"],
+                    "activated": g["activated_at"] or "",
+                    "history": [{"cents": t["cents"], "amount": money(abs(t["cents"])), "note": t["note"] or "",
+                                 "by": t["by_name"] or "", "at": t["created_at"]}
+                                for t in db().execute("SELECT * FROM gift_txns WHERE gift_card_id=? ORDER BY id DESC",
+                                                      (g["id"],)).fetchall()]})
+    return out
+
+def gift_move(g, cents, note, order_id=None, by=""):
+    """Change a gift card's balance (negative spends it). Returns the new balance."""
+    db().execute("INSERT INTO gift_txns (gift_card_id, order_id, cents, note, by_name, created_at) VALUES (?,?,?,?,?,?)",
+                 (g["id"], order_id, int(cents), note[:160], by[:60], now()))
+    nb = int(g["balance_cents"]) + int(cents)
+    db().execute("UPDATE gift_cards SET balance_cents=?, status=? WHERE id=?",
+                 (nb, ("void" if g["status"] == "void" else ("used" if nb <= 0 else "active")), g["id"]))
+    return nb
+
+def points_move(cid, pts, note, order_id=None):
+    db().execute("INSERT INTO points_log (customer_id, order_id, points, note, created_at) VALUES (?,?,?,?,?)",
+                 (cid, order_id, int(pts), note[:160], now()))
+    db().execute("UPDATE customers SET points=MAX(0, points+?) WHERE id=?", (int(pts), cid))
+
+def checkout_credits(payload, placed_by, dg, subtotal, total):
+    """Work out the rewards account, gift card, rewards and saved card for a new order (nothing is spent yet)."""
+    out = {"error": "", "customer_id": None, "gift_card_id": None, "gift_cents": 0, "reward_cents": 0,
+           "reward_points": 0, "saved_card": None, "save_card": False}
+    cust = None
+    if placed_by == "customer":
+        cust = current_customer()
+    elif placed_by == "dispatch" and dg:
+        cust = db().execute("SELECT * FROM customers WHERE phone=?", (phone_digits(dg),)).fetchone()
+    if placed_by == "dispatch" and payload.get("save_customer") and len(phone_digits(dg)) == 10:
+        if cust:
+            db().execute("UPDATE customers SET verified=1 WHERE id=?", (cust["id"],))
+        else:
+            cur = db().execute("""INSERT INTO customers (name, phone, address, verified, source, added_by, created_at)
+                                  VALUES (?,?,?,1,'dispatch',?,?)""",
+                               ((payload.get("customer_name") or "").strip()[:80], phone_digits(dg),
+                                (payload.get("address") or "").strip()[:200], session.get("dispatcher_name") or "dispatch", now()))
+            cust = db().execute("SELECT * FROM customers WHERE id=?", (cur.lastrowid,)).fetchone()
+        db().commit()
+    if cust:
+        out["customer_id"] = cust["id"]
+    left = int(total)
+    # rewards first (only against food), then the gift card
+    want = int(payload.get("redeem_rewards") or 0)
+    if want > 0:
+        if not cust:
+            return dict(out, error="Sign in to your rewards account to use rewards.")
+        rr = reward_rules()
+        have = rewards_available(cust["points"])
+        if want > have:
+            return dict(out, error="You have " + str(have) + " reward" + ("" if have == 1 else "s") + " available.")
+        cents = min(want * rr["value_cents"], int(subtotal), left)
+        out["reward_cents"], out["reward_points"] = cents, want * rr["points"]
+        left -= cents
+    if (payload.get("gift_code") or "").strip():
+        g = gift_find(payload.get("gift_code"))
+        if not g or g["status"] == "void":
+            return dict(out, error="That gift card number was not found.")
+        if int(g["balance_cents"]) <= 0:
+            return dict(out, error="That gift card has no balance left.")
+        out["gift_card_id"], out["gift_cents"] = g["id"], min(int(g["balance_cents"]), left)
+        left -= out["gift_cents"]
+    sid = payload.get("saved_card_id")
+    if sid and left > 0:
+        if not cust or placed_by != "customer":
+            return dict(out, error="Sign in to use a card on file.")
+        sc = db().execute("SELECT * FROM saved_cards WHERE id=? AND customer_id=?", (int(sid), cust["id"])).fetchone()
+        if not sc:
+            return dict(out, error="That saved card was not found. Pick another card.")
+        if not pp_enabled():
+            return dict(out, error="Cards on file are not available right now.")
+        out["saved_card"] = sc
+    out["save_card"] = bool(payload.get("save_card")) and bool(cust) and placed_by == "customer" and not out["saved_card"]
+    return out
+
+def confirm_needed(o):
+    return ("confirm_state" in _okeys(o)) and (o["confirm_state"] or "") == "waiting"
+
+def confirm_call_info(o):
+    if not o or not confirm_needed(o):
+        return None
+    ph = dispatch_phone(o["region_id"] if "region_id" in _okeys(o) else None)
+    if not ph:
+        return None
+    return {"phone": nice_phone(ph), "tel": tel_digits(ph)}
+
+def apply_checkout_credits(oid, code, cr, placed_by):
+    """Spend the gift card / rewards on the new order, charge a saved card, and set the confirm call."""
+    note = {"paid": False, "message": "", "gift": "", "rewards": "", "saved_card": ""}
+    who = session.get("dispatcher_name") or ("customer" if placed_by == "customer" else placed_by)
+    db().execute("""UPDATE orders SET customer_id=?, gift_card_id=?, gift_cents=?, reward_cents=?, reward_points=?,
+                    save_card=? WHERE id=?""", (cr["customer_id"], cr["gift_card_id"], cr["gift_cents"],
+                    cr["reward_cents"], cr["reward_points"], 1 if cr["save_card"] else 0, oid))
+    if cr["gift_cents"]:
+        g = db().execute("SELECT * FROM gift_cards WHERE id=?", (cr["gift_card_id"],)).fetchone()
+        nb = gift_move(g, -cr["gift_cents"], "Order " + code, oid, who)
+        note["gift"] = money(cr["gift_cents"]) + " from gift card (" + money(nb) + " left)"
+    if cr["reward_points"]:
+        points_move(cr["customer_id"], -cr["reward_points"], "Rewards used on " + code, oid)
+        note["rewards"] = money(cr["reward_cents"]) + " in rewards"
+    _o0 = db().execute("SELECT customer_phone, address FROM orders WHERE id=?", (oid,)).fetchone()
+    if placed_by == "customer" and cr["customer_id"] and _o0:
+        db().execute("UPDATE customers SET address=? WHERE id=?", (_o0["address"], cr["customer_id"]))
+    if placed_by == "customer" and setting("confirm_call") and dispatch_phone() and _o0 and customer_is_new(_o0["customer_phone"]):
+        db().execute("UPDATE orders SET confirm_state='waiting', kitchen_go=0 WHERE id=?", (oid,))
+        db().execute("UPDATE orders SET kitchen_status='waiting', kitchen_sent_at=NULL WHERE id=? AND kitchen_status='pending'", (oid,))
+    db().commit()
+    o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+    if (cr["gift_cents"] or cr["reward_cents"]) and due_cents(o) <= 0 and (o["payment_status"] or "") != "paid":
+        mark_paid(o, "gift_card" if cr["gift_cents"] else "rewards", "Covered by " + " + ".join(
+            x for x in (note["gift"] and "gift card", note["rewards"] and "rewards") if x), 0)
+        note["paid"] = True
+    elif cr["saved_card"]:
+        ok, msg = pp_charge_saved(o, cr["saved_card"])
+        note["paid"] = ok
+        note["saved_card"] = msg
+        if not ok:
+            note["message"] = msg
+    parts = [x for x in (note["gift"], note["rewards"]) if x]
+    if parts:
+        note["message"] = ("Applied " + " and ".join(parts) + ". " + note["message"]).strip()
+    return note
+
+def pp_vault_source(o):
+    """Ask PayPal to keep the card on file when a signed-in customer ticks Save this card."""
+    k = _okeys(o)
+    if not ("save_card" in k and o["save_card"] and o["customer_id"]):
+        return None
+    attrs = {"vault": {"store_in_vault": "ON_SUCCESS"}, "verification": {"method": "SCA_WHEN_REQUIRED"}}
+    c = db().execute("SELECT pp_customer_id FROM customers WHERE id=?", (o["customer_id"],)).fetchone()
+    if c and c["pp_customer_id"]:
+        attrs["customer"] = {"id": c["pp_customer_id"]}
+    return {"card": {"attributes": attrs}}
+
+def pp_keep_vaulted(o, j):
+    """After PayPal approves a card the customer asked us to save, keep PayPal's token (never the number)."""
+    try:
+        card = (j.get("payment_source") or {}).get("card") or {}
+        v = (card.get("attributes") or {}).get("vault") or {}
+        if not (v.get("id") and o["customer_id"]):
+            return None
+        db().execute("""INSERT OR IGNORE INTO saved_cards (customer_id, vault_id, brand, last4, expiry, created_at)
+                        VALUES (?,?,?,?,?,?)""", (o["customer_id"], v["id"], (card.get("brand") or "card").lower(),
+                        card.get("last_digits") or "", card.get("expiry") or "", now()))
+        pc = (v.get("customer") or {}).get("id")
+        if pc:
+            db().execute("UPDATE customers SET pp_customer_id=? WHERE id=? AND pp_customer_id IS NULL", (pc, o["customer_id"]))
+        db().commit()
+        return {"brand": card.get("brand") or "Card", "last4": card.get("last_digits") or ""}
+    except Exception:
+        return None
+
+def pp_charge_saved(o, sc):
+    """Put the hold on a card the customer keeps on file (same hold-then-charge-after-delivery as checkout)."""
+    cents = due_cents(o)
+    st, j = pp_api("POST", "/v2/checkout/orders", {
+        "intent": "AUTHORIZE",
+        "purchase_units": [{"reference_id": o["code"], "custom_id": o["code"], "description": "Delivery order " + o["code"],
+                            "amount": pp_money(cents)}],
+        "payment_source": {"card": {"vault_id": sc["vault_id"]}}}, request_id="saved-" + o["code"])
+    auth = (((j.get("purchase_units") or [{}])[0].get("payments") or {}).get("authorizations") or [{}])[0]
+    if st not in (200, 201) or auth.get("status") not in ("CREATED", "PENDING") or not auth.get("id"):
+        log("payment", o["code"] + " card on file declined: " + pp_err(j, "declined"))
+        return False, "Your card on file didn't go through. Finish paying with another card on the next page."
+    db().execute("""UPDATE orders SET pp_order_id=?, pp_auth_id=?, pp_auth_cents=?, pp_state='authorized',
+                    pp_source='card', pp_error=NULL, pp_auth_at=? WHERE id=?""",
+                 (j.get("id"), auth["id"], cents, now(), o["id"]))
+    db().commit()
+    o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
+    mark_paid(o, "card_paypal", auth["id"], cents)
+    return True, (sc["brand"] or "Card").title() + " ending " + (sc["last4"] or "") + " charged after delivery."
+
+def credit_sweep():
+    """Give rewards points for delivered orders; put gift card money and points back on cancelled orders."""
+    if loyalty_on():
+        rr = reward_rules()
+        for o in db().execute("""SELECT * FROM orders WHERE dispatch_status='delivered' AND customer_id IS NOT NULL
+                                 AND points_awarded IS NULL""").fetchall():
+            pts = (int(o["subtotal_cents"] or 0) - int(o["reward_cents"] or 0)) // 100 * rr["per_dollar"]
+            db().execute("UPDATE orders SET points_awarded=? WHERE id=?", (max(0, pts), o["id"]))
+            if pts > 0:
+                points_move(o["customer_id"], pts, "Earned on " + o["code"], o["id"])
+    for o in db().execute("""SELECT * FROM orders WHERE dispatch_status='cancelled' AND credits_settled=0
+                             AND (gift_cents>0 OR reward_points>0)""").fetchall():
+        if o["gift_cents"] and o["gift_card_id"]:
+            g = db().execute("SELECT * FROM gift_cards WHERE id=?", (o["gift_card_id"],)).fetchone()
+            if g:
+                gift_move(g, o["gift_cents"], "Returned, " + o["code"] + " cancelled", o["id"], "system")
+        if o["reward_points"] and o["customer_id"]:
+            points_move(o["customer_id"], o["reward_points"], "Returned, " + o["code"] + " cancelled", o["id"])
+        db().execute("UPDATE orders SET credits_settled=1 WHERE id=?", (o["id"],))
+    db().commit()
+
+
+# ---- customer account pages
+@app.route("/account/login", methods=["GET", "POST"])
+def account_login():
+    err, mode = "", request.args.get("mode", "login")
+    nxt = request.args.get("next") or request.form.get("next") or "/account"
+    if not nxt.startswith("/") or nxt.startswith("//"):
+        nxt = "/account"
+    if request.method == "POST":
+        mode = request.form.get("mode", "login")
+        ph = phone_digits(request.form.get("phone"))
+        pw = request.form.get("password") or ""
+        fails = session.get("cust_fails", 0)
+        if fails >= 8:
+            err = "Too many tries. Close the page and try again in a few minutes."
+        elif len(ph) != 10:
+            err = "Enter your 10 digit phone number."
+        elif mode == "signup":
+            name = (request.form.get("name") or "").strip()[:80]
+            email = (request.form.get("email") or "").strip()[:120]
+            if len(pw) < 6:
+                err = "Pick a password with at least 6 characters."
+            elif not name:
+                err = "Enter your name."
+            elif db().execute("SELECT 1 FROM customers WHERE phone=? AND pw_hash IS NOT NULL", (ph,)).fetchone():
+                err = "That phone number already has an account. Sign in instead."
+                mode = "login"
+            elif db().execute("SELECT 1 FROM customers WHERE phone=?", (ph,)).fetchone():
+                # dispatch already has this customer on file: turn it into an online account
+                c0 = db().execute("SELECT * FROM customers WHERE phone=?", (ph,)).fetchone()
+                db().execute("""UPDATE customers SET name=COALESCE(NULLIF(name,''), ?), email=COALESCE(NULLIF(?,''), email),
+                                pw_hash=?, last_login_at=? WHERE id=?""", (name, email, generate_password_hash(pw), now(), c0["id"]))
+                db().commit()
+                session["customer_id"] = c0["id"]
+                session.pop("cust_fails", None)
+                return redirect(nxt)
+            else:
+                cur = db().execute("""INSERT INTO customers (name, phone, email, pw_hash, created_at, last_login_at)
+                                      VALUES (?,?,?,?,?,?)""", (name, ph, email, generate_password_hash(pw), now(), now()))
+                db().commit()
+                session["customer_id"] = cur.lastrowid
+                session.pop("cust_fails", None)
+                return redirect(nxt)
+        else:
+            c = db().execute("SELECT * FROM customers WHERE phone=?", (ph,)).fetchone()
+            if c and c["pw_hash"] and check_password_hash(c["pw_hash"], pw):
+                session["customer_id"] = c["id"]
+                session.pop("cust_fails", None)
+                db().execute("UPDATE customers SET last_login_at=? WHERE id=?", (now(), c["id"]))
+                db().commit()
+                return redirect(nxt)
+            session["cust_fails"] = fails + 1
+            err = "That phone number and password don't match."
+    return render_template("account_login.html", err=err, mode=mode, nxt=nxt, rules=reward_rules(),
+                           reward_value=money(reward_rules()["value_cents"]))
+
+@app.route("/account/logout")
+def account_logout():
+    session.pop("customer_id", None)
+    return redirect("/")
+
+@app.route("/account")
+def account_page():
+    c = current_customer()
+    if not c:
+        return redirect("/account/login?next=/account")
+    orders = db().execute("""SELECT o.code, o.created_at, o.total_cents, o.dispatch_status, r.name AS rname
+                             FROM orders o LEFT JOIN restaurants r ON r.id=o.restaurant_id
+                             WHERE o.customer_id=? ORDER BY o.id DESC LIMIT 15""", (c["id"],)).fetchall()
+    log_rows = db().execute("SELECT * FROM points_log WHERE customer_id=? ORDER BY id DESC LIMIT 20", (c["id"],)).fetchall()
+    return render_template("account.html", me=customer_public(c), orders=orders, plog=log_rows, money=money)
+
+@app.get("/api/account/me")
+def api_account_me():
+    return jsonify({"ok": True, "me": customer_public(current_customer()), "rules": reward_rules(),
+                    "reward_value": money(reward_rules()["value_cents"]), "confirm_call": bool(setting("confirm_call")),
+                    "cards_on": pp_enabled()})
+
+@app.post("/api/account/card-delete")
+def api_account_card_delete():
+    c = current_customer()
+    if not c:
+        return jsonify({"ok": False, "error": "Sign in first."}), 403
+    sc = db().execute("SELECT * FROM saved_cards WHERE id=? AND customer_id=?",
+                      (int((request.get_json(force=True) or {}).get("id") or 0), c["id"])).fetchone()
+    if not sc:
+        return jsonify({"ok": False, "error": "Card not found."}), 404
+    try:
+        pp_api("DELETE", "/v3/vault/payment-tokens/" + sc["vault_id"])
+    except Exception:
+        pass
+    db().execute("DELETE FROM saved_cards WHERE id=?", (sc["id"],))
+    db().commit()
+    return jsonify({"ok": True, "me": customer_public(c)})
+
+@app.post("/api/account/update")
+def api_account_update():
+    c = current_customer()
+    if not c:
+        return jsonify({"ok": False, "error": "Sign in first."}), 403
+    b = request.get_json(force=True) or {}
+    name = (b.get("name") or c["name"] or "").strip()[:80]
+    email = (b.get("email") or "").strip()[:120]
+    if b.get("new_password"):
+        if not check_password_hash(c["pw_hash"], b.get("password") or ""):
+            return jsonify({"ok": False, "error": "Your current password is wrong."}), 400
+        if len(b["new_password"]) < 6:
+            return jsonify({"ok": False, "error": "Pick a password with at least 6 characters."}), 400
+        db().execute("UPDATE customers SET pw_hash=? WHERE id=?", (generate_password_hash(b["new_password"]), c["id"]))
+    db().execute("UPDATE customers SET name=?, email=? WHERE id=?", (name, email, c["id"]))
+    db().commit()
+    return jsonify({"ok": True})
+
+
+# ---- gift cards, website
+def gift_limits():
+    return max(100, setting("gift_min_cents") or 1000), max(500, setting("gift_max_cents") or 50000)
+
+@app.route("/gift-cards")
+def gift_cards_page():
+    lo, hi = gift_limits()
+    return render_template("gift.html", lo=lo // 100, hi=hi // 100, pp_on=pp_enabled(),
+                           pp_client=PAYPAL_CLIENT_ID, phone=nice_phone(dispatch_phone()),
+                           me=customer_public(current_customer()))
+
+@app.post("/api/gift/start")
+def api_gift_start():
+    b = request.get_json(force=True) or {}
+    lo, hi = gift_limits()
+    try:
+        cents = int(round(float(b.get("amount") or 0) * 100))
+    except Exception:
+        cents = 0
+    if cents < lo or cents > hi:
+        return jsonify({"ok": False, "error": "Pick an amount from " + money(lo) + " to " + money(hi) + "."}), 400
+    name = (b.get("buyer_name") or "").strip()[:80]
+    ph = phone_digits(b.get("buyer_phone"))
+    if not name or len(ph) != 10:
+        return jsonify({"ok": False, "error": "Enter your name and 10 digit phone number."}), 400
+    if not pp_enabled():
+        return jsonify({"ok": False, "error": "Online gift card sales are off right now. Call dispatch to buy one."}), 400
+    ref = secrets.token_urlsafe(10)
+    c = current_customer()
+    db().execute("""INSERT INTO gift_cards (code, ref, initial_cents, balance_cents, buyer_name, buyer_phone, buyer_email,
+                    to_name, message, status, sold_by, customer_id, created_at) VALUES (?,?,?,0,?,?,?,?,?,'pending','website',?,?)""",
+                 ("PENDING-" + ref, ref, cents, name, ph, (b.get("buyer_email") or "").strip()[:120],
+                  (b.get("to_name") or "").strip()[:80], (b.get("message") or "").strip()[:240], c["id"] if c else None, now()))
+    db().commit()
+    return jsonify({"ok": True, "ref": ref, "amount": money(cents)})
+
+def _gift_by_ref(ref):
+    return db().execute("SELECT * FROM gift_cards WHERE ref=?", ((ref or "").strip(),)).fetchone()
+
+def gift_activate(g, method, pay_ref, by):
+    code = gift_new_code()
+    db().execute("""UPDATE gift_cards SET code=?, status='active', balance_cents=0, pay_method=?, pay_ref=?,
+                    activated_at=?, sold_by=COALESCE(NULLIF(?,''), sold_by) WHERE id=?""",
+                 (code, method, pay_ref, now(), by, g["id"]))
+    g = db().execute("SELECT * FROM gift_cards WHERE id=?", (g["id"],)).fetchone()
+    gift_move(g, g["initial_cents"], "Bought (" + method.replace("_", " ") + ")", None, by or "website")
+    db().commit()
+    log("payment", "Gift card " + code[-4:] + " sold, " + money(g["initial_cents"]) + " (" + method.replace("_", " ") + ")")
+    return db().execute("SELECT * FROM gift_cards WHERE id=?", (g["id"],)).fetchone()
+
+@app.post("/api/gift/pp-create")
+def api_gift_pp_create():
+    g = _gift_by_ref((request.get_json(force=True) or {}).get("ref"))
+    if not g or g["status"] != "pending":
+        return jsonify({"ok": False, "error": "That gift card is already paid or was not found."}), 400
+    st, j = pp_api("POST", "/v2/checkout/orders", {
+        "intent": "CAPTURE",
+        "purchase_units": [{"reference_id": "GIFT-" + g["ref"], "custom_id": "GIFT-" + g["ref"],
+                            "description": "Gift card " + money(g["initial_cents"]), "amount": pp_money(g["initial_cents"])}],
+        "application_context": {"shipping_preference": "NO_SHIPPING", "user_action": "PAY_NOW",
+                                "brand_name": (setting("business_name", str) or "Fleet Delivery")[:120]}})
+    if st not in (200, 201) or not j.get("id"):
+        return jsonify({"ok": False, "error": pp_err(j, "PayPal could not start the payment.")}), 400
+    db().execute("UPDATE gift_cards SET pp_order_id=? WHERE id=?", (j["id"], g["id"]))
+    db().commit()
+    return jsonify({"ok": True, "id": j["id"]})
+
+@app.post("/api/gift/pp-approve")
+def api_gift_pp_approve():
+    b = request.get_json(force=True) or {}
+    g = _gift_by_ref(b.get("ref"))
+    if not g:
+        return jsonify({"ok": False, "error": "Gift card not found."}), 404
+    if g["status"] != "pending":
+        return jsonify({"ok": True, "card": gift_public(g, True)})
+    if (b.get("id") or "") != (g["pp_order_id"] or ""):
+        return jsonify({"ok": False, "error": "That payment is for something else."}), 400
+    st, j = pp_api("POST", "/v2/checkout/orders/" + g["pp_order_id"] + "/capture", request_id="gift-" + g["pp_order_id"])
+    cap = (((j.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or [{}])[0]
+    if st not in (200, 201) or cap.get("status") not in ("COMPLETED", "PENDING"):
+        return jsonify({"ok": False, "error": pp_err(j, "The payment did not go through.")}), 400
+    src = next(iter(j.get("payment_source") or {"paypal": 1}))
+    g = gift_activate(g, "card_paypal" if src == "card" else src, cap.get("id", ""), "website")
+    return jsonify({"ok": True, "card": gift_public(g, True)})
+
+@app.route("/gift/<ref>")
+def gift_receipt(ref):
+    g = _gift_by_ref(ref)
+    if not g or g["status"] == "pending":
+        return redirect("/gift-cards")
+    return render_template("gift_card.html", g=gift_public(g, True), phone=nice_phone(dispatch_phone()))
+
+@app.post("/api/gift/balance")
+def api_gift_balance():
+    n = session.get("gift_checks", [])
+    n = [t for t in n if time.time() - t < 3600]
+    if len(n) >= 15:
+        return jsonify({"ok": False, "error": "Too many checks. Try again in an hour."}), 429
+    n.append(time.time())
+    session["gift_checks"] = n
+    g = gift_find((request.get_json(force=True) or {}).get("code"))
+    if not g or g["status"] == "void":
+        return jsonify({"ok": False, "error": "That gift card number was not found."}), 404
+    return jsonify({"ok": True, "card": gift_public(g)})
+
+
+# ---- gift cards and rewards, dispatch
+@app.route("/dispatch/gift-cards")
+def dispatch_gift_cards():
+    if not dispatcher_required():
+        return redirect("/dispatch/login")
+    lo, hi = gift_limits()
+    rows = db().execute("SELECT * FROM gift_cards WHERE status!='pending' ORDER BY id DESC LIMIT 100").fetchall()
+    return render_template("dispatch_gifts.html", cards=[gift_public(g, True) for g in rows], lo=lo // 100, hi=hi // 100,
+                           owner=is_owner(), pp_on=pp_enabled())
+
+@app.post("/api/dispatch/gift/sell")
+def api_dispatch_gift_sell():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    lo, hi = gift_limits()
+    try:
+        cents = int(round(float(b.get("amount") or 0) * 100))
+    except Exception:
+        cents = 0
+    if cents < lo or cents > hi:
+        return jsonify({"ok": False, "error": "Pick an amount from " + money(lo) + " to " + money(hi) + "."}), 400
+    method = b.get("method") or ""
+    if method not in ("cash", "card_terminal", "house_account", "comp", "link"):
+        return jsonify({"ok": False, "error": "Pick how they paid."}), 400
+    if method == "comp" and not is_owner():
+        return jsonify({"ok": False, "error": "Only an owner can give a free gift card."}), 403
+    if method == "link" and not pp_enabled():
+        return jsonify({"ok": False, "error": "PayPal is not set up, so a pay link can't be sent."}), 400
+    ph = phone_digits(b.get("buyer_phone"))
+    name = (b.get("buyer_name") or "").strip()[:80]
+    if not name or len(ph) != 10:
+        return jsonify({"ok": False, "error": "Enter the buyer's name and 10 digit phone number."}), 400
+    ref = secrets.token_urlsafe(10)
+    who = session.get("dispatcher_name") or "dispatch"
+    cust = db().execute("SELECT id FROM customers WHERE phone=?", (ph,)).fetchone()
+    db().execute("""INSERT INTO gift_cards (code, ref, initial_cents, balance_cents, buyer_name, buyer_phone, buyer_email,
+                    to_name, message, status, sold_by, customer_id, created_at) VALUES (?,?,?,0,?,?,?,?,?,'pending',?,?,?)""",
+                 ("PENDING-" + ref, ref, cents, name, ph, (b.get("buyer_email") or "").strip()[:120],
+                  (b.get("to_name") or "").strip()[:80], (b.get("message") or "").strip()[:240], who,
+                  cust["id"] if cust else None, now()))
+    db().commit()
+    g = _gift_by_ref(ref)
+    if method == "link":
+        return jsonify({"ok": True, "pending": True, "pay_link": request.host_url.rstrip("/") + "/gift-cards?pay=" + ref,
+                        "message": "Send this link to the buyer. The card number shows once they pay."})
+    g = gift_activate(g, method, (b.get("pay_ref") or "").strip()[:80], who)
+    return jsonify({"ok": True, "card": gift_public(g, True),
+                    "receipt": request.host_url.rstrip("/") + "/gift/" + ref})
+
+@app.post("/api/dispatch/gift/lookup")
+def api_dispatch_gift_lookup():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    g = gift_find((request.get_json(force=True) or {}).get("code"))
+    if not g:
+        return jsonify({"ok": False, "error": "That gift card number was not found."}), 404
+    return jsonify({"ok": True, "card": gift_public(g, True)})
+
+@app.post("/api/dispatch/gift/adjust")
+def api_dispatch_gift_adjust():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    if not is_owner():
+        return jsonify({"ok": False, "error": "Only an owner can change a gift card balance."}), 403
+    b = request.get_json(force=True) or {}
+    g = gift_find(b.get("code"))
+    if not g:
+        return jsonify({"ok": False, "error": "That gift card number was not found."}), 404
+    who = session.get("dispatcher_name") or "owner"
+    if b.get("void"):
+        if int(g["balance_cents"]) > 0:
+            gift_move(g, -int(g["balance_cents"]), "Voided", None, who)
+        db().execute("UPDATE gift_cards SET status='void' WHERE id=?", (g["id"],))
+    else:
+        try:
+            cents = int(round(float(b.get("amount") or 0) * 100))
+        except Exception:
+            cents = 0
+        if not cents or abs(cents) > 50000 or int(g["balance_cents"]) + cents < 0:
+            return jsonify({"ok": False, "error": "Enter an amount (use a minus sign to take money off)."}), 400
+        gift_move(g, cents, (b.get("note") or "Owner adjustment").strip()[:120], None, who)
+    db().commit()
+    return jsonify({"ok": True, "card": gift_public(gift_find(b.get("code")), True)})
+
+@app.get("/api/dispatch/customer-lookup")
+def api_dispatch_customer_lookup():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    ph = phone_digits(request.args.get("phone"))
+    c = db().execute("SELECT * FROM customers WHERE phone=?", (ph,)).fetchone() if len(ph) == 10 else None
+    if not c:
+        return jsonify({"ok": True, "found": False})
+    me = customer_public(c)
+    me.pop("cards", None)
+    return jsonify({"ok": True, "found": True, "customer": me})
+
+@app.post("/api/dispatch/confirm-call")
+def api_dispatch_confirm_call():
+    """The customer called in to confirm their online order: mark it confirmed (Send to kitchen still releases it)."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    o = db().execute("SELECT * FROM orders WHERE id=?", ((request.get_json(force=True) or {}).get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False}), 404
+    db().execute("UPDATE orders SET confirm_state='confirmed' WHERE id=?", (o["id"],))
+    db().execute("UPDATE customers SET verified=1 WHERE phone=?", (phone_digits(o["customer_phone"]),))
+    db().commit()
+    log("order", o["code"] + " confirmed by phone with " + (session.get("dispatcher_name") or "dispatch"))
+    return jsonify({"ok": True})
+
+
+
+# ---------------------------------------------------------------- new vs existing customers, customer list
+def customer_is_new(phone):
+    """A customer is existing once dispatch marks them existing or they have had an order delivered."""
+    ph = phone_digits(phone)
+    if len(ph) != 10:
+        return True
+    c = db().execute("SELECT verified FROM customers WHERE phone=?", (ph,)).fetchone()
+    if c and c["verified"]:
+        return False
+    for o in db().execute("SELECT customer_phone FROM orders WHERE dispatch_status='delivered' AND customer_phone LIKE ?",
+                          ("%" + ph[-4:],)).fetchall():
+        if phone_digits(o["customer_phone"]) == ph:
+            return False
+    return True
+
+def customer_row_public(c):
+    n = db().execute("SELECT COUNT(*) FROM orders WHERE customer_id=?", (c["id"],)).fetchone()[0]
+    return {"id": c["id"], "name": c["name"] or "", "phone": nice_phone(c["phone"]), "phone_digits": c["phone"] or "",
+            "email": c["email"] or "", "address": c["address"] or "", "notes": c["notes"] or "",
+            "existing": bool(c["verified"]) or not customer_is_new(c["phone"]), "marked_existing": bool(c["verified"]),
+            "online": bool(c["pw_hash"]), "points": int(c["points"] or 0), "orders": n,
+            "added": (c["created_at"] or "")[:10], "added_by": c["added_by"] or ("website" if c["pw_hash"] else "")}
+
+@app.route("/dispatch/customers")
+def dispatch_customers():
+    if not dispatcher_required():
+        return redirect("/dispatch/login")
+    return render_template("dispatch_customers.html")
+
+@app.get("/api/dispatch/customers")
+def api_dispatch_customers():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    q = (request.args.get("q") or "").strip()
+    if q:
+        dq = phone_digits(q)
+        rows = db().execute("""SELECT * FROM customers WHERE name LIKE ? OR (? != '' AND phone LIKE ?) OR address LIKE ?
+                               ORDER BY name LIMIT 200""", ("%" + q + "%", dq, "%" + dq + "%", "%" + q + "%")).fetchall()
+    else:
+        rows = db().execute("SELECT * FROM customers ORDER BY id DESC LIMIT 200").fetchall()
+    total = db().execute("SELECT COUNT(*) FROM customers").fetchone()[0]
+    return jsonify({"ok": True, "total": total, "customers": [customer_row_public(c) for c in rows]})
+
+@app.post("/api/dispatch/customer-save")
+def api_dispatch_customer_save():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    ph = phone_digits(b.get("phone"))
+    name = (b.get("name") or "").strip()[:80]
+    if len(ph) != 10:
+        return jsonify({"ok": False, "error": "Enter a 10 digit phone number."}), 400
+    if not name:
+        return jsonify({"ok": False, "error": "Enter the customer's name."}), 400
+    vals = (name, ph, (b.get("email") or "").strip()[:120], (b.get("address") or "").strip()[:200],
+            (b.get("notes") or "").strip()[:300], 1 if b.get("existing", True) else 0)
+    cid = b.get("id")
+    other = db().execute("SELECT * FROM customers WHERE phone=?", (ph,)).fetchone()
+    if cid:
+        c = db().execute("SELECT * FROM customers WHERE id=?", (int(cid),)).fetchone()
+        if not c:
+            return jsonify({"ok": False, "error": "Customer not found."}), 404
+        if other and other["id"] != c["id"]:
+            return jsonify({"ok": False, "error": "Another customer already has that phone number."}), 400
+        db().execute("UPDATE customers SET name=?, phone=?, email=?, address=?, notes=?, verified=? WHERE id=?", vals + (c["id"],))
+        msg = "Saved."
+    elif other:
+        db().execute("UPDATE customers SET name=?, phone=?, email=?, address=?, notes=?, verified=? WHERE id=?", vals + (other["id"],))
+        cid, msg = other["id"], "That number was already on file, so it was updated."
+    else:
+        cur = db().execute("""INSERT INTO customers (name, phone, email, address, notes, verified, source, added_by, created_at)
+                              VALUES (?,?,?,?,?,?,'dispatch',?,?)""", vals + (session.get("dispatcher_name") or "dispatch", now()))
+        cid, msg = cur.lastrowid, "Added."
+    db().commit()
+    log("customer", name + " saved to the customer list" + (" as existing" if vals[-1] else "") + " by " +
+        (session.get("dispatcher_name") or "dispatch"))
+    c = db().execute("SELECT * FROM customers WHERE id=?", (int(cid),)).fetchone()
+    return jsonify({"ok": True, "message": msg, "customer": customer_row_public(c)})
+
+
+# ---------------------------------------------------------------- customer website: home search, FAQ, apply to drive / partner
+DEFAULT_FAQ = """Q: How do I place an order?
+A: {business} is a marketing and technology company bringing customers and restaurants closer together. You can place an order now by picking one of the open restaurants on the home page, or call {phone} and one of our customer service representatives will help you place your order.
+
+Q: How long does it take for delivery?
+A: The average delivery time depends on how busy it is and the time of day, but it is usually 30 minutes to an hour for dinner deliveries. Avoid delays by scheduling your delivery ahead of time: choose Schedule for later when you check out. This is great for special occasions or surprise dinners.
+
+Q: What are my payment options?
+A: Credit or debit card, PayPal, cash, or a {business} gift card. Businesses can ask us about a house account. If you are paying with cash and have a bill larger than $20.00, you must either leave a note in your online order or tell us over the phone. We accept Visa, Mastercard, American Express and Discover.
+
+Q: Can I order from multiple restaurants?
+A: Because of our wide delivery range and number of restaurants, we no longer allow multiple restaurants on the same order. You can still place two separate orders from two restaurants. The order minimum and delivery fee apply to each order. You can leave us a comment after placing your first order letting us know it is part of a multiple order; this helps us coordinate your delivery. Your separate orders may be delivered by separate drivers, so we recommend splitting the tip or treating each order as though a different driver will handle it.
+
+Q: Can I cancel my order?
+A: Orders cannot be canceled once they have been placed with the restaurant. If you need to cancel or change an advance order, call {phone} and a manager will help you.
+
+Q: I have a problem with my order, what should I do?
+A: If there is any problem with your order, you must call us within 15 minutes of the order being delivered. We will confirm the mistake with the restaurant. Once we verify with the restaurant that the problem was on their end, we will either have your self-employed delivery professional re-deliver the missing or incorrect item or refund you the amount. We do not issue refunds for orders on our own. If you have an issue with your food, we will be happy to speak with the restaurant to help get you a refund. We are contractually obligated not to refund any orders without consent from the restaurant.
+"""
+
+def faq_items():
+    raw = (setting("faq_text", str) or "").strip() or DEFAULT_FAQ
+    ph = dispatch_phone()
+    rep_ = {"{business}": (setting("business_name", str) or "Fleet Delivery").strip(), "{phone}": nice_phone(ph) or "dispatch",
+            "{email}": (setting("business_email", str) or "").strip(), "{address}": (setting("business_address", str) or "").strip()}
+    items, q, a = [], None, []
+    for line in raw.splitlines() + ["Q:"]:
+        t = line.strip()
+        if t[:2].upper() == "Q:":
+            if q:
+                items.append({"q": q, "a": " ".join(a).strip()})
+            q, a = t[2:].strip(), []
+        elif t[:2].upper() == "A:":
+            a.append(t[2:].strip())
+        elif t and q is not None:
+            a.append(t)
+    for it in items:
+        for k, v in rep_.items():
+            it["q"], it["a"] = it["q"].replace(k, v), it["a"].replace(k, v)
+    return [it for it in items if it["q"]]
+
+@app.route("/faq")
+def faq_page():
+    return render_template("faq.html", faqs=faq_items())
+
+@app.post("/api/home-search")
+def api_home_search():
+    addr = ((request.get_json(force=True) or {}).get("address") or "").strip()
+    if len(addr) < 5:
+        return jsonify({"ok": False, "error": "Type your delivery address."}), 400
+    g = geocode(addr)
+    if not g.get("ok") or g.get("lat") is None:
+        return jsonify({"ok": False, "error": "We couldn't find that address. Add the city and ZIP and try again."}), 400
+    out = []
+    for r in db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' AND lat IS NOT NULL").fetchall():
+        miles = round(haversine_miles(r["lat"], r["lng"], g["lat"], g["lng"]) * ROAD_FACTOR, 1)
+        mx = delivery_rules(r)["max_miles"]
+        out.append({"slug": r["slug"], "miles": miles, "fee": money(fee_for_miles(miles)), "ok": (not mx) or miles <= mx})
+    return jsonify({"ok": True, "formatted": g.get("formatted") or addr, "restaurants": out,
+                    "count": len([x for x in out if x["ok"]])})
+
+CAR_MAKES = ["Acura", "Audi", "BMW", "Buick", "Cadillac", "Chevrolet", "Chrysler", "Dodge", "Fiat", "Ford", "Genesis",
+             "GMC", "Honda", "Hyundai", "Infiniti", "Jaguar", "Jeep", "Kia", "Land Rover", "Lexus", "Lincoln", "Mazda",
+             "Mercedes-Benz", "Mini", "Mitsubishi", "Nissan", "Pontiac", "Ram", "Saturn", "Scion", "Subaru", "Tesla",
+             "Toyota", "Volkswagen", "Volvo", "Other"]
+US_STATES = ["AL", "AK", "AZ", "AR", "CA", "CO", "CT", "DE", "DC", "FL", "GA", "HI", "ID", "IL", "IN", "IA", "KS", "KY",
+             "LA", "ME", "MD", "MA", "MI", "MN", "MS", "MO", "MT", "NE", "NV", "NH", "NJ", "NM", "NY", "NC", "ND", "OH",
+             "OK", "OR", "PA", "RI", "SC", "SD", "TN", "TX", "UT", "VT", "VA", "WA", "WV", "WI", "WY"]
+
+def _apply_rate_ok():
+    n = [t for t in session.get("apply_times", []) if time.time() - t < 3600]
+    if len(n) >= 5:
+        return False
+    n.append(time.time())
+    session["apply_times"] = n
+    return True
+
+def _phone3(f, key):
+    return phone_digits((f.get(key + "1", "") or "") + (f.get(key + "2", "") or "") + (f.get(key + "3", "") or "")
+                        or f.get(key, ""))
+
+def _region_choices():
+    return [{"id": g["id"], "name": g["name"]} for g in all_regions()]
+
+@app.route("/drive", methods=["GET", "POST"])
+def drive_apply():
+    f, errs, done = request.form, [], False
+    if request.method == "POST":
+        if f.get("website"):
+            return render_template("drive.html", done=True, errs=[], f={}, regions=_region_choices(), makes=CAR_MAKES)
+        ph = _phone3(f, "phone")
+        first, last = (f.get("first_name") or "").strip()[:60], (f.get("last_name") or "").strip()[:60]
+        if not first or not last:
+            errs.append("Enter your first and last name.")
+        try:
+            dob = dt.date.fromisoformat(f.get("dob") or "")
+            today = dt.date.today()
+            age = today.year - dob.year - ((today.month, today.day) < (dob.month, dob.day))
+            if age < 18:
+                errs.append("You must be at least 18 to drive with us.")
+            elif age > 100:
+                errs.append("Check your date of birth.")
+        except ValueError:
+            errs.append("Enter your date of birth.")
+        if len((f.get("address") or "").strip()) < 6:
+            errs.append("Enter your address.")
+        if "@" not in (f.get("email") or ""):
+            errs.append("Enter your email address.")
+        if len(ph) != 10:
+            errs.append("Enter your 10 digit phone number.")
+        try:
+            yr = int(f.get("car_year") or 0)
+        except ValueError:
+            yr = 0
+        if not (f.get("car_color") or "").strip() or not (1980 <= yr <= dt.date.today().year + 1) \
+                or not f.get("car_make") or not (f.get("car_model") or "").strip():
+            errs.append("Fill in your car's color, year, make and model.")
+        regs = f.getlist("regions")
+        if not regs:
+            errs.append("Pick the area you want to drive in, or Any area.")
+        if not errs and not _apply_rate_ok():
+            errs.append("Too many applications from this device. Try again later.")
+        if not errs:
+            rids = "any" if ("any" in regs or not regs) else ",".join(str(int(x)) for x in regs if x.isdigit())
+            data = {k: (f.get(k) or "").strip()[:120] for k in ("first_name", "last_name", "dob", "address", "email",
+                                                                   "car_color", "car_year", "car_make", "car_model", "note")}
+            db().execute("""INSERT INTO applications (kind, name, phone, email, region_ids, data, created_at)
+                            VALUES ('driver',?,?,?,?,?,?)""", (first + " " + last, ph, data["email"], rids, json.dumps(data), now()))
+            db().commit()
+            log("application", "New driver application: " + first + " " + last)
+            done = True
+    return render_template("drive.html", done=done, errs=errs, f=f, regions=_region_choices(), makes=CAR_MAKES)
+
+@app.route("/partner", methods=["GET", "POST"])
+def partner_apply():
+    f, errs, done = request.form, [], False
+    if request.method == "POST":
+        if f.get("website"):
+            return render_template("partner.html", done=True, errs=[], f={}, regions=_region_choices(), states=US_STATES)
+        ph, fax = _phone3(f, "phone"), _phone3(f, "fax")
+        need = {"rest_name": "the restaurant name", "rest_address": "the restaurant address", "rest_city": "the city",
+                "first_name": "your first name", "last_name": "your last name"}
+        for k, label in need.items():
+            if not (f.get(k) or "").strip():
+                errs.append("Enter " + label + ".")
+        if (f.get("rest_state") or "") not in US_STATES:
+            errs.append("Pick the state.")
+        zp = "".join(ch for ch in (f.get("rest_zip") or "") if ch.isdigit())
+        if len(zp) != 5:
+            errs.append("Enter the 5 digit ZIP code.")
+        if len(ph) != 10:
+            errs.append("Enter the restaurant's 10 digit phone number.")
+        if fax and len(fax) != 10:
+            errs.append("The fax number needs 10 digits, or leave it blank.")
+        if "@" not in (f.get("email") or ""):
+            errs.append("Enter your email address.")
+        if not f.get("region"):
+            errs.append("Pick the area the restaurant is in, or Not sure.")
+        if not errs and not _apply_rate_ok():
+            errs.append("Too many applications from this device. Try again later.")
+        if not errs:
+            reg = f.get("region")
+            rids = str(int(reg)) if reg.isdigit() else "any"
+            data = {k: (f.get(k) or "").strip()[:160] for k in ("rest_name", "rest_address", "rest_city", "rest_state",
+                                                                   "first_name", "last_name", "email", "note")}
+            data.update({"rest_zip": zp, "fax": fax})
+            db().execute("""INSERT INTO applications (kind, name, phone, email, region_ids, data, created_at)
+                            VALUES ('restaurant',?,?,?,?,?,?)""", (data["rest_name"], ph, data["email"], rids, json.dumps(data), now()))
+            db().commit()
+            log("application", "New restaurant application: " + data["rest_name"])
+            done = True
+    return render_template("partner.html", done=done, errs=errs, f=f, regions=_region_choices(), states=US_STATES)
+
+def _apps_visible():
+    rows = db().execute("SELECT * FROM applications ORDER BY id DESC LIMIT 500").fetchall()
+    if is_owner():
+        return rows
+    mine = {str(x) for x in dispatcher_region_ids(session.get("dispatcher_id"))}
+    return [a for a in rows if (a["region_ids"] or "any") == "any" or (mine & set((a["region_ids"] or "").split(",")))]
+
+def new_application_count():
+    try:
+        return len([a for a in _apps_visible() if a["status"] == "new"])
+    except Exception:
+        return 0
+
+@app.route("/dispatch/applications")
+def dispatch_applications():
+    if not dispatcher_required():
+        return redirect("/dispatch/login")
+    names = {str(g["id"]): g["name"] for g in all_regions()}
+    out = []
+    for a in _apps_visible():
+        d = json.loads(a["data"] or "{}")
+        rids = a["region_ids"] or "any"
+        out.append({"id": a["id"], "kind": a["kind"], "name": a["name"], "phone": nice_phone(a["phone"]),
+                    "tel": tel_digits(a["phone"]), "email": a["email"] or "", "status": a["status"], "notes": a["notes"] or "",
+                    "regions": "Any area" if rids == "any" else ", ".join(names.get(x, "Area " + x) for x in rids.split(",") if x),
+                    "created": (a["created_at"] or "").replace("T", " ")[:16], "updated_by": a["updated_by"] or "", "d": d})
+    return render_template("dispatch_applications.html", apps=out, kind=request.args.get("kind") or "driver")
+
+@app.post("/api/dispatch/application-update")
+def api_dispatch_application_update():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    a = next((x for x in _apps_visible() if x["id"] == int(b.get("id") or 0)), None)
+    if not a:
+        return jsonify({"ok": False, "error": "Application not found."}), 404
+    st = b.get("status") or a["status"]
+    if st not in ("new", "contacted", "approved", "declined"):
+        return jsonify({"ok": False, "error": "Pick a status."}), 400
+    db().execute("UPDATE applications SET status=?, notes=?, updated_at=?, updated_by=? WHERE id=?",
+                 (st, (b.get("notes") if b.get("notes") is not None else (a["notes"] or ""))[:500], now(),
+                  session.get("dispatcher_name") or "dispatch", a["id"]))
+    db().commit()
+    return jsonify({"ok": True})
+
+@app.post("/api/dispatch/application-delete")
+def api_dispatch_application_delete():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    if not is_owner():
+        return jsonify({"ok": False, "error": "Only an owner can delete an application."}), 403
+    db().execute("DELETE FROM applications WHERE id=?", (int((request.get_json(force=True) or {}).get("id") or 0),))
+    db().commit()
+    return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------- customer password reset
+# The customer gets a 6 digit code by text (when TWILIO_* is set) or from dispatch over the phone.
+def texting_on():
+    return bool(os.environ.get("TWILIO_SID") and os.environ.get("TWILIO_TOKEN") and os.environ.get("TWILIO_FROM"))
+
+def make_reset_code(c, minutes=15):
+    code = str(secrets.randbelow(900000) + 100000)
+    exp = (dt.datetime.now() + dt.timedelta(minutes=minutes)).isoformat(timespec="seconds")
+    db().execute("UPDATE customers SET reset_hash=?, reset_expires=?, reset_tries=0 WHERE id=?",
+                 (generate_password_hash(code), exp, c["id"]))
+    db().commit()
+    return code
+
+@app.route("/account/reset", methods=["GET", "POST"])
+def account_reset():
+    step, msg, err = request.form.get("step") or request.args.get("step") or "send", "", ""
+    ph = phone_digits(request.form.get("phone") or request.args.get("phone"))
+    biz = (setting("business_name", str) or "Fleet Delivery").strip()
+    if request.method == "POST" and step == "send":
+        sends = [t for t in session.get("reset_sends", []) if time.time() - t < 3600]
+        if len(ph) != 10:
+            err = "Enter your 10 digit phone number."
+        elif len(sends) >= 3:
+            err = "Too many codes asked for. Try again in an hour, or call dispatch."
+        else:
+            sends.append(time.time())
+            session["reset_sends"] = sends
+            c = db().execute("SELECT * FROM customers WHERE phone=?", (ph,)).fetchone()
+            if texting_on():
+                if c:
+                    send_text("+1" + ph, biz + " password reset code: " + make_reset_code(c) + ". It works for 15 minutes.")
+                msg = "If that number has an account, we just texted it a 6 digit code."
+            else:
+                msg = ("Call dispatch at " + (nice_phone(dispatch_phone()) or "our number") +
+                       " and they'll give you a reset code, then enter it below.")
+            step = "verify"
+    elif request.method == "POST" and step == "verify":
+        code = "".join(ch for ch in (request.form.get("code") or "") if ch.isdigit())
+        pw = request.form.get("password") or ""
+        c = db().execute("SELECT * FROM customers WHERE phone=?", (ph,)).fetchone() if len(ph) == 10 else None
+        if len(pw) < 6:
+            err = "Pick a password with at least 6 characters."
+        elif pw != (request.form.get("password2") or ""):
+            err = "The two passwords don't match."
+        elif not c or not c["reset_hash"] or (c["reset_expires"] or "") < now():
+            err = "That code has expired or is wrong. Ask for a new one."
+        elif int(c["reset_tries"] or 0) >= 5:
+            err = "Too many wrong tries. Ask for a new code."
+        elif not check_password_hash(c["reset_hash"], code):
+            db().execute("UPDATE customers SET reset_tries=reset_tries+1 WHERE id=?", (c["id"],))
+            db().commit()
+            err = "That code is wrong. Check it and try again."
+        else:
+            db().execute("""UPDATE customers SET pw_hash=?, reset_hash=NULL, reset_expires=NULL, reset_tries=0,
+                            last_login_at=? WHERE id=?""", (generate_password_hash(pw), now(), c["id"]))
+            db().commit()
+            session["customer_id"] = c["id"]
+            session.pop("cust_fails", None)
+            log("customer", (c["name"] or "Customer") + " reset their password")
+            return redirect("/account")
+    return render_template("account_reset.html", step=step, msg=msg, err=err, phone=nice_phone(ph) if ph else "",
+                           texting=texting_on())
+
+@app.post("/api/dispatch/customer-reset-code")
+def api_dispatch_customer_reset_code():
+    """Dispatch reads a reset code to a customer who called in (good for 30 minutes)."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    c = db().execute("SELECT * FROM customers WHERE id=?", (int((request.get_json(force=True) or {}).get("id") or 0),)).fetchone()
+    if not c:
+        return jsonify({"ok": False, "error": "Customer not found."}), 404
+    code = make_reset_code(c, 30)
+    log("customer", "Reset code made for " + (c["name"] or nice_phone(c["phone"])) + " by " + (session.get("dispatcher_name") or "dispatch"))
+    return jsonify({"ok": True, "code": code, "message": "Read this code to the customer. They go to " +
+                    request.host_url.rstrip("/") + "/account/reset?step=verify and enter it with their phone number. It works for 30 minutes."})
 
 
 if __name__ == "__main__":

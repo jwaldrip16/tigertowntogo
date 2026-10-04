@@ -1,0 +1,10 @@
+{% extends "base.html" %}{% block title %}Your gift card{% endblock %}{% block body %}
+<div class="panel" style="max-width:480px;margin:20px auto;text-align:center">
+  <p class="muted">{{ biz_name }} gift card{% if g.to %} for {{ g.to }}{% endif %}</p>
+  <p style="font-size:1.7em;letter-spacing:2px;margin:8px 0"><b>{{ g.code }}</b></p>
+  <p style="font-size:1.3em">Balance {{ g.balance }} <span class="muted small">of {{ g.initial }}</span></p>
+  {% if g.message %}<p><i>"{{ g.message }}"</i>{% if g.buyer %}<br><span class="small muted">from {{ g.buyer }}</span>{% endif %}</p>{% endif %}
+  <p class="small">Type this number in the Gift card box at checkout, or read it to dispatch{% if phone %} at {{ phone }}{% endif %} when you call in. Screenshot or bookmark this page to keep it.</p>
+  <a class="btn primary" href="/">Order food</a>
+</div>
+{% endblock %}

@@ -1,0 +1,32 @@
+{% extends "base.html" %}{% block title %}Partner with us{% endblock %}{% block body %}
+<div class="applybox">
+<h1 class="applytitle">Own a restaurant? Partner with us</h1>
+{% if done %}
+<div class="panel"><h2>Thanks, your application is in.</h2><p>We will contact you to discuss the details.{% if biz_phone %} Questions? Call <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>.{% endif %}</p></div>
+{% else %}
+<p>Are you ready to increase your revenue and expand your restaurant's customer base? Let {{ biz_name }} help. Partnering with us gives you access to a network of independent delivery drivers, and your restaurant gains extra exposure from our marketing to customers across the area.</p>
+<p>Just enter your information below to get started, and we will contact you to discuss the details!</p>
+{% for e in errs %}<p class="cc-err">{{ e }}</p>{% endfor %}
+<form method="post" class="applyform">
+  <input name="website" class="hp" tabindex="-1" autocomplete="off">
+  <label>Restaurant name</label><input name="rest_name" value="{{ f.get('rest_name','') }}" required>
+  <label>Restaurant address</label><input name="rest_address" value="{{ f.get('rest_address','') }}" required>
+  <label>Restaurant city</label><input name="rest_city" value="{{ f.get('rest_city','') }}" required>
+  <label>Restaurant state</label><select name="rest_state">{% for st in states %}<option {{ 'selected' if f.get('rest_state', 'AL') == st else '' }}>{{ st }}</option>{% endfor %}</select>
+  <label>Restaurant ZIP</label><input name="rest_zip" maxlength="10" inputmode="numeric" value="{{ f.get('rest_zip','') }}" required>
+  <label>Area</label><select name="region"><option value="">Pick one</option><option value="any" {{ 'selected' if f.get('region') == 'any' else '' }}>Not sure</option>
+    {% for g in regions %}<option value="{{ g.id }}" {{ 'selected' if f.get('region') == (g.id|string) else '' }}>{{ g.name }}</option>{% endfor %}</select>
+  <label>Restaurant phone number</label>
+  <div class="phone3">(<input name="phone1" maxlength="3" inputmode="numeric" value="{{ f.get('phone1','') }}">) <input name="phone2" maxlength="3" inputmode="numeric" value="{{ f.get('phone2','') }}"> - <input name="phone3" maxlength="4" inputmode="numeric" value="{{ f.get('phone3','') }}"></div>
+  <label>Restaurant fax number (optional)</label>
+  <div class="phone3">(<input name="fax1" maxlength="3" inputmode="numeric" value="{{ f.get('fax1','') }}">) <input name="fax2" maxlength="3" inputmode="numeric" value="{{ f.get('fax2','') }}"> - <input name="fax3" maxlength="4" inputmode="numeric" value="{{ f.get('fax3','') }}"></div>
+  <hr>
+  <label>Your first name</label><input name="first_name" value="{{ f.get('first_name','') }}" autocomplete="given-name" required>
+  <label>Your last name</label><input name="last_name" value="{{ f.get('last_name','') }}" autocomplete="family-name" required>
+  <label>Email address</label><input name="email" type="email" value="{{ f.get('email','') }}" autocomplete="email" required>
+  <label>Anything else? (optional)</label><textarea name="note" rows="2" maxlength="300">{{ f.get('note','') }}</textarea>
+  <button class="btn primary applybtn">Submit your application</button>
+</form>
+{% endif %}
+</div>
+{% endblock %}

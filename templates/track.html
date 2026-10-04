@@ -3,6 +3,7 @@
 <h1>Order {{ code }}</h1><p>We could not find that order code.</p>
 {% else %}
 <h1>Order {{ order.code }}</h1>
+<div class="panel" id="confirmBox" style="display:none;border-left:4px solid #E8590C"></div>
 <div class="panel" id="live"></div>
 <div class="panel mt" id="payBox" style="display:none"></div>
 {% endif %}
@@ -12,6 +13,13 @@
 <script src="/static/maptiles.js"></script>
 <script>
 const CODE = '{{ order.code }}';
+function drawConfirm(o){
+  const b = document.getElementById('confirmBox');
+  if(!o || !o.confirm_call){ b.style.display='none'; return; }
+  b.style.display='';
+  b.innerHTML = '<b>Please call dispatch to confirm your order.</b> It goes to the kitchen as soon as you call.<br>'+
+    '<a class="btn primary" style="margin-top:8px" href="tel:'+o.confirm_call.tel+'">Call '+o.confirm_call.phone+'</a>';
+}
 function drawPay(p, o){
   const box = document.getElementById('payBox');
   if(!p.enabled || (!p.can_pay && !p.tip_editable)){ box.style.display = 'none'; return; }
@@ -52,6 +60,7 @@ async function saveTip(){
 }
 async function tick(){
   const res = await jget('/api/track/'+CODE);
+  try { drawConfirm(res.order || res); } catch(e){}
   if(!res.ok) return;
   const o = res.order;
   try { drawPay(res.pay || {}, o); } catch(e) { console.log('pay box skipped', e); }

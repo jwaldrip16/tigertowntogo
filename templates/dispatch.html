@@ -1115,7 +1115,10 @@ function etaPill(o){
 }
 function srcPill(o){
   // customer placed it themselves on the website
-  if(o.source==='website') return '<span class="pill green" title="Customer ordered on the website">Web</span>';
+  if(o.source==='website') return '<span class="pill green" title="Customer ordered on the website">Web</span>'+
+    (o.confirm_waiting ? ' <span class="pill amber" title="The customer was asked to call and confirm">Waiting for confirm call</span> <button class="btn tiny" onclick="confirmCall('+o.id+')">Customer called</button>' : '')+
+    (o.rewards_member ? ' <span class="pill grey" title="Rewards member">Rewards</span>' : '')+
+    (o.gift ? ' <span class="pill grey">Gift card '+esc(o.gift)+'</span>' : '')+(o.reward ? ' <span class="pill grey">Rewards '+esc(o.reward)+'</span>' : '');
   return '<span class="pill grey">'+esc(o.source_label||'Call-in')+'</span>';
 }
 function kitchenGo(o){
@@ -1124,6 +1127,11 @@ function kitchenGo(o){
     '<button class="btn tiny primary" onclick="sendKitchen('+o.id+')">Release order</button>';
   return '<span class="pill amber">Not sent to kitchen</span>'+
     '<button class="btn tiny primary" onclick="sendKitchen('+o.id+')">Send to kitchen</button>';
+}
+async function confirmCall(id){
+  const r = await jpost('/api/dispatch/confirm-call', {order_id:id});
+  if(!r.ok){ alert(r.error||'Could not mark it.'); return; }
+  if(confirm('Marked confirmed. Send it to the kitchen now?')) sendKitchen(id); else if(typeof refresh==='function') refresh();
 }
 async function sendKitchen(id){
   const res = await jpost('/api/order/send-kitchen', {order_id:id});

@@ -50,7 +50,7 @@
       if (!document.body.contains(box)) return;
       const cf = pp.CardFields({
         createOrder: async function(){
-          const r = await jpost('/api/paypal/create', {code: o.code});
+          const r = await jpost('/api/paypal/create', {code: o.code, card: true});
           if (!r || !r.ok){ say((r && r.error) || 'Could not start the payment.', true); throw new Error('create'); }
           return r.id;
         },

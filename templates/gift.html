@@ -1,0 +1,51 @@
+{% extends "base.html" %}{% block title %}Gift cards{% endblock %}{% block body %}
+<h1>Gift cards</h1>
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr))">
+<div class="panel" id="buyBox">
+  <h2>Buy a gift card</h2>
+  <p class="muted small">Good for food, delivery fees and tips. Any amount from ${{ lo }} to ${{ hi }}. The card number shows here and on your receipt page as soon as you pay.</p>
+  <div class="row">{% for a in [15,25,50,100] %}{% if a >= lo and a <= hi %}<button class="btn tiny" onclick="amt.value={{ a }}">${{ a }}</button>{% endif %}{% endfor %}</div>
+  <label>Amount ($)</label><input id="amt" type="number" min="{{ lo }}" max="{{ hi }}" step="1" value="25">
+  <label>Your name</label><input id="bName" value="{{ me.name if me else '' }}">
+  <label>Your phone</label><input id="bPhone" type="tel" value="{{ me.phone if me else '' }}">
+  <label>Your email (optional)</label><input id="bEmail" type="email" value="{{ me.email if me else '' }}">
+  <label>Who it's for (optional)</label><input id="toName">
+  <label>Message (optional)</label><textarea id="gMsg" rows="2" maxlength="240"></textarea>
+  {% if pp_on %}<button class="btn primary" id="startBtn" onclick="startGift()">Continue to payment</button>
+  {% else %}<p><b>Online gift card sales are off right now.</b> Call dispatch{% if phone %} at {{ phone }}{% endif %} to buy one.</p>{% endif %}
+  <div id="payArea" style="display:none"><p id="payLine"></p><div id="ppButtons"></div></div>
+  <div id="gMsgOut" class="small"></div>
+</div>
+<div class="panel">
+  <h2>Check a balance</h2>
+  <input id="chk" placeholder="FD-XXXX-XXXX-XXXX"><button class="btn" onclick="checkBal()">Check</button>
+  <p id="balOut"></p>
+  <p class="small muted">To use a gift card, type its number in the Gift card box when you check out, or give it to dispatch when you call in.</p>
+</div>
+</div>
+{% endblock %}
+{% block scripts %}{% if pp_on %}<script src="https://www.paypal.com/sdk/js?client-id={{ pp_client }}&currency=USD&intent=capture&enable-funding=card&disable-funding=venmo&components=buttons"></script>{% endif %}
+<script>
+let REF = new URLSearchParams(location.search).get('pay') || '';
+function say(t,bad){ gMsgOut.textContent=t; gMsgOut.style.color = bad ? '#c0392b' : ''; }
+async function startGift(){
+  const r = await jpost('/api/gift/start',{amount:amt.value,buyer_name:bName.value,buyer_phone:bPhone.value,buyer_email:bEmail.value,to_name:toName.value,message:gMsg.value});
+  if(!r.ok){ say(r.error,true); return; }
+  REF = r.ref; showPay(r.amount);
+}
+function showPay(amount){
+  startBtn && (startBtn.style.display='none'); payArea.style.display='';
+  payLine.textContent = amount ? ('Pay '+amount+' to get your card number.') : 'Pay to get your card number.';
+  [paypal.FUNDING.CARD, paypal.FUNDING.PAYPAL].forEach(src=>{
+    const b = paypal.Buttons({fundingSource:src,
+      createOrder: async()=>{ const r = await jpost('/api/gift/pp-create',{ref:REF}); if(!r.ok){ say(r.error,true); throw new Error('x'); } return r.id; },
+      onApprove: async(d)=>{ say('Finishing...'); const r = await jpost('/api/gift/pp-approve',{ref:REF,id:d.orderID});
+        if(!r.ok){ say(r.error,true); return; } location = '/gift/'+REF; },
+      onError: ()=>say('The payment did not go through. Try again or call dispatch.',true)});
+    if(b.isEligible()){ const d=document.createElement('div'); d.style.margin='8px 0'; ppButtons.appendChild(d); b.render(d); }
+  });
+}
+async function checkBal(){ const r = await jpost('/api/gift/balance',{code:chk.value});
+  balOut.textContent = r.ok ? ('Balance: '+r.card.balance+(r.card.status==='used'?' (used up)':'')) : r.error; }
+if(REF && window.paypal) showPay('');
+</script>{% endblock %}
