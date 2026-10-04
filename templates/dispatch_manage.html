@@ -108,26 +108,56 @@ async function load(){
       '<button class="btn tiny" onclick="addItem('+r.id+')">Add item</button></div></div>';
   }).join('');
 
-  document.getElementById('drivers').innerHTML = res.drivers.map(d=>
-    '<div class="card pad"><div class="row between"><div><strong>'+d.name+'</strong> '+
+  document.getElementById('drivers').innerHTML = res.drivers.map(d=>{
+    const L = d.locked, dis = L ? ' disabled' : '';
+    const lockRow = res.owner ? '' : (L
+      ? '<div class="row"><span class="pill grey">Locked</span>'+
+        (d.unlock_block ? '<span class="muted small">'+esc(d.unlock_block)+'</span>'
+                        : '<button class="btn tiny" onclick="unlockDriver('+d.id+')">Unlock to edit</button>')+'</div>'
+      : '<div class="row"><span class="pill green">Unlocked</span><span class="muted small">Locks again after you save, or in 15 minutes.</span>'+
+        '<button class="btn tiny" onclick="lockDriver('+d.id+')">Lock</button></div>');
+    return '<div class="card pad"><div class="row between"><div><strong>'+esc(d.name)+'</strong> '+
     '<span class="pill '+(d.status==='online'?'green':(d.status==='break'?'amber':'grey'))+'">'+d.status+'</span>'+
-    '<div class="muted">'+d.active_orders+' live order(s)</div></div>'+
-    '<button class="btn tiny danger" onclick="delDriver('+d.id+",'"+d.name.replace(/'/g,"")+"'"+')">Delete</button></div>'+
-    '<div class="row"><input id="dn'+d.id+'" value="'+d.name+'">'+
-    '<input id="dp'+d.id+'" value="'+d.phone+'" placeholder="Phone">'+
-    '<input id="dk'+d.id+'" value="'+d.pin+'" placeholder="Password / PIN">'+
-    '<button class="btn tiny" onclick="saveDriver('+d.id+')">Save</button></div>'+
+    '<div class="muted">'+d.active_orders+' live order(s) &middot; '+esc(d.regions_label)+'</div></div>'+
+    (L ? '' : '<button class="btn tiny danger" onclick="delDriver('+d.id+",'"+d.name.replace(/'/g,"")+"'"+')">Delete</button>')+'</div>'+
+    lockRow+
+    '<div class="row"><input id="dn'+d.id+'" value="'+esc(d.name)+'"'+dis+'>'+
+    '<input id="dp'+d.id+'" value="'+esc(d.phone)+'" placeholder="Phone"'+dis+'>'+
+    '<input id="dk'+d.id+'" value="'+esc(d.pin)+'" placeholder="Password / PIN"'+dis+'>'+
+    (L ? '' : '<button class="btn tiny" onclick="saveDriver('+d.id+')">Save</button>')+'</div>'+
     '<div class="row"><span class="muted small">Pay this driver by</span>'+
-    '<select id="dw'+d.id+'"><option value="paypal"'+(d.payout_wallet!=='venmo'&&d.payout_wallet!=='bank'?' selected':'')+'>PayPal</option>'+
+    '<select id="dw'+d.id+'"'+dis+'><option value="paypal"'+(d.payout_wallet!=='venmo'&&d.payout_wallet!=='bank'?' selected':'')+'>PayPal</option>'+
     '<option value="venmo"'+(d.payout_wallet==='venmo'?' selected':'')+'>Venmo</option>'+
     '<option value="bank"'+(d.payout_wallet==='bank'?' selected':'')+'>Bank transfer</option></select>'+
-    '<input id="de'+d.id+'" value="'+(d.payout_email||'').replace(/"/g,'')+'" placeholder="PayPal email">'+
-    '<input id="dv'+d.id+'" value="'+(d.payout_phone||'')+'" placeholder="Venmo phone (blank = driver phone)"></div>'+
+    '<input id="de'+d.id+'" value="'+esc(d.payout_email||'')+'" placeholder="PayPal email"'+dis+'>'+
+    '<input id="dv'+d.id+'" value="'+esc(d.payout_phone||'')+'" placeholder="Venmo phone (blank = driver phone)"'+dis+'></div>'+
     '<div class="row"><span class="muted small">Bank (for your records)</span>'+
-    '<input id="dbn'+d.id+'" value="'+(d.bank_name||'').replace(/"/g,'')+'" placeholder="Bank name, like Regions" style="max-width:180px">'+
-    '<input id="dbl'+d.id+'" value="'+(d.bank_last4||'')+'" placeholder="Last 4 of account" maxlength="4" style="max-width:130px">'+
-    '<span class="muted small">Only the last 4. Never save full account or routing numbers here.</span></div></div>').join('');
+    '<input id="dbn'+d.id+'" value="'+esc(d.bank_name||'')+'" placeholder="Bank name, like Regions" style="max-width:180px"'+dis+'>'+
+    '<input id="dbl'+d.id+'" value="'+esc(d.bank_last4||'')+'" placeholder="Last 4 of account" maxlength="4" style="max-width:130px"'+dis+'>'+
+    '<span class="muted small">Only the last 4. Never save full account or routing numbers here.</span></div></div>';
+  }).join('');
 }
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function unlockDriver(id){
+  const old = document.getElementById('unlockModal'); if (old) old.remove();
+  const m = document.createElement('div'); m.id = 'unlockModal'; m.className = 'delmodal';
+  m.innerHTML = '<div class="delbox"><h3>Unlock driver</h3><p class="muted small">Enter your own dispatch username and password.</p>'+
+    '<input id="ulUser" placeholder="Username" autocomplete="username">'+
+    '<input id="ulPw" type="password" placeholder="Password" autocomplete="current-password">'+
+    '<div id="ulMsg" class="muted small"></div><div class="row">'+
+    '<button class="btn primary" id="ulGo">Unlock</button>'+
+    '<button class="btn" onclick="document.getElementById(\'unlockModal\').remove()">Cancel</button></div></div>';
+  document.body.appendChild(m);
+  document.getElementById('ulUser').focus();
+  document.getElementById('ulPw').addEventListener('keydown', e=>{ if (e.key==='Enter') document.getElementById('ulGo').click(); });
+  document.getElementById('ulGo').onclick = async ()=>{
+    const r = await jpost('/api/dispatch/driver-unlock', {driver_id:id,
+      username: document.getElementById('ulUser').value, password: document.getElementById('ulPw').value});
+    if (!r.ok){ document.getElementById('ulMsg').textContent = r.error || 'Could not unlock.'; document.getElementById('ulPw').value=''; return; }
+    m.remove(); load();
+  };
+}
+async function lockDriver(id){ await jpost('/api/dispatch/driver-unlock', {driver_id:id, op:'lock'}); load(); }
 
 async function addRest(){
   const res = await jpost('/api/dispatch/restaurant', {op:'create',

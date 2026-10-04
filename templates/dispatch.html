@@ -251,9 +251,10 @@ function deleteOrders(ids, code){
     let t = j.deleted.length ? 'Deleted ' + j.deleted.join(', ') + '.' : 'Nothing was deleted.';
     j.skipped.forEach(x=>{ t += ' Kept ' + x.code + ': ' + x.why; });
     if (j.missing.length) t += ' Not found: ' + j.missing.join(', ') + '.';
-    msg.textContent = t;
-    document.getElementById('delPw').value = '';
+    const box = document.getElementById('delModal'); if (box) box.remove();
+    ffToast(t);
     if (typeof refresh === 'function') refresh();
+    if (typeof board === 'function') board(true);
   };
 }
 function clearFlash(){
@@ -798,15 +799,37 @@ function drawRegionBar(res){
   lab.textContent = SHOW_ALL_REGIONS ? 'Showing every region' : 'Your regions: ' + res.regions_label;
   b.textContent = SHOW_ALL_REGIONS ? 'Back to my regions' : 'Show all regions';
 }
-let MYRG = null;
+function ffToast(msg){
+  let el = document.getElementById('ffToast');
+  if (!el){ el = document.createElement('div'); el.id = 'ffToast'; el.className = 'fftoast'; document.body.appendChild(el); }
+  el.textContent = msg; el.style.display = 'block';
+  clearTimeout(el._t); el._t = setTimeout(()=>{ el.style.display = 'none'; }, 6000);
+}
+let MYRG = null, MYRG_BUSY = false;
 async function drawMyRegions(){
-  const box = document.getElementById('myRg'); if(!box) return;
+  const box = document.getElementById('myRg'); if(!box || MYRG_BUSY) return;
   if (!MYRG){ try { MYRG = await jget('/api/regions-list'); } catch(e){ return; } }
-  if (!MYRG || !MYRG.ok || !MYRG.regions.length){ box.innerHTML = ''; return; }
-  box.innerHTML = '<span class="muted small">I\'m working:</span>' + MYRG.regions.map(r=>
-    '<label class="rgchip"><input type="checkbox" class="myrgbox" value="'+r.id+'"'+(MYRG.mine.includes(r.id)?' checked':'')+
-    ' onchange="saveMyRegions()"> '+fEsc(r.name)+'</label>').join('') +
-    '<span class="muted small">'+(MYRG.mine.length?'':'none checked = every region')+'</span>';
+  if (!MYRG || !MYRG.ok){ box.innerHTML = ''; return; }
+  const del = r => MYRG.owner ? '<button class="rgx" title="Delete this region" onclick="delMyRegion('+r.id+')">&times;</button>' : '';
+  if (MYRG.today_allowed && MYRG.today_allowed.length){
+    // They have availability with regions today: they pick one, some, or all of those.
+    box.innerHTML = '<span class="muted small">Today I\'m working:</span>' + MYRG.today_allowed.map(r=>
+      '<label class="rgchip"><input type="checkbox" class="myrgbox" value="'+r.id+'"'+(MYRG.today_pick.includes(r.id)?' checked':'')+
+      ' onchange="saveTodayRegions()"> '+fEsc(r.name)+'</label>'+del(r)).join('') +
+      '<span class="muted small">'+(MYRG.today_pick.length?'':'none checked = every region on your availability today')+'</span>';
+    return;
+  }
+  if (MYRG.owner){
+    if (!MYRG.regions.length){ box.innerHTML = ''; return; }
+    box.innerHTML = '<span class="muted small">I\'m working:</span>' + MYRG.regions.map(r=>
+      '<label class="rgchip"><input type="checkbox" class="myrgbox" value="'+r.id+'"'+(MYRG.mine.includes(r.id)?' checked':'')+
+      ' onchange="saveMyRegions()"> '+fEsc(r.name)+'</label>'+del(r)).join('') +
+      '<span class="muted small">'+(MYRG.mine.length?'':'none checked = every region')+'</span>';
+    return;
+  }
+  const mine = MYRG.regions.filter(r=>MYRG.mine.includes(r.id)).map(r=>r.name);
+  box.innerHTML = '<span class="muted small">Your regions: '+fEsc(mine.length?mine.join(', '):'every region')+
+    '. Add availability with regions for today to pick which ones you work.</span>';
 }
 async function saveMyRegions(){
   const vals = Array.from(document.querySelectorAll('.myrgbox:checked')).map(b=>+b.value);
@@ -814,7 +837,24 @@ async function saveMyRegions(){
   if (!r.ok){ alert(r.error||'That did not save.'); }
   MYRG = null; await drawMyRegions(); board(true);
 }
+async function saveTodayRegions(){
+  const vals = Array.from(document.querySelectorAll('.myrgbox:checked')).map(b=>+b.value);
+  const r = await jpost('/api/day-regions', {regions:vals});
+  if (!r.ok){ alert(r.error||'That did not save.'); }
+  MYRG = null; await drawMyRegions(); board(true);
+}
+async function delMyRegion(id){
+  const r = (MYRG.regions.concat(MYRG.today_allowed||[])).find(x=>x.id===id);
+  if (!r || !confirm('Delete '+r.name+'? Its restaurants go to No region, and drivers and dispatchers lose it.')) return;
+  MYRG_BUSY = true;
+  const res = await jpost('/api/dispatch/regions', {op:'delete_region', id:id});
+  MYRG_BUSY = false;
+  if (!res.ok){ alert(res.error||'Could not delete that region.'); }
+  else ffToast('Deleted region '+r.name+'.');
+  MYRG = null; await drawMyRegions(); board(true);
+}
 drawMyRegions();
+setInterval(()=>{ if (!document.querySelector('#myRg input:focus')){ MYRG = null; drawMyRegions(); } }, 20000);
 function toggleAllRegions(){ SHOW_ALL_REGIONS = !SHOW_ALL_REGIONS; board(true); }
 function fEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function findAny(){

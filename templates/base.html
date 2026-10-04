@@ -5,6 +5,15 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 <link rel="icon" type="image/png" href="/brand/icon-32.png">
 <link rel="apple-touch-icon" href="/brand/icon-180.png">
+<script>
+async function jpost(url, data){
+  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
+                             body: JSON.stringify(data||{})});
+  return r.json();
+}
+async function jget(url){ const r = await fetch(url); return r.json(); }
+function money(c){ return '$' + (c/100).toFixed(2); }
+</script>
 {% block head %}{% endblock %}
 </head><body class="{% block bodyclass %}{% endblock %}">
 {% set staff_area = request.path.startswith('/dispatch') or request.path.startswith('/driver') or request.path.startswith('/restaurant') %}
@@ -39,13 +48,6 @@
 <script src="{{ url_for('static', filename='alert.js') }}"></script>
 <script src="{{ url_for('static', filename='notify.js') }}"></script>
 <script>
-async function jpost(url, data){
-  const r = await fetch(url, {method:'POST', headers:{'Content-Type':'application/json'},
-                             body: JSON.stringify(data||{})});
-  return r.json();
-}
-async function jget(url){ const r = await fetch(url); return r.json(); }
-function money(c){ return '$' + (c/100).toFixed(2); }
 
 // ---- address type-ahead, shared by the customer site and dispatch ----
 function attachAddressPicker(inputId, onPick){

@@ -172,6 +172,10 @@ CREATE TABLE IF NOT EXISTS call_alerts (
 CREATE TABLE IF NOT EXISTS geocache (
   q TEXT PRIMARY KEY, formatted TEXT, lat REAL, lng REAL, ok INTEGER NOT NULL DEFAULT 1);
 
+CREATE TABLE IF NOT EXISTS day_picks (
+  kind TEXT NOT NULL, person_id INTEGER NOT NULL, day TEXT NOT NULL, region_ids TEXT DEFAULT '',
+  PRIMARY KEY(kind, person_id, day)
+);
 CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, detail TEXT, created_at TEXT);
 """
@@ -925,9 +929,78 @@ def slot_regions(s):
         return set()
 
 
+def today_slot_regions(kind, pid):
+    """Regions on this person's approved availability for today (overnight shifts from
+    yesterday that are still running count too)."""
+    if not pid:
+        return set()
+    nowdt = dt.datetime.now()
+    today = nowdt.date()
+    out = set()
+    if kind == "driver":
+        for s in db().execute("""SELECT * FROM availability WHERE driver_id=? AND status='approved'
+                                 AND COALESCE(region_ids,'')!=''""", (pid,)).fetchall():
+            if s["week_start"]:
+                try:
+                    if dt.date.fromisoformat(s["week_start"]) + dt.timedelta(days=s["dow"]) != today:
+                        continue
+                except ValueError:
+                    continue
+            elif s["dow"] != today.weekday():
+                continue
+            out |= parse_rids(s["region_ids"])
+    else:
+        for s in db().execute("""SELECT * FROM dispatcher_availability WHERE dispatcher_id=?
+                                 AND COALESCE(region_ids,'')!='' AND COALESCE(status,'approved')='approved'""",
+                              (pid,)).fetchall():
+            if s["dow"] == today.weekday() or _disp_slot_on(s, nowdt):
+                out |= parse_rids(s["region_ids"])
+    return out & {r["id"] for r in all_regions()}
+
+
+def day_pick(kind, pid):
+    """Regions this person chose to work today. Empty = no choice made, so every region
+    on today's availability applies. A pick made last night still holds before 6 am."""
+    if not pid:
+        return set()
+    nowdt = dt.datetime.now()
+    days = [nowdt.date().isoformat()]
+    if nowdt.hour < 6:
+        days.append((nowdt.date() - dt.timedelta(days=1)).isoformat())
+    for d in days:
+        r = db().execute("SELECT region_ids FROM day_picks WHERE kind=? AND person_id=? AND day=?",
+                         (kind, pid, d)).fetchone()
+        if r and (r["region_ids"] or ""):
+            return parse_rids(r["region_ids"]) & today_slot_regions(kind, pid)
+    return set()
+
+
+def save_day_pick(kind, pid, regions):
+    """Store today's region choice. Returns an error string, or None when saved."""
+    allowed = today_slot_regions(kind, pid)
+    if not allowed:
+        return "You don't have availability with a region set for today, so there is no region to pick."
+    chosen = set()
+    for x in regions or []:
+        try:
+            chosen.add(int(x))
+        except (TypeError, ValueError):
+            pass
+    bad = chosen - allowed
+    if bad:
+        return "You can only pick the regions on today's availability: " + region_names(allowed) + "."
+    db().execute("INSERT OR REPLACE INTO day_picks(kind,person_id,day,region_ids) VALUES(?,?,?,?)",
+                 (kind, pid, dt.date.today().isoformat(), ",".join(str(x) for x in sorted(chosen))))
+    db().commit()
+    return None
+
+
 def driver_work_regions(did):
     """Regions a driver works right now: the regions picked on the availability they are
     working at this moment, otherwise their usual regions."""
+    chosen = day_pick("driver", did)
+    if chosen:
+        return chosen
     nowdt = dt.datetime.now()
     today = nowdt.date()
     hm = nowdt.strftime("%H:%M")
@@ -950,6 +1023,9 @@ def driver_work_regions(did):
 def dispatcher_work_regions(did):
     if not did:
         return set()
+    chosen = day_pick("dispatcher", did)
+    if chosen:
+        return chosen
     nowdt = dt.datetime.now()
     picked = set()
     for s in db().execute("""SELECT * FROM dispatcher_availability WHERE dispatcher_id=?
@@ -964,6 +1040,9 @@ def dispatcher_view_regions(did):
     region picked on the shift they are working now. None assigned = all regions."""
     if not did:
         return set()
+    chosen = day_pick("dispatcher", did)
+    if chosen:
+        return chosen      # they picked the regions they work today, so the board shows just those
     return dispatcher_region_ids(did) | dispatcher_work_regions(did)
 
 
@@ -5658,9 +5737,34 @@ def api_regions_list():
     regs = all_regions()
     if as_driver:
         regs = [r for r in regs if r["id"] in mine]   # drivers only see the regions dispatch gave them
+    kind = "driver" if as_driver else "dispatcher"
+    pid = session.get("driver_id") if as_driver else session.get("dispatcher_id")
+    allowed = today_slot_regions(kind, pid)
+    names = {r["id"]: r["name"] for r in all_regions()}
     return jsonify({"ok": True, "regions": [{"id": r["id"], "name": r["name"]} for r in regs],
+                    "today_allowed": [{"id": x, "name": names[x]} for x in sorted(allowed, key=lambda i: names[i].lower())],
+                    "today_pick": sorted(day_pick(kind, pid)),
                     "mine": sorted(mine), "driver": as_driver, "none_assigned": as_driver and not mine,
                     "owner": is_owner() if session.get("dispatcher_id") else False})
+
+
+@app.post("/api/day-regions")
+def api_day_regions():
+    """Drivers and dispatchers pick which of today's availability regions they work."""
+    as_driver = bool(session.get("driver_id") and not session.get("dispatcher_id"))
+    pid = session.get("driver_id") if as_driver else session.get("dispatcher_id")
+    if not pid:
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    kind = "driver" if as_driver else "dispatcher"
+    b = request.get_json(force=True) or {}
+    err = save_day_pick(kind, pid, b.get("regions"))
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+    chosen = day_pick(kind, pid)
+    nm = (db().execute("SELECT name FROM drivers WHERE id=?", (pid,)).fetchone()["name"] if as_driver
+          else (session.get("dispatcher_name") or "dispatch"))
+    log("region", nm + " is working " + (region_names(chosen) if chosen else "every region on today's availability") + " today")
+    return jsonify({"ok": True, "today_pick": sorted(chosen)})
 
 
 @app.get("/dispatch/regions")
@@ -6536,11 +6640,18 @@ def api_driver_request():
     did = session.get("driver_id")
     if not did:
         return jsonify({"ok": False}), 403
-    want = request.get_json(force=True).get("status")
+    body = request.get_json(force=True) or {}
+    want = body.get("status")
     if want not in ("online", "break", "offline"):
         return jsonify({"ok": False}), 400
+    extra = ""
+    if want == "online" and "regions" in body and today_slot_regions("driver", did):
+        err = save_day_pick("driver", did, body.get("regions"))
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
+        extra = " for " + region_names(day_pick("driver", did) or today_slot_regions("driver", did))
     db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
-                 (did, "driver", "Requesting " + want + ".", now()))
+                 (did, "driver", "Requesting " + want + extra + ".", now()))
     db().commit()
     request_status(did, want)
     return jsonify({"ok": True})
@@ -6818,9 +6929,12 @@ def api_catalog():
                 "payout_email": d["payout_email"] or "", "payout_phone": d["payout_phone"] or "",
                 "active_orders": db().execute("""SELECT COUNT(*) c FROM orders WHERE driver_id=?
                                    AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
-                                              (d["id"],)).fetchone()["c"]}
+                                              (d["id"],)).fetchone()["c"],
+                "regions_label": region_names(driver_region_ids(d["id"])) if driver_region_ids(d["id"]) else "No region",
+                "locked": not driver_unlocked(d["id"]),
+                "unlock_block": driver_unlock_block(d["id"]) or ""}
                for d in db().execute("SELECT * FROM drivers ORDER BY name").fetchall()]
-    return jsonify({"ok": True, "restaurants": rests, "drivers": drivers})
+    return jsonify({"ok": True, "restaurants": rests, "drivers": drivers, "owner": is_owner()})
 
 
 @app.post("/api/dispatch/restaurant")
@@ -7026,12 +7140,88 @@ def api_option():
     return jsonify({"ok": False, "error": "unknown op"}), 400
 
 
+DRIVER_UNLOCK_SECS = 15 * 60
+
+
+def driver_unlocked(drv_id):
+    """Owners never see the lock. Others need a fresh username + password unlock for this driver."""
+    if is_owner():
+        return True
+    t = (session.get("drv_unlock") or {}).get(str(drv_id))
+    return bool(t and time.time() - t < DRIVER_UNLOCK_SECS)
+
+
+def driver_unlock_block(drv_id):
+    """Why this dispatcher can't unlock this driver, or None when they can."""
+    if is_owner():
+        return None
+    mine = dispatcher_region_ids(session.get("dispatcher_id"))
+    theirs = driver_region_ids(drv_id)
+    if not theirs:
+        return None
+    if not mine:
+        return "You are not assigned a region yet, so you can't edit drivers. Ask the owner to assign you one."
+    if not (mine & theirs):
+        return "This driver works " + region_names(theirs) + ". Only a dispatcher assigned to that region can edit them."
+    return None
+
+
+def relock_driver(drv_id):
+    u = dict(session.get("drv_unlock") or {})
+    if u.pop(str(drv_id), None) is not None:
+        session["drv_unlock"] = u
+
+
+@app.post("/api/dispatch/driver-unlock")
+def api_driver_unlock():
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 401
+    me = session.get("dispatcher_id")
+    b = request.get_json(force=True) or {}
+    try:
+        drv = int(b.get("driver_id") or 0)
+    except (TypeError, ValueError):
+        drv = 0
+    d = db().execute("SELECT id, name FROM drivers WHERE id=?", (drv,)).fetchone()
+    if not d:
+        return jsonify({"ok": False, "error": "Driver not found."}), 404
+    if b.get("op") == "lock":
+        relock_driver(drv)
+        return jsonify({"ok": True})
+    if is_owner(me):
+        return jsonify({"ok": True})
+    why = driver_unlock_block(drv)
+    if why:
+        return jsonify({"ok": False, "error": why}), 403
+    nowt = time.time()
+    fails = [t for t in _DEL_FAILS.get(me, []) if nowt - t < 600]
+    _DEL_FAILS[me] = fails
+    if len(fails) >= 5:
+        return jsonify({"ok": False, "error": "Too many wrong tries. Try again in 10 minutes."}), 429
+    user = (b.get("username") or "").strip()
+    pw = b.get("password") or ""
+    row = db().execute("SELECT name, username FROM dispatchers WHERE id=? AND password=?", (me, pw)).fetchone()
+    if not user or not pw or not row or row["username"].lower() != user.lower():
+        fails.append(nowt)
+        return jsonify({"ok": False, "error": "That username or password is not right."}), 403
+    _DEL_FAILS.pop(me, None)
+    u = dict(session.get("drv_unlock") or {})
+    u[str(drv)] = nowt
+    session["drv_unlock"] = u
+    log("driver", row["name"] + " unlocked " + d["name"] + " for editing")
+    return jsonify({"ok": True, "minutes": DRIVER_UNLOCK_SECS // 60})
+
+
 @app.post("/api/dispatch/driver")
 def api_driver_crud():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     b = request.get_json(force=True)
     op = b.get("op")
+    if op in ("update", "delete") and not driver_unlocked(b.get("driver_id")):
+        return jsonify({"ok": False, "error": "This driver is locked. Press Unlock and enter your username and password first."}), 403
+    if op in ("update", "delete") and not is_owner():
+        relock_driver(b.get("driver_id"))      # one save per unlock, then it locks again
     if op == "create":
         name = (b.get("name") or "").strip()
         phone = digits(b.get("phone") or "")

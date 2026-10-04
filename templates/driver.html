@@ -470,7 +470,36 @@ async function delAvail(id){
   const res = await jpost('/api/driver/availability', {delete_id:id});
   if(res.ok) renderAvail(res.availability);
 }
-async function ask(st){ await jpost('/api/driver/request', {status:st}); state(); chat(); }
+async function ask(st){
+  if (st === 'online'){
+    let rl = null; try { rl = await jget('/api/regions-list'); } catch(e){}
+    const opts = (rl && rl.ok && rl.today_allowed) || [];
+    if (opts.length > 1){ pickOnlineRegions(opts, rl.today_pick || []); return; }
+  }
+  const r = await jpost('/api/driver/request', {status:st});
+  if (r && r.ok === false && r.error) alert(r.error);
+  state(); chat();
+}
+function pickOnlineRegions(opts, picked){
+  const old = document.getElementById('olModal'); if (old) old.remove();
+  const m = document.createElement('div'); m.id = 'olModal'; m.className = 'delmodal';
+  m.innerHTML = '<div class="delbox rgpickbox"><h3>Which regions are you working?</h3>'+
+    '<p class="muted small">From your availability today. Pick one or more.</p>'+
+    opts.map(r=>'<label><input type="checkbox" class="olrg" value="'+r.id+'"'+
+      (picked.length===0 || picked.includes(r.id) ? ' checked' : '')+'> '+
+      String(r.name).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</label>').join('')+
+    '<div id="olMsg" class="muted small"></div><div class="row">'+
+    '<button class="btn primary" id="olGo">Request online</button>'+
+    '<button class="btn" onclick="document.getElementById(\'olModal\').remove()">Cancel</button></div></div>';
+  document.body.appendChild(m);
+  document.getElementById('olGo').onclick = async ()=>{
+    const vals = Array.from(document.querySelectorAll('.olrg:checked')).map(b=>+b.value);
+    if (!vals.length){ document.getElementById('olMsg').textContent = 'Pick at least one region.'; return; }
+    const r = await jpost('/api/driver/request', {status:'online', regions: vals.length===opts.length ? [] : vals});
+    if (r && r.ok === false){ document.getElementById('olMsg').textContent = r.error || 'That did not send.'; return; }
+    m.remove(); state(); chat();
+  };
+}
 async function dstat(id, st){ await jpost('/api/order/status', {order_id:id, dispatch_status:st}); state(); }
 let DTAB = 'run';
 let CHAT_SEEN = null;      // highest message id the driver has actually looked at
