@@ -76,7 +76,7 @@ async function setLogo(inp){
   <h2>Late accept warnings</h2>
   <label>Flash and chime when a kitchen has not accepted an order after this many minutes (0 for off)</label>
   <input name="kitchen_accept_min" type="number" min="0" max="60" value="{{ s['kitchen_accept_min'] or 5 }}">
-  <label>Flash and chime when a driver has not tapped Received after this many minutes (0 for off)</label>
+  <label>Flash, chime and send the driver one automatic reminder when they have not tapped Received after this many minutes (0 for off)</label>
   <input name="driver_accept_min" type="number" min="0" max="60" value="{{ s['driver_accept_min'] or 3 }}">
   <div class="muted small">Dispatch shows a quiet banner as soon as an order goes to the kitchen or a driver. Once these minutes pass without an accept, dispatch flashes and chimes every 5 seconds until it is accepted.</div>
   <h2>Driver schedule</h2>
@@ -103,6 +103,22 @@ async function setLogo(inp){
   <input name="auto_assign" value="{{ s['auto_assign'] }}">
   <label>Hold new orders until dispatch taps Send to kitchen (1 on, 0 off)</label>
   <input name="kitchen_hold" value="{{ s['kitchen_hold'] }}">
+  <label>Keep the driver app screen awake by default (1 on, 0 off)</label>
+  <input name="keep_awake_driver" value="{{ s['keep_awake_driver'] if s['keep_awake_driver'] is defined and s['keep_awake_driver'] != None else '1' }}">
+  <label>Keep the restaurant app screen awake by default (1 on, 0 off)</label>
+  <input name="keep_awake_kitchen" value="{{ s['keep_awake_kitchen'] if s['keep_awake_kitchen'] is defined and s['keep_awake_kitchen'] != None else '1' }}">
+  <div class="muted small">Stops phones and tablets from going to sleep while the app is open, so new orders,
+    alerts and GPS keep coming in. Each device can still switch it off with the Keep screen awake button.</div>
+  <h2>Stacking by location</h2>
+  <label>Auto dispatch stacks orders that are going the same way (1 on, 0 off)</label>
+  <input name="stack_by_location" value="{{ s['stack_by_location'] if s['stack_by_location'] is defined and s['stack_by_location'] != None else '1' }}">
+  <label>Pickup has to be within this many miles of the driver's pickup</label>
+  <input name="stack_pickup_mi" inputmode="decimal" value="{{ s['stack_pickup_mi'] if s['stack_pickup_mi'] is defined and s['stack_pickup_mi'] != None else '0.5' }}">
+  <label>Most extra driving miles the new drop-off can add to the run</label>
+  <input name="stack_detour_mi" inputmode="decimal" value="{{ s['stack_detour_mi'] if s['stack_detour_mi'] is defined and s['stack_detour_mi'] != None else '2' }}">
+  <div class="muted small">A busy driver gets another order only when it's from the same or a nearby restaurant,
+    they haven't picked anything up yet, they're under their stack limit, and the drop-off is on their way.
+    Their stops are then put in the shortest drop-off order. Otherwise orders go to the next free driver in turn.</div>
   <label>Order tags, comma separated</label>
   <input name="order_tokens" value="{{ s['order_tokens'] }}">
   <div class="muted small">The short label dispatch puts on an order and the driver sees on the

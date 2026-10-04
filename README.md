@@ -471,3 +471,33 @@ restaurant's website or by phone, then taps "Order placed + start timer".
 5. Settings > Driver pay per trip lets you change the split later (fee %, tip %, flat amount). Defaults: 100% of the fee, 100% of the tip, $0 flat.
 
 Payouts works in sandbox right away. For live money, PayPal has to turn on Payouts for your business account first.
+
+
+## Google Maps for everything (optional)
+
+With no key the app uses free OpenStreetMap maps and directions. With Google keys set, every map
+(dispatch live map, new-order map, customer tracking map, driver in-app navigation), address
+checks, delivery-fee distance, ETAs and turn-by-turn directions all come from Google.
+
+1. Go to https://console.cloud.google.com and sign in.
+2. Top bar: project picker > New project > name it "Fleet Delivery" > Create.
+3. Left menu: Billing > link a billing account (Google needs a card on file; there is a monthly free credit).
+4. Left menu: APIs & Services > Library. Search and press Enable on each of these:
+   - Geocoding API  (address checks)
+   - Routes API     (delivery distance, ETAs, driver turn-by-turn)
+   - Map Tiles API  (the map pictures)
+   Do not use the older "Directions API" or "Distance Matrix API"; new projects can't turn them on.
+5. APIs & Services > Credentials > Create credentials > API key. Rename it "server".
+   Under API restrictions pick "Restrict key" and tick Geocoding API, Routes API, Map Tiles API. Save.
+   Leave Application restrictions on None (Railway's server address changes).
+6. Create credentials > API key again. Rename it "browser".
+   Application restrictions: Websites. Add: https://YOUR-SITE.up.railway.app/*
+   API restrictions: Restrict key > Map Tiles API only. Save.
+7. Railway > your service > Variables > New Variable:
+   GOOGLE_MAPS_API_KEY = the "server" key
+   GOOGLE_MAPS_BROWSER_KEY = the "browser" key
+   Railway redeploys by itself.
+8. Check it: sign in to dispatch as an owner and open https://YOUR-SITE.up.railway.app/api/maps-status
+   You want geocoding "OK", routes "OK (...)" and map_tiles true. Anything else shows Google's reason.
+
+If Google ever fails, the app quietly falls back to OpenStreetMap so maps and directions keep working.

@@ -6,6 +6,12 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <link rel="apple-touch-icon" href="/static/icons/driver-192.png">
 <script src="/static/regionpick.js"></script>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/static/maptiles.js"></script>
+<script src="/static/nosleep.min.js"></script>
+<script src="/static/keepawake.js"></script>
+<script src="/static/drivernav.js"></script>
 <script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/static/sw.js").catch(function(){});}</script>
 {% endblock %}
 {% block body %}
@@ -21,7 +27,20 @@
 <div class="panel" id="status"></div>
 <div class="row"><span class="muted small" id="locNote">Checking your location...</span></div>
 <div class="row"><span class="muted small" id="soundNote"></span>
-  <button class="btn tiny" id="soundBtn" onclick="toggleSound()">Sound</button></div>
+  <button class="btn tiny" id="soundBtn" onclick="toggleSound()">Sound</button>
+  <button class="btn tiny" data-awake-btn onclick="ffAwake.toggle()">Keep screen awake</button></div>
+<div id="navBox" class="navbox hidden">
+  <div class="navtop"><div id="navArrow" class="navarrow">&uarr;</div>
+    <div><div id="navNext" class="navnext">Getting directions...</div><div id="navDist" class="navdist"></div></div></div>
+  <div id="navMap" class="navmap"></div>
+  <button id="navRecenter" class="btn small primary navrecenter hidden" onclick="ffNav.recenter()">Recenter</button>
+  <div class="navbot"><div><span id="navEta" class="naveta"></span> <span id="navLeft" class="muted"></span>
+      <div class="small muted" id="navDest"></div></div>
+    <div class="navbtns"><button class="btn tiny" id="navVoice" onclick="ffNav.voice()">Voice on</button>
+      <button class="btn tiny" onclick="ffNav.overview()">Overview</button>
+      <a class="btn tiny" id="navExt" target="_blank">Maps app</a>
+      <button class="btn tiny red" onclick="ffNav.close()">End</button></div></div>
+</div>
 <div id="newalert" class="newalert hidden">New order assigned to you. Tap Received on the stop
   below to accept it and stop the alert.</div>
 <div class="tabbar">
@@ -211,7 +230,8 @@ function turnPill(d){
   if (d.status === 'break')   return '<span class="pill amber">on break, not in line</span>';
   if ((d.region_lines||[]).length) return d.region_lines.map(x => x.pos
       ? '<span class="pill '+(x.pos===1?'green':'blue')+'">'+ffEsc(x.region)+': you are '+(x.pos===1?'first':ordinal(x.pos))+' in line</span>'
-      : '<span class="pill amber">'+ffEsc(x.region)+': at your stack limit</span>').join(' ');
+      : (x.locked_to ? '<span class="pill amber">'+ffEsc(x.region)+': locked to '+ffEsc(x.locked_to)+' until delivered</span>'
+                       : '<span class="pill amber">'+ffEsc(x.region)+': at your stack limit</span>')).join(' ');
   if (!d.up_next)             return '<span class="pill amber">at your stack limit</span>';
   if (d.up_next === 1)        return '<span class="pill green">You are first in line</span>';
   return '<span class="pill blue">You are ' + ordinal(d.up_next) + ' in line for the next order</span>';
@@ -270,6 +290,7 @@ async function state(){
   if(!res.ok){ window.location='/driver/login'; return; }
   const d = res.driver;
   try { setDispatchTel(res.dispatch_tel); } catch(e) {}
+  try { const dn = document.getElementById('dispNum'); if (dn && res.dispatch_phone) dn.textContent = res.dispatch_phone; } catch(e) {}
   try { drawLate(res.late || [], 'driver'); } catch(e) {}
   try { renderDone(res.done || []); } catch(e) { console.log('done skipped', e); }
   if (gateCheck(res, d)) return;
@@ -290,11 +311,12 @@ function renderStatus(d){
     (d.status==='online'
       ? ((d.region_lines||[]).length
           ? d.region_lines.map(x => x.pos ? 'In '+x.region+' you are '+(x.pos===1?'first':ordinal(x.pos))+' in line for the next order. '
-                                          : 'In '+x.region+' you are at your stack limit until a stop clears. ').join('')
+                                          : (x.locked_to ? 'You are out of the '+x.region+' line until your '+x.locked_to+' order is delivered. '
+                                                           : 'In '+x.region+' you are at your stack limit until a stop clears. ')).join('')
           : (d.up_next ? (d.up_next===1 ? 'You are first in line for the next order. ' : 'You are '+ordinal(d.up_next)+' in line for the next order. ')
                    : 'You are holding your stack limit, so you are out of line until a stop clears. '))
       : 'Dispatch has you '+d.status+', so you are out of the rotation. ')+
-    'Stacking up to '+d.max_stack+' orders. '+
+    ((d.max_stack||0) >= 999 ? 'No stack limit. ' : 'Stacking up to '+d.max_stack+' orders. ')+
     d.waiting_count+' order'+(d.waiting_count===1?'':'s')+' waiting to go out.'+
     ((d.region_queues||[]).length > 1 || ((d.region_queues||[])[0]||{}).id
       ? '<br>' + (d.region_queues||[]).map(q => q.name+(q.paused?' (paused)':'')+': '+q.waiting+' waiting'+(q.waiting?' (oldest '+q.oldest_min+' min)':'')+', '+q.drivers_on+' on').join('<br>')
@@ -344,13 +366,20 @@ function renderRun(stack, total){
     ((o.timeline||[]).length ? '<div class="trailline"><b>Times:</b> '+
       o.timeline.map(x=>x.label+' '+x.time).join(' &middot; ')+'</div>' : '')+
     '<div class="order-actions">'+
-    '<a class="btn tiny" target="_blank" href="'+o.restaurant_nav+'">Navigate to restaurant</a>'+
-    '<a class="btn tiny" target="_blank" href="'+o.customer_nav+'">Navigate to customer</a>'+
+    (o.restaurant_ll ? '<button class="btn tiny primary" onclick="navStop('+ix+',\'r\')">Navigate to restaurant</button>' : '')+
+    '<a class="btn tiny" target="_blank" href="'+o.restaurant_nav+'">'+(o.restaurant_ll?'Restaurant in Maps app':'Navigate to restaurant')+'</a>'+
+    (o.customer_ll ? '<button class="btn tiny primary" onclick="navStop('+ix+',\'c\')">Navigate to customer</button>' : '')+
+    '<a class="btn tiny" target="_blank" href="'+o.customer_nav+'">'+(o.customer_ll?'Customer in Maps app':'Navigate to customer')+'</a>'+
     (o.restaurant_phone ? '<a class="btn tiny" href="'+o.restaurant_tel+'">Call '+o.restaurant+'</a>' : '')+
     (o.phone ? '<a class="btn tiny" href="'+o.customer_tel+'">Call customer</a>' : '')+
     (o.phone ? '<a class="btn tiny" href="sms:'+o.phone.replace(/[^0-9]/g,"")+'">Text customer</a>' : '')+
     stageButtons(o)+'</div></div>'
   ).join('') || '<p class="muted">Nothing assigned to you right now.</p>';
+}
+function navStop(ix, which){
+  const o = (LAST_STACK || [])[ix]; if (!o) return;
+  if (which === 'r') ffNav.open({ll:o.restaurant_ll, label:o.restaurant, address:o.restaurant_address, ext:o.restaurant_nav});
+  else ffNav.open({ll:o.customer_ll, label:o.customer || 'Customer', address:o.address, ext:o.customer_nav});
 }
 function newOrderAlert(stack){
   // a stop still sitting at "assigned" has not been accepted by the driver yet
@@ -601,14 +630,9 @@ function startLocation(){
 }
 // Phones pause GPS when the screen sleeps, so the screen stays on while the driver is on shift.
 let WAKE = null;
-async function keepAwake(){
-  try {
-    if (MY_STATUS === 'offline'){ if (WAKE){ WAKE.release(); WAKE = null; } return; }
-    if (WAKE || !('wakeLock' in navigator) || document.visibilityState !== 'visible') return;
-    WAKE = await navigator.wakeLock.request('screen');
-    WAKE.addEventListener('release', function(){ WAKE = null; });
-  } catch(e){ WAKE = null; }
-}
+// The Keep screen awake switch decides this now (on by default; each phone can turn it off).
+function keepAwake(){ try { ffAwake.check(); } catch(e){} }
+ffAwake.init('driver', {{ 'true' if awake_default != '0' else 'false' }});
 state(); chat(); startLocation();
 setInterval(state,4000); setInterval(chat,4000);
 

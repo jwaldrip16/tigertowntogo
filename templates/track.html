@@ -9,6 +9,7 @@
 {% endblock %}
 {% block scripts %}{% if order %}<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/static/maptiles.js"></script>
 <script>
 const CODE = '{{ order.code }}';
 function drawPay(p, o){
@@ -168,8 +169,7 @@ function drawMap(o){
   if (MAP_EL && MAP){ box.replaceWith(MAP_EL); }
   else {
     MAP = L.map(box, {scrollWheelZoom:false});
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {maxZoom:19,
-      attribution:'&copy; OpenStreetMap'}).addTo(MAP);
+    ffBaseMap(MAP);
     MAP_EL = box; DRV = null; FIT = false;
     const pts = [];
     if (tr.pickup_lat!==null){ L.marker([tr.pickup_lat,tr.pickup_lng],{title:o.restaurant}).addTo(MAP).bindTooltip(o.restaurant); pts.push([tr.pickup_lat,tr.pickup_lng]); }

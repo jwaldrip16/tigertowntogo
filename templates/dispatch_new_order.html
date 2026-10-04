@@ -113,6 +113,7 @@ document.addEventListener('DOMContentLoaded', function(){
 <script src="/static/itempick.js"></script>
 <script src="/static/avail.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/static/maptiles.js"></script>
 <script>
 const MENUS = {{ menus | tojson }};
 let cart = [], geo = null, feeCents = 0, miles = 0;
@@ -360,8 +361,7 @@ function showOnMap(res){
   box.classList.remove('hidden');
   if(!OMAP){
     OMAP = L.map('omap').setView([res.lat, res.lng], 13);
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-      {maxZoom:19, attribution:'&copy; OpenStreetMap'}).addTo(OMAP);
+    ffBaseMap(OMAP);
     OLAYER = L.layerGroup().addTo(OMAP);
   }
   OLAYER.clearLayers();

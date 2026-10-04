@@ -454,3 +454,18 @@ body.assignflash{animation:assignpage 1s ease-in-out infinite}
 .fftoast{position:fixed;left:50%;bottom:22px;transform:translateX(-50%);background:#1B2A41;color:#fff;padding:10px 16px;border-radius:8px;z-index:10000;max-width:92vw;font-size:14px;display:none}
 .rgx{border:none;background:transparent;color:#b42318;font-size:16px;line-height:1;cursor:pointer;margin:0 6px 0 -4px;padding:2px}
 .rgpickbox label{display:block;margin:6px 0}
+
+/* in-app navigation */
+.navbox{position:fixed;inset:0;z-index:9000;background:#fff;display:flex;flex-direction:column}
+.navbox.hidden{display:none}
+body.navopen{overflow:hidden}
+.navtop{display:flex;gap:14px;align-items:center;background:#0b6b3a;color:#fff;padding:14px 16px;padding-top:max(14px,env(safe-area-inset-top))}
+.navarrow{font-size:44px;line-height:1;min-width:48px;text-align:center}
+.navnext{font-size:20px;font-weight:700;line-height:1.25}
+.navdist{font-size:16px;opacity:.9;margin-top:2px}
+.navmap{flex:1;min-height:200px}
+.navbot{display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 14px;padding-bottom:max(12px,env(safe-area-inset-bottom));border-top:1px solid #e5e7eb;background:#fff}
+.naveta{font-size:22px;font-weight:700;color:#0b6b3a}
+.navbtns{display:flex;gap:6px;flex-wrap:wrap}
+.navrecenter{position:absolute;right:14px;bottom:110px;z-index:9500}
+.navrecenter.hidden{display:none}

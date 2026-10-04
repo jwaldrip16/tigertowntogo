@@ -11,6 +11,7 @@ grey once a fix is more than 10 minutes old, which usually means the driver clos
 </div>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="/static/maptiles.js"></script>
 <script>
 let MAP = null, LAYER = null, FITTED = false;
 const MARKS = {};
@@ -27,8 +28,7 @@ function glide(mk, to, ms){
 }
 function initMap(){
   MAP = L.map('map').setView([32.6454, -85.3783], 12);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
-    {maxZoom: 19, attribution: '&copy; OpenStreetMap'}).addTo(MAP);
+  ffBaseMap(MAP);
   LAYER = L.layerGroup().addTo(MAP);
 }
 function dot(color, letter){

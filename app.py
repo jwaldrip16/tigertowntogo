@@ -1,4 +1,5 @@
 
+import urllib.error
 import base64, difflib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
 import dbx
 from flask import Flask, g, request, session, redirect, url_for, render_template, jsonify, send_from_directory
@@ -32,6 +33,9 @@ set_app_tz(APP_TZ)
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(APP_DIR, "delivery.db"))
 GOOGLE_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+# Optional second key for the map pictures the browser loads. Lock it to your website in
+# Google Cloud. Falls back to GOOGLE_MAPS_API_KEY when it is not set.
+GOOGLE_TILE_KEY = os.environ.get("GOOGLE_MAPS_BROWSER_KEY", "") or GOOGLE_KEY
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
@@ -225,12 +229,11 @@ def init_db():
         seed(con)
     topup_restaurants(con)
     for k, v in [("base_fee_cents", "399"), ("base_miles", "3"), ("per_mile_cents", "100"),
-                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("kitchen_hold", "1"), ("auto_driver_pay", "1"), ("auto_pay_cap_cents", "2500"), ("auto_pay_delay_min", "15"), ("max_stack_default", "3"), ("sched_lead_min", "60"),
+                 ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("kitchen_hold", "1"), ("keep_awake_driver", "1"), ("keep_awake_kitchen", "1"), ("auto_driver_pay", "1"), ("auto_pay_cap_cents", "2500"), ("auto_pay_delay_min", "15"), ("max_stack_default", "3"), ("sched_lead_min", "60"), ("stack_by_location", "1"), ("stack_pickup_mi", "0.5"), ("stack_detour_mi", "2"),
                  ("assign_on_pending", "0"), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
                  ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
                  ("business_name", "Fleet Delivery"),
                  ("business_address", "216 S 8th St, Opelika, AL 36801"),
-                 ("unlimited_stack", "1"),
                  ("order_tokens", "Online,App,Phone call,Third party"),
                  ]:
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
@@ -241,8 +244,12 @@ def init_db():
     if not con.execute("SELECT 1 FROM settings WHERE key='biz_default_closed_v1'").fetchone():
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('business_open','0')")
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('biz_default_closed_v1','1')")
-    con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('unlimited_stack','1')")
-    con.execute("UPDATE drivers SET max_stack=999 WHERE max_stack IS NULL OR max_stack < 999")
+    if not con.execute("SELECT 1 FROM settings WHERE key='stack_limit_v2'").fetchone():
+        # Stack limit is back on: every driver starts at 3. Dispatch can raise it per driver,
+        # up to unlimited (stored as 999).
+        con.execute("UPDATE drivers SET max_stack=3")
+        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('stack_limit_v2','1')")
+    con.execute("UPDATE drivers SET max_stack=3 WHERE max_stack IS NULL OR max_stack < 1")
     con.execute("""CREATE TABLE IF NOT EXISTS blocked_customers(
         id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT UNIQUE, name TEXT, reason TEXT,
         created_at TEXT)""")
@@ -373,6 +380,7 @@ def init_db():
     ensure_column(con, "regions", "paused_at", "TEXT")
     ensure_column(con, "regions", "hours", "TEXT")          # blank = use the business hours
     ensure_column(con, "regions", "closed_dates", "TEXT")   # "2026-11-26,2026-12-25"
+    ensure_column(con, "regions", "phone", "TEXT")          # blank = the business dispatch number
     ensure_column(con, "orders", "region_id", "INTEGER")
     ensure_column(con, "availability", "region_ids", "TEXT")
     ensure_column(con, "dispatchers", "is_owner", "INTEGER DEFAULT 0")
@@ -404,6 +412,8 @@ def init_db():
     ensure_column(con, "orders", "manual_at", "TEXT")
     ensure_column(con, "orders", "manual_by", "TEXT")
     ensure_column(con, "orders", "driver_paged_at", "TEXT")
+    ensure_column(con, "orders", "driver_reminded_for", "TEXT")
+    ensure_column(con, "orders", "loc_stacked", "INTEGER DEFAULT 0")
     # Send to kitchen: a new order stays off the kitchen until dispatch taps Send to kitchen,
     # even after it is paid. kitchen_go=1 means dispatch released it (old orders count as released).
     ensure_column(con, "orders", "kitchen_go", "INTEGER NOT NULL DEFAULT 1")
@@ -1038,7 +1048,50 @@ def driver_locked_regions(did):
     """Regions a driver has live orders in. They stay in that region until it is delivered."""
     return {o["region_id"] for o in db().execute(
         """SELECT region_id FROM orders WHERE driver_id=? AND region_id IS NOT NULL AND region_id != 0
-           AND dispatch_status NOT IN ('delivered','cancelled')""", (did,)).fetchall()}
+           AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""", (did,)).fetchall()}
+
+
+_ALL = object()
+
+
+def dispatcher_driver_scope():
+    """Which drivers the signed-in dispatcher may see. None = every driver (owners, and
+    dispatchers with no region). Otherwise the set of regions they work."""
+    me = session.get("dispatcher_id")
+    if not me or is_owner(me):
+        return None
+    return dispatcher_view_regions(me) or None
+
+
+def driver_in_scope(drv_id, scope=_ALL):
+    """A dispatcher sees a driver who is assigned to, working in, or on a live order in one of
+    the dispatcher's regions. A driver with no region covers every region, so everyone sees them."""
+    if scope is _ALL:
+        scope = dispatcher_driver_scope()
+    if scope is None or not drv_id:
+        return True
+    try:
+        drv_id = int(drv_id)
+    except (TypeError, ValueError):
+        return False
+    assigned = driver_region_ids(drv_id)
+    if not assigned:
+        return True
+    return bool((assigned & scope) or (driver_work_regions(drv_id) & scope) or (driver_locked_regions(drv_id) & scope))
+
+
+def scoped_drivers(rows):
+    scope = dispatcher_driver_scope()
+    if scope is None:
+        return list(rows)
+    return [d for d in rows if driver_in_scope(d["id"], scope)]
+
+
+def out_of_scope(drv_id):
+    """403 response when the driver isn't in this dispatcher's regions, else None."""
+    if session.get("dispatcher_id") and not driver_in_scope(drv_id):
+        return jsonify({"ok": False, "error": "That driver is not in your region."}), 403
+    return None
 
 
 def driver_work_regions(did):
@@ -1205,7 +1258,8 @@ def region_queues(region_ids=None, detail=True):
     for rid, name in buckets:
         mine = [o for o in rows if (o["region_id"] or 0) == rid]
         if rid and rid in lineups:
-            on = [(_line_ord(x["pos"]) + " up: " + x["name"]) if x["pos"] else (x["name"] + " (at stack limit)")
+            on = [(_line_ord(x["pos"]) + " up: " + x["name"]) if x["pos"] else
+                  (x["name"] + (" (locked to " + x["locked_to"] + " until delivered)" if x.get("locked_to") else " (at stack limit)"))
                   for x in lineups[rid]["line"]]
         elif rid:
             on = [d["name"] for d in shift if covers(driver_work_regions(d["id"]), rid)]
@@ -1256,11 +1310,20 @@ def region_lineups():
     that region's line. A driver holding their stack limit drops out of a region's line unless
     they are the only driver working that region."""
     rows = on_shift_drivers()
+    regs = all_regions()
+    rnames = {g["id"]: g["name"] for g in regs}
+    locks = {r["id"]: driver_locked_regions(r["id"]) for r in rows}
     out = {}
-    for rg in all_regions():
+    for rg in regs:
         members = [r for r in rows if covers(driver_work_regions(r["id"]), rg["id"])]
         n, line = 0, []
         for r in members:
+            lk = locks.get(r["id"]) or set()
+            if lk and rg["id"] not in lk:
+                # on a live order in another region: out of this line until it is delivered
+                line.append({"id": r["id"], "name": r["name"], "pos": None,
+                             "locked_to": ", ".join(rnames.get(x, "another region") for x in sorted(lk))})
+                continue
             full = r["load"] >= (r["max_stack"] or 1)
             if full and len(members) > 1:
                 line.append({"id": r["id"], "name": r["name"], "pos": None})
@@ -1273,7 +1336,7 @@ def region_lineups():
 
 def driver_region_lines(lineups, did):
     """[{region_id, region, pos}] for one driver; pos None = holding their stack limit there."""
-    return [{"region_id": rid, "region": v["name"], "pos": x["pos"]}
+    return [{"region_id": rid, "region": v["name"], "pos": x["pos"], "locked_to": x.get("locked_to") or ""}
             for rid, v in lineups.items() for x in v["line"] if x["id"] == did]
 
 
@@ -1354,11 +1417,104 @@ def place_redo_orders():
                           (d["id"],)).fetchone()["s"]
         con.execute("""UPDATE orders SET driver_id=?, dispatch_status='assigned', stack_seq=?, hold_reason=NULL,
                        redo_driver_id=NULL, paged_at=? WHERE id=?""", (d["id"], seq, now(), o["id"]))
-        con.execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
-                    (d["id"], "dispatch", "New order " + o["code"] + " (redo of " + (o["cloned_from"] or "an earlier order") +
-                     ((": " + o["issue"]) if o["issue"] else "") + ") was sent to you. Tap Received to accept it.", now()))
         log("redo", o["code"] + " sent to original driver " + d["name"])
     con.commit()
+
+
+# ---------- Stacking by location ----------
+LIVE_STOP = ('assigned', 'received', 'at_restaurant', 'enroute')
+NOT_PICKED = ('assigned', 'received', 'at_restaurant')
+
+def _num_setting(key, default, lo, hi):
+    try:
+        v = setting(key, str)
+        if v is None or str(v).strip() == "":
+            return default
+        return max(lo, min(hi, float(v)))
+    except Exception:
+        return default
+
+def _pick_ll(o):
+    r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+    p = pickup_of(o, r)
+    return (float(p["lat"]), float(p["lng"])) if p["lat"] and p["lng"] else None
+
+def _drop_ll(o):
+    return (float(o["lat"]), float(o["lng"])) if o["lat"] and o["lng"] else None
+
+def _road_mi(a, b):
+    return haversine_miles(a[0], a[1], b[0], b[1]) * ROAD_FACTOR
+
+def _nn_path(start, pts):
+    """Nearest-next ordering of drop-offs from a start point. Returns (index order, miles)."""
+    left = list(range(len(pts)))
+    cur, total, order = start, 0.0, []
+    while left:
+        j = min(left, key=lambda k: _road_mi(cur, pts[k]))
+        total += _road_mi(cur, pts[j])
+        cur = pts[j]
+        order.append(j)
+        left.remove(j)
+    return order, total
+
+def resequence_route(did):
+    """Puts a driver's stops in the shortest drop-off order. Orders already picked up
+    (en route) stay first in their current order; the rest are sorted nearest-next from
+    the pickup. Stops with no map point keep their place at the end."""
+    live = db().execute("SELECT * FROM orders WHERE driver_id=? AND dispatch_status IN (%s) ORDER BY COALESCE(stack_seq,999), id"
+                        % ",".join("?" * len(LIVE_STOP)), (did,) + LIVE_STOP).fetchall()
+    fixed = [o for o in live if o["dispatch_status"] == "enroute"]
+    rest = [o for o in live if o["dispatch_status"] != "enroute"]
+    mapped = [o for o in rest if _drop_ll(o) and _pick_ll(o)]
+    unmapped = [o for o in rest if o not in mapped]
+    if len(mapped) >= 2:
+        start = _drop_ll(fixed[-1]) if fixed else _pick_ll(mapped[0])
+        order, _ = _nn_path(start, [_drop_ll(o) for o in mapped])
+        mapped = [mapped[i] for i in order]
+    final = fixed + mapped + unmapped
+    changed = False
+    for seq, o in enumerate(final, start=1):
+        if (o["stack_seq"] or 0) != seq:
+            changed = True
+        db().execute("UPDATE orders SET stack_seq=? WHERE id=?", (seq, o["id"]))
+    db().commit()
+    return changed, [o["code"] for o in final]
+
+def stack_match(cand, shift):
+    """A busy driver this order can ride along with: same region, under their stack limit,
+    nothing picked up yet, a pickup within the set distance of one of theirs, and the
+    drop-off adding no more than the set extra miles to their run. Smallest detour wins."""
+    if not setting("stack_by_location"):
+        return None
+    P, D = _pick_ll(cand), _drop_ll(cand)
+    if not P or not D:
+        return None
+    max_pick = _num_setting("stack_pickup_mi", 0.5, 0.05, 10)
+    max_det = _num_setting("stack_detour_mi", 2.0, 0.0, 30)
+    best = None
+    for r in shift:
+        load = r["load"] or 0
+        if load == 0 or load >= (r["max_stack"] or 3):
+            continue
+        if not covers(driver_work_regions(r["id"]), cand["region_id"]) or region_conflict(r["id"], cand["region_id"]):
+            continue
+        live = db().execute("SELECT * FROM orders WHERE driver_id=? AND dispatch_status NOT IN ('delivered','cancelled')",
+                            (r["id"],)).fetchall()
+        if not live or any(o["dispatch_status"] not in NOT_PICKED for o in live):
+            continue
+        picks = [_pick_ll(o) for o in live]
+        drops = [_drop_ll(o) for o in live]
+        if any(x is None for x in picks + drops):
+            continue
+        if min(_road_mi(P, q) for q in picks) > max_pick:
+            continue
+        start = picks[0]
+        _, before = _nn_path(start, drops)
+        _, after = _nn_path(start, drops + [D])
+        detour = after - before
+        if detour <= max_det and (best is None or detour < best[1]):
+            best = (r, detour)
+    return best
 
 def auto_assign():
     try:
@@ -1392,25 +1548,33 @@ def auto_assign():
                            ORDER BY created_at ASC""").fetchall()
         pick = None
         for cand in waiting:
+            m = stack_match(cand, shift_now)
+            if m:
+                pick = (cand, m[0], m[1])
+                break
             for fd in free:
                 if covers(driver_work_regions(fd["id"]), cand["region_id"]) and not region_conflict(fd["id"], cand["region_id"]):
-                    pick = (cand, fd)
+                    pick = (cand, fd, None)
                     break
             if pick:
                 break
         if not pick:
             break
-        o, d = pick
+        o, d, detour = pick
         seq = con.execute("""SELECT COALESCE(MAX(stack_seq),0)+1 s FROM orders
                              WHERE driver_id=? AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
                           (d["id"],)).fetchone()["s"]
         con.execute("""UPDATE orders SET driver_id=?, dispatch_status='assigned',
-                       hold_reason=NULL, stack_seq=? WHERE id=?""", (d["id"], seq, o["id"]))
-        con.execute("UPDATE drivers SET last_assigned_at=? WHERE id=?", (now(), d["id"]))
-        con.execute("""INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)""",
-                    (d["id"], "system",
-                     "Order " + o["code"] + " assigned to you (stop #" + str(seq) + ").", now()))
-        log("assign", o["code"] + " -> " + d["name"])
+                       hold_reason=NULL, stack_seq=?, loc_stacked=? WHERE id=?""",
+                    (d["id"], seq, 1 if detour is not None else 0, o["id"]))
+        if detour is None:
+            con.execute("UPDATE drivers SET last_assigned_at=? WHERE id=?", (now(), d["id"]))
+        con.commit()
+        if detour is not None:
+            resequence_route(d["id"])
+            log("assign", o["code"] + " -> " + d["name"] + " (stacked by location, +%.1f mi)" % detour)
+        else:
+            log("assign", o["code"] + " -> " + d["name"])
         con.commit()
     rebalance_stacks()
     recompute_queue()
@@ -1429,6 +1593,7 @@ def rebalance_stacks():
         cands = con.execute("""SELECT o.* FROM orders o
                            WHERE o.dispatch_status='assigned' AND o.driver_id IS NOT NULL
                              AND COALESCE(o.placed_by,'') != 'driver'
+                             AND COALESCE(o.loc_stacked,0) = 0
                              AND EXISTS (SELECT 1 FROM orders x
                                          WHERE x.driver_id=o.driver_id AND x.id!=o.id
                                            AND x.dispatch_status NOT IN ('delivered','cancelled')
@@ -1454,8 +1619,6 @@ def rebalance_stacks():
         con.execute("""UPDATE orders SET driver_id=?, dispatch_status='assigned', hold_reason=NULL,
                        stack_seq=1 WHERE id=?""", (d["id"], o["id"]))
         con.execute("UPDATE drivers SET last_assigned_at=? WHERE id=?", (now(), d["id"]))
-        con.execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
-                    (d["id"], "system", "Order " + o["code"] + " assigned to you (stop #1).", now()))
         if old:
             con.execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                         (old["id"], "system", "Order " + o["code"] + " moved to another driver.", now()))
@@ -1867,6 +2030,8 @@ def order_dict(o):
         "pickup_listed": pu["listed"],
         "customer_tel": "tel:" + digits(o["customer_phone"] or ""),
         "restaurant_nav": nav_url(pu["address"], pu["lat"], pu["lng"], pu["name"]),
+        "restaurant_ll": [pu["lat"], pu["lng"]] if pu["lat"] and pu["lng"] else None,
+        "customer_ll": [o["lat"], o["lng"]] if o["lat"] and o["lng"] else None,
         "customer": o["customer_name"], "phone": o["customer_phone"],
         "address": o["address"], "note": o["address_note"],
         "dispatch_note": o["dispatch_note"],
@@ -3269,6 +3434,76 @@ ETA_NO_DRIVER_MIN = 10     # assumed time for a driver to reach the restaurant w
 _LEG_CACHE = {}            # (rounded from, rounded to) -> (stamp, minutes)
 
 
+# ---------------- Google Routes API (replaces the old Directions / Distance Matrix) ----------------
+ROUTES_URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
+
+
+def _gwp(lat, lng):
+    return {"location": {"latLng": {"latitude": float(lat), "longitude": float(lng)}}}
+
+
+def _gsecs(v):
+    try:
+        return float(str(v or "0").rstrip("s"))
+    except ValueError:
+        return 0.0
+
+
+def google_routes(a, b, mask, timeout=8):
+    """One driving route from Google's Routes API with live traffic. Raises on any error."""
+    body = {"origin": _gwp(a[0], a[1]), "destination": _gwp(b[0], b[1]), "travelMode": "DRIVE",
+            "routingPreference": "TRAFFIC_AWARE", "units": "IMPERIAL", "languageCode": "en-US"}
+    req = urllib.request.Request(ROUTES_URL, data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Goog-Api-Key": GOOGLE_KEY,
+                                          "X-Goog-FieldMask": mask})
+    try:
+        res = json.loads(urllib.request.urlopen(req, timeout=timeout).read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            msg = json.loads(e.read().decode()).get("error", {}).get("message", "")
+        except Exception:
+            msg = ""
+        raise RuntimeError("Routes API %s %s" % (e.code, msg))
+    if not res.get("routes"):
+        raise RuntimeError("Routes API found no route")
+    return res["routes"][0]
+
+
+_GMAN = {"TURN_LEFT": "left", "TURN_RIGHT": "right", "TURN_SLIGHT_LEFT": "slight left",
+         "TURN_SLIGHT_RIGHT": "slight right", "TURN_SHARP_LEFT": "sharp left", "TURN_SHARP_RIGHT": "sharp right",
+         "UTURN_LEFT": "uturn", "UTURN_RIGHT": "uturn", "RAMP_LEFT": "slight left", "RAMP_RIGHT": "slight right",
+         "FORK_LEFT": "slight left", "FORK_RIGHT": "slight right", "MERGE": "straight", "STRAIGHT": "straight",
+         "ROUNDABOUT_LEFT": "left", "ROUNDABOUT_RIGHT": "right", "ROUNDABOUT_CLOCKWISE": "right",
+         "ROUNDABOUT_COUNTERCLOCKWISE": "left", "FERRY_BOAT": "straight", "FERRY_TRAIN": "straight",
+         "NAME_CHANGE": "straight", "DEPART": "straight"}
+
+
+def _route_google_routes(a, b):
+    rt = google_routes(a, b, "routes.distanceMeters,routes.duration,routes.polyline.encodedPolyline,"
+                             "routes.legs.endLocation,routes.legs.steps.distanceMeters,"
+                             "routes.legs.steps.staticDuration,routes.legs.steps.startLocation,"
+                             "routes.legs.steps.navigationInstruction", timeout=12)
+    steps = []
+    for leg in rt.get("legs", []):
+        for st in leg.get("steps", []):
+            ni = st.get("navigationInstruction") or {}
+            man = ni.get("maneuver", "")
+            ll = (st.get("startLocation") or {}).get("latLng") or {}
+            if "latitude" not in ll:
+                continue
+            steps.append({"text": ni.get("instructions") or "Continue",
+                          "type": "depart" if (man == "DEPART" or not steps) else "turn",
+                          "modifier": _GMAN.get(man, "straight"),
+                          "lat": ll["latitude"], "lng": ll["longitude"],
+                          "dist_m": st.get("distanceMeters", 0), "dur_s": _gsecs(st.get("staticDuration"))})
+    end = ((rt.get("legs") or [{}])[-1].get("endLocation") or {}).get("latLng") or {"latitude": b[0], "longitude": b[1]}
+    steps.append({"text": "You have arrived", "type": "arrive", "modifier": "",
+                  "lat": end["latitude"], "lng": end["longitude"], "dist_m": 0, "dur_s": 0})
+    return {"coords": _decode_poly((rt.get("polyline") or {}).get("encodedPolyline", "")),
+            "steps": steps, "distance_m": rt.get("distanceMeters", 0),
+            "duration_s": _gsecs(rt.get("duration")), "source": "google"}
+
+
 def leg_minutes(a_lat, a_lng, b_lat, b_lng):
     """Driving minutes between two points. Live traffic from Google when
     GOOGLE_MAPS_API_KEY is set (cached 90 seconds), otherwise distance at town speed."""
@@ -3280,6 +3515,12 @@ def leg_minutes(a_lat, a_lng, b_lat, b_lng):
         return hit[1]
     mins = None
     if GOOGLE_KEY:
+        try:
+            secs = _gsecs(google_routes((a_lat, a_lng), (b_lat, b_lng), "routes.duration", timeout=4).get("duration"))
+            mins = secs / 60.0 if secs else None
+        except Exception:
+            mins = None
+    if mins is None and GOOGLE_KEY:
         try:
             url = ("https://maps.googleapis.com/maps/api/distancematrix/json?origins=%f,%f&destinations=%f,%f"
                    "&departure_time=now&units=imperial&key=%s"
@@ -3384,7 +3625,7 @@ def track_payload(o):
     t = {"phase": "", "driver_name": "", "stops_before": 0, "eta_min": None,
          "driver_lat": None, "driver_lng": None, "driver_fix": "",
          "home_lat": o["lat"], "home_lng": o["lng"], "pickup_lat": pu["lat"], "pickup_lng": pu["lng"],
-         "dispatch_tel": tel_digits(dispatch_phone())}
+         "dispatch_tel": tel_digits(dispatch_phone(o["region_id"]))}
     d = db().execute("SELECT * FROM drivers WHERE id=?", (o["driver_id"],)).fetchone() if o["driver_id"] else None
     if d and st in ("assigned", "received", "at_restaurant", "enroute", "delivered"):
         t["driver_name"] = (d["name"] or "").split()[0] if (d["name"] or "").strip() else "Your driver"
@@ -3846,6 +4087,9 @@ def api_driver_extra():
     d = db().execute("SELECT * FROM drivers WHERE id=?", (b.get("driver_id"),)).fetchone()
     if not d:
         return jsonify({"ok": False, "error": "Pick a driver."}), 400
+    bad = out_of_scope(d["id"])
+    if bad:
+        return bad
     cents = parse_cents(b.get("amount"))
     if cents is None:
         return jsonify({"ok": False, "error": "Enter an amount like 25.00"}), 400
@@ -3898,6 +4142,7 @@ def api_board():
     pp_sweep()      # charge delivered PayPal/Venmo orders once the tip window is over
     payout_sweep()  # update driver pay that is still going through PayPal
     auto_driver_pay_sweep()  # pay drivers for delivered trips when auto pay is on
+    remind_unreceived()      # one automatic reminder only if a driver hasn't tapped Received in time
     purge_cards()
     try:
         purge_old_orders()
@@ -3938,6 +4183,17 @@ def api_board():
         drivers = [d for d in drivers if not driver_work_regions(d["id"]) or (driver_work_regions(d["id"]) & myr)
                    or d["pending_request"] or unread.get(d["id"])]
         rests = [r for r in rests if covers(myr, r["region_id"])]
+    if dispatcher_driver_scope() is not None:
+        # dispatchers only see drivers in their own regions
+        drivers = scoped_drivers(drivers)
+        vis = {d["id"] for d in drivers}
+        unread = {k: v for k, v in unread.items() if k in vis}
+        if newest and newest["driver_id"] not in vis:
+            newest = next((m for m in db().execute(
+                """SELECT m.id, m.driver_id, m.body, m.created_at, d.name FROM messages m
+                   JOIN drivers d ON d.id=m.driver_id
+                   WHERE m.sender='driver' AND m.seen_by_dispatch=0
+                   ORDER BY m.id DESC LIMIT 200""").fetchall() if m["driver_id"] in vis), None)
     return jsonify({
         "ok": True,
         "regions_label": region_names(my_regions),
@@ -3999,6 +4255,9 @@ def api_driver_status():
     if status not in ("online", "break", "offline"):
         return jsonify({"ok": False, "error": "bad status"}), 400
     did = data["driver_id"]
+    bad = out_of_scope(did)
+    if bad:
+        return bad
     msg = "Dispatch set you " + status + "."
     if "regions" in data:
         drow = db().execute("SELECT name FROM drivers WHERE id=?", (did,)).fetchone()
@@ -4081,6 +4340,10 @@ def api_assign():
         return jsonify({"ok": False}), 403
     data = request.get_json(force=True)
     oid, did = data["order_id"], data.get("driver_id")
+    if did:
+        bad = out_of_scope(did)
+        if bad:
+            return bad
     if did in (None, "", 0, "0"):
         db().execute("""UPDATE orders SET driver_id=NULL, stack_seq=NULL, dispatch_status='queued'
                         WHERE id=?""", (oid,))
@@ -4118,8 +4381,6 @@ def api_assign():
                           "Order " + gone + " moved off your run to " + newname + ".", now()))
         db().execute("UPDATE drivers SET last_assigned_at=? WHERE id=?", (now(), did))
         o = db().execute("SELECT code FROM orders WHERE id=?", (oid,)).fetchone()
-        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
-                     (did, "dispatch", "You have order " + o["code"] + " (stop #" + str(seq) + ").", now()))
     db().commit()
     auto_assign()
     return jsonify({"ok": True})
@@ -4941,7 +5202,7 @@ def api_locations():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     out = []
-    for d in db().execute("SELECT * FROM drivers ORDER BY name").fetchall():
+    for d in scoped_drivers(db().execute("SELECT * FROM drivers ORDER BY name").fetchall()):
         loc = loc_block(d)
         nxt = db().execute("""SELECT o.*, r.name rname, r.lat rlat, r.lng rlng FROM orders o
                               JOIN restaurants r ON r.id=o.restaurant_id
@@ -5051,6 +5312,9 @@ def api_broadcast():
     else:
         audience = "all"
         rows = db().execute("SELECT * FROM drivers").fetchall()
+    rows = scoped_drivers(rows)   # dispatchers only text drivers in their regions
+    if not rows:
+        return jsonify({"ok": False, "error": "No drivers in your region match that group."}), 400
     for d in rows:
         db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                      (d["id"], "dispatch", body, now()))
@@ -5453,7 +5717,7 @@ def api_dispatch_week():
         return jsonify({"ok": False}), 403
     ensure_open_week()
     ws = parse_week(request.args.get("start"))
-    rows = db().execute("SELECT * FROM drivers ORDER BY name").fetchall()
+    rows = scoped_drivers(db().execute("SELECT * FROM drivers ORDER BY name").fetchall())
     drivers = []
     for d in rows:
         block = week_block(d["id"], ws)
@@ -5526,7 +5790,7 @@ def api_dispatch_schedule():
         return jsonify({"ok": False}), 403
     out, pending = [], 0
     today = dt.date.today().isoformat()
-    for d in db().execute("SELECT * FROM drivers ORDER BY name").fetchall():
+    for d in scoped_drivers(db().execute("SELECT * FROM drivers ORDER BY name").fetchall()):
         av, off = availability_for(d["id"]), time_off_for(d["id"])
         pending += len([a for a in av if a["status"] == "pending"])
         pending += len([o for o in off if o["status"] == "pending"])
@@ -5547,11 +5811,18 @@ def api_dispatch_schedule_edit():
     b = request.get_json(force=True)
     op = b.get("op")
     who = session.get("dispatcher_name", "dispatch")
+    if b.get("driver_id"):
+        bad = out_of_scope(b.get("driver_id"))
+        if bad:
+            return bad
     if op == "decide":
         dec = "approved" if b.get("approve") else "denied"
         row = db().execute("SELECT * FROM availability WHERE id=?", (b["id"],)).fetchone()
         if not row:
             return jsonify({"ok": False}), 404
+        bad = out_of_scope(row["driver_id"])
+        if bad:
+            return bad
         db().execute("""UPDATE availability SET status=?, decided_by=?, decided_at=?, reply=?
                         WHERE id=?""", (dec, who, now(), b.get("reply", ""), b["id"]))
         db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
@@ -5804,6 +6075,8 @@ def regions_payload():
     return {"ok": True, "me": session.get("dispatcher_id"), "owner": is_owner(),
             "regions": [{"id": r["id"], "name": r["name"],
                          "own_hours": bool(region_own_hours(r["id"])),
+                         "phone": nice_phone((_region(r["id"])["phone"] or "")) if (_region(r["id"])["phone"] or "") else "",
+                         "business_phone": nice_phone(dispatch_phone()),
                          "hours_label": business_hours_label(r["id"]) or "no hours limit",
                          "closed_label": closed_dates_label(r["id"]),
                          "restaurants": con.execute("SELECT COUNT(*) c FROM restaurants WHERE region_id=? AND slug!='oneoff'",
@@ -6049,6 +6322,33 @@ def api_region_hours_save():
                     "closed": closed_dates_label(rid, 60)})
 
 
+@app.post("/api/dispatch/region-phone")
+def api_region_phone():
+    """Set a region's own dispatch number. Blank goes back to the business number."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    try:
+        rid = int(b.get("region_id") or 0)
+    except (TypeError, ValueError):
+        rid = 0
+    r = _region(rid)
+    if not r:
+        return jsonify({"ok": False, "error": "Unknown region."}), 404
+    if not _can_edit_region(rid):
+        return jsonify({"ok": False, "error": "You can only change the number for regions you are assigned to."}), 403
+    d = "".join(c for c in str(b.get("phone") or "") if c.isdigit())
+    if len(d) == 11 and d.startswith("1"):
+        d = d[1:]
+    if d and len(d) != 10:
+        return jsonify({"ok": False, "error": "Enter a 10-digit phone number, or leave it blank to use the business number."}), 400
+    db().execute("UPDATE regions SET phone=? WHERE id=?", (d, rid))
+    db().commit()
+    log("region_phone", r["name"] + " dispatch number " + (nice_phone(d) if d else "back to the business number") +
+        " by " + session.get("dispatcher_name", "dispatch"))
+    return jsonify({"ok": True, "phone": nice_phone(d) if d else "", "business": nice_phone(dispatch_phone())})
+
+
 @app.get("/dispatch/regions")
 def dispatch_regions_page():
     if not dispatcher_required():
@@ -6229,10 +6529,63 @@ def dispatch_hours_page():
         return redirect("/dispatch/login")
     return render_template("dispatch_hours.html")
 
+STACK_UNLIMITED = 999
+
+@app.post("/api/dispatch/driver-stack")
+def api_driver_stack():
+    """Dispatch sets how many orders one driver can carry at once: 1 to 20, or unlimited."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(silent=True) or {}
+    try:
+        did = int(b.get("driver_id") or 0)
+    except Exception:
+        did = 0
+    d = db().execute("SELECT id, name, max_stack FROM drivers WHERE id=?", (did,)).fetchone()
+    if not d:
+        return jsonify({"ok": False, "error": "Driver not found."}), 404
+    if out_of_scope(did):
+        return jsonify({"ok": False, "error": "That driver is not in your region."}), 403
+    raw = str(b.get("limit", "")).strip().lower()
+    if raw in ("unlimited", "u", "none", "no limit", "999"):
+        lim = STACK_UNLIMITED
+    else:
+        try:
+            lim = int(raw)
+        except Exception:
+            return jsonify({"ok": False, "error": "Enter a number from 1 to 20, or pick Unlimited."}), 400
+        if lim < 1 or lim > 20:
+            return jsonify({"ok": False, "error": "Enter a number from 1 to 20, or pick Unlimited."}), 400
+    db().execute("UPDATE drivers SET max_stack=? WHERE id=?", (lim, did))
+    db().commit()
+    label = "unlimited" if lim >= STACK_UNLIMITED else str(lim)
+    log("stack_limit", d["name"] + " -> " + label + " by " + (session.get("dispatcher_name") or "dispatch"))
+    auto_assign()
+    return jsonify({"ok": True, "driver": d["name"], "max_stack": lim, "label": label})
+
+
+@app.post("/api/dispatch/route-sort")
+def api_route_sort():
+    """Dispatch button: put this driver's stops in the shortest drop-off order."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(silent=True) or {}
+    try:
+        did = int(b.get("driver_id") or 0)
+    except Exception:
+        did = 0
+    if not db().execute("SELECT 1 FROM drivers WHERE id=?", (did,)).fetchone():
+        return jsonify({"ok": False, "error": "Driver not found."}), 404
+    if out_of_scope(did):
+        return jsonify({"ok": False, "error": "That driver is not in your region."}), 403
+    changed, codes = resequence_route(did)
+    return jsonify({"ok": True, "changed": changed, "order": codes})
+
+
 @app.post("/api/dispatch/reorder")
 def api_reorder():
     """Dispatch sets the driver's stop order: order_ids in the new order. Only that
-    driver's live stops are renumbered 1..n, and the driver gets a note with the new order."""
+    driver's live stops are renumbered 1..n. No chat message is sent; the driver app just shows the new order."""
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     data = request.get_json(force=True) or {}
@@ -6252,9 +6605,6 @@ def api_reorder():
     codes = {r["id"]: r["code"] for r in live}
     for seq, oid in enumerate(want, start=1):
         db().execute("UPDATE orders SET stack_seq=? WHERE id=? AND driver_id=?", (seq, oid, did))
-    db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
-                 (did, "dispatcher", "Dispatch changed your stop order: " +
-                  ", ".join("#%d %s" % (i, codes[o]) for i, o in enumerate(want, start=1)), now()))
     db().commit()
     return jsonify({"ok": True, "changed": True})
 
@@ -6352,9 +6702,6 @@ def api_send_to_driver():
                            (did,)).fetchone()["s"]
         db().execute("""UPDATE orders SET driver_id=?, dispatch_status='assigned', stack_seq=?,
                         hold_reason=NULL WHERE id=?""", (did, seq, o["id"]))
-        db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
-                     (did, "dispatch", session.get("dispatcher_name", "dispatch"),
-                      "Order " + o["code"] + " was sent to you from the pending column.", now()))
         db().commit()
         log("send_to_driver", o["code"] + " -> " + d["name"])
         return jsonify({"ok": True, "driver": d["name"]})
@@ -6661,6 +7008,20 @@ def dispatch_settings():
         for key in ("base_fee_cents", "base_miles", "per_mile_cents", "tax_rate_bp", "auto_assign", "kitchen_hold"):
             if key in request.form:
                 db().execute("UPDATE settings SET value=? WHERE key=?", (request.form[key], key))
+        for key in ("keep_awake_driver", "keep_awake_kitchen"):
+            if key in request.form:
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                             (key, "1" if str(request.form.get(key)).strip() == "1" else "0"))
+        if "stack_by_location" in request.form:
+            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('stack_by_location',?)",
+                         ("1" if str(request.form.get("stack_by_location")).strip() == "1" else "0",))
+        for key, lo, hi in (("stack_pickup_mi", 0.05, 10), ("stack_detour_mi", 0, 30)):
+            if key in request.form:
+                try:
+                    v = max(lo, min(hi, float(str(request.form.get(key)).strip())))
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, "%g" % v))
+                except Exception:
+                    pass
         if "auto_driver_pay" in request.form:
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('auto_driver_pay',?)",
                          ("1" if request.form.get("auto_driver_pay") == "1" else "0",))
@@ -6770,6 +7131,10 @@ def dispatch_settings():
 
 @app.get("/api/chat/<int:driver_id>")
 def api_chat(driver_id):
+    if session.get("driver_id") != driver_id:
+        bad = out_of_scope(driver_id)
+        if bad:
+            return bad
     if dispatcher_required() and request.args.get("peek") != "1":
         db().execute("""UPDATE messages SET seen_by_dispatch=1
                         WHERE driver_id=? AND sender='driver' AND seen_by_dispatch=0""", (driver_id,))
@@ -6790,6 +7155,10 @@ def api_chat_send(driver_id):
     body = (data.get("body") or "").strip()
     if not body:
         return jsonify({"ok": False}), 400
+    if sender == "dispatch":
+        bad = out_of_scope(driver_id)
+        if bad:
+            return bad
     who = session.get("dispatcher_name") if sender == "dispatch" else None
     db().execute("""INSERT INTO messages(driver_id,sender,sender_name,dispatcher_id,body,created_at,
                                         seen_by_dispatch)
@@ -6870,12 +7239,254 @@ def driver_logout():
 def driver():
     if not session.get("driver_id"):
         return redirect(url_for("driver_login"))
+    _ph = dispatch_phone(driver_phone_region(session["driver_id"]))
     return render_template("driver.html", driver_id=session["driver_id"],
                            driver_name=session["driver_name"],
-                           dispatch_phone=dispatch_phone(), dispatch_tel=tel_digits(dispatch_phone()))
+                           dispatch_phone=nice_phone(_ph), dispatch_tel=tel_digits(_ph),
+                           awake_default=awake_default("driver"))
+
+
+def awake_default(app_name):
+    """Business default for the Keep screen awake switch. Each device can still turn it off."""
+    v = setting("keep_awake_" + app_name, str)
+    return "0" if str(v) == "0" else "1"
+
+
+
+# ---------------- Google map pictures (Map Tiles API) ----------------
+_TILE_SESSION = {}
+
+
+def google_tile_session(site_url):
+    """One Google map session, reused for about two weeks. None when Google maps are off
+    or the key isn't allowed to use the Map Tiles API."""
+    if not GOOGLE_TILE_KEY:
+        return None
+    hit = _TILE_SESSION.get("s")
+    if hit and hit["until"] > time.time():
+        return hit
+    if _TILE_SESSION.get("fail_until", 0) > time.time():
+        return None
+    try:
+        body = json.dumps({"mapType": "roadmap", "language": "en-US", "region": "US",
+                           "scale": "scaleFactor2x", "highDpi": True}).encode()
+        req = urllib.request.Request("https://tile.googleapis.com/v1/createSession?key="
+                                     + urllib.parse.quote(GOOGLE_TILE_KEY), data=body, method="POST",
+                                     headers={"Content-Type": "application/json", "Referer": site_url})
+        res = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+        tok = res.get("session")
+        if not tok:
+            raise ValueError("no session")
+        exp = float(res.get("expiry") or 0) or (time.time() + 13 * 86400)
+        copy = "Map data \u00a9" + str(dt.date.today().year) + " Google"
+        try:
+            vu = ("https://tile.googleapis.com/tile/v1/viewport?session=%s&key=%s&zoom=12"
+                  "&north=33.0&south=32.4&east=-85.0&west=-85.7" % (tok, urllib.parse.quote(GOOGLE_TILE_KEY)))
+            vreq = urllib.request.Request(vu, headers={"Referer": site_url})
+            vv = json.loads(urllib.request.urlopen(vreq, timeout=8).read().decode())
+            if vv.get("copyright"):
+                copy = vv["copyright"]
+        except Exception:
+            pass
+        hit = {"session": tok, "until": min(exp, time.time() + 13 * 86400) - 3600,
+               "size": res.get("tileWidth") or 512, "copyright": copy}
+        _TILE_SESSION["s"] = hit
+        return hit
+    except Exception as e:
+        app.logger.warning("Google map tiles unavailable: %s", e)
+        _TILE_SESSION["fail_until"] = time.time() + 600
+        return None
+
+
+@app.get("/api/map-tiles")
+def api_map_tiles():
+    """Which map pictures to draw: Google when a key is set, OpenStreetMap otherwise."""
+    ses = google_tile_session(request.host_url)
+    if not ses:
+        return jsonify({"ok": True, "provider": "osm",
+                        "url": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
+                        "attribution": "&copy; OpenStreetMap", "max_zoom": 19, "tile_size": 256})
+    return jsonify({"ok": True, "provider": "google",
+                    "url": "https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session=%s&key=%s"
+                           % (ses["session"], urllib.parse.quote(GOOGLE_TILE_KEY)),
+                    "attribution": ses["copyright"], "max_zoom": 22, "tile_size": ses["size"]})
+
+
+@app.get("/api/maps-status")
+def api_maps_status():
+    """Owner check: which Google map features are working right now."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    out = {"server_key": bool(GOOGLE_KEY), "browser_key": bool(os.environ.get("GOOGLE_MAPS_BROWSER_KEY")),
+           "map_tiles": bool(google_tile_session(request.host_url))}
+    def probe(url):
+        try:
+            r = json.loads(urllib.request.urlopen(url, timeout=10).read().decode())
+            return r.get("status", "?") + ((": " + r["error_message"]) if r.get("error_message") else "")
+        except Exception as e:
+            return "error: " + str(e)[:120]
+    if GOOGLE_KEY:
+        k = urllib.parse.quote(GOOGLE_KEY)
+        out["geocoding"] = probe("https://maps.googleapis.com/maps/api/geocode/json?address=Opelika,AL&key=" + k)
+        try:
+            rt = google_routes((32.6454, -85.3783), (32.6099, -85.4808), "routes.duration,routes.distanceMeters")
+            out["routes"] = "OK (%.1f mi, %d min)" % (rt.get("distanceMeters", 0) / 1609.34, round(_gsecs(rt.get("duration")) / 60))
+        except Exception as e:
+            out["routes"] = "error: " + str(e)[:200]
+    return jsonify(dict(out, ok=True))
+
+# ---------------- in-app navigation ----------------
+_ROUTE_CACHE = {}
+
+
+def _ll(v):
+    try:
+        a, b = [float(x) for x in str(v).split(",")[:2]]
+        if -90 <= a <= 90 and -180 <= b <= 180:
+            return a, b
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _decode_poly(enc):
+    pts, idx, lat, lng = [], 0, 0, 0
+    while idx < len(enc):
+        for which in (0, 1):
+            shift = res = 0
+            while True:
+                b = ord(enc[idx]) - 63; idx += 1
+                res |= (b & 0x1f) << shift; shift += 5
+                if b < 0x20:
+                    break
+            d = ~(res >> 1) if res & 1 else (res >> 1)
+            if which == 0:
+                lat += d
+            else:
+                lng += d
+        pts.append([lat / 1e5, lng / 1e5])
+    return pts
+
+
+_TURN = {"left": "left", "right": "right", "slight left": "slight left", "slight right": "slight right",
+         "sharp left": "sharp left", "sharp right": "sharp right", "uturn": "uturn", "straight": "straight"}
+
+
+def _osrm_text(st):
+    m = st.get("maneuver") or {}
+    t, mod = m.get("type", ""), m.get("modifier", "")
+    road = st.get("name") or st.get("ref") or ""
+    onto = (" onto " + road) if road else ""
+    if t == "depart":
+        return "Head out" + ((" on " + road) if road else "")
+    if t == "arrive":
+        return "You have arrived"
+    if t in ("roundabout", "rotary"):
+        ex = m.get("exit")
+        return "At the roundabout take the " + ((_ordinal(ex) + " exit") if ex else "exit") + onto
+    if t in ("merge",):
+        return "Merge" + ((" " + mod) if mod and mod != "straight" else "") + onto
+    if t in ("on ramp",):
+        return "Take the ramp" + ((" on the " + mod) if mod in ("left", "right") else "") + onto
+    if t in ("off ramp",):
+        return "Take the exit" + ((" on the " + mod) if mod in ("left", "right") else "") + onto
+    if t == "fork":
+        return "Keep " + (mod.replace("slight ", "") or "straight") + " at the fork" + onto
+    if t == "end of road":
+        return "At the end of the road turn " + (mod or "") + onto
+    if mod == "uturn":
+        return "Make a U-turn" + onto
+    if mod == "straight" or t == "new name" or t == "continue":
+        return "Continue" + onto if road else "Continue straight"
+    return "Turn " + (mod or "") + onto
+
+
+def _ordinal(n):
+    try:
+        n = int(n)
+    except (TypeError, ValueError):
+        return ""
+    return str(n) + ("th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th"))
+
+
+def _route_osrm(a, b):
+    url = ("https://router.project-osrm.org/route/v1/driving/%f,%f;%f,%f"
+           "?overview=full&geometries=geojson&steps=true" % (a[1], a[0], b[1], b[0]))
+    req = urllib.request.Request(url, headers={"User-Agent": "FleetDelivery/1.0"})
+    data = json.loads(urllib.request.urlopen(req, timeout=12).read().decode())
+    if data.get("code") != "Ok" or not data.get("routes"):
+        return None
+    rt = data["routes"][0]
+    steps = []
+    for leg in rt["legs"]:
+        for st in leg["steps"]:
+            loc = st["maneuver"]["location"]
+            steps.append({"text": _osrm_text(st), "type": st["maneuver"].get("type", ""),
+                          "modifier": st["maneuver"].get("modifier", ""),
+                          "lat": loc[1], "lng": loc[0], "dist_m": st.get("distance", 0),
+                          "dur_s": st.get("duration", 0)})
+    return {"coords": [[c[1], c[0]] for c in rt["geometry"]["coordinates"]], "steps": steps,
+            "distance_m": rt.get("distance", 0), "duration_s": rt.get("duration", 0), "source": "osm"}
+
+
+def _route_google(a, b):
+    url = ("https://maps.googleapis.com/maps/api/directions/json?origin=%f,%f&destination=%f,%f"
+           "&mode=driving&departure_time=now&key=%s" % (a[0], a[1], b[0], b[1], GOOGLE_KEY))
+    data = json.loads(urllib.request.urlopen(url, timeout=12).read().decode())
+    if data.get("status") != "OK" or not data.get("routes"):
+        return None
+    leg = data["routes"][0]["legs"][0]
+    steps, coords = [], []
+    for st in leg["steps"]:
+        txt = re.sub(r"<div[^>]*>", ". ", st.get("html_instructions", ""))
+        txt = re.sub(r"<[^>]+>", "", txt).replace("&nbsp;", " ").replace("&amp;", "&").strip()
+        man = st.get("maneuver", "") or ""
+        mod = ("uturn" if "uturn" in man else "slight left" if "slight-left" in man else
+               "slight right" if "slight-right" in man else "sharp left" if "sharp-left" in man else
+               "sharp right" if "sharp-right" in man else "left" if "left" in man else
+               "right" if "right" in man else "straight")
+        steps.append({"text": txt, "type": "depart" if not steps else "turn", "modifier": mod,
+                      "lat": st["start_location"]["lat"], "lng": st["start_location"]["lng"],
+                      "dist_m": st["distance"]["value"], "dur_s": st["duration"]["value"]})
+        coords += _decode_poly(st["polyline"]["points"])
+    steps.append({"text": "You have arrived", "type": "arrive", "modifier": "",
+                  "lat": leg["end_location"]["lat"], "lng": leg["end_location"]["lng"],
+                  "dist_m": 0, "dur_s": 0})
+    dur = (leg.get("duration_in_traffic") or leg["duration"])["value"]
+    return {"coords": coords, "steps": steps, "distance_m": leg["distance"]["value"],
+            "duration_s": dur, "source": "google"}
+
+
+@app.get("/api/driver/route")
+def api_driver_route():
+    """Turn-by-turn driving directions for the driver app's built-in navigation."""
+    if not session.get("driver_id") and not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    a, b = _ll(request.args.get("from")), _ll(request.args.get("to"))
+    if not a or not b:
+        return jsonify({"ok": False, "error": "Need your location and the stop's location."}), 400
+    key = "%.4f,%.4f>%.5f,%.5f" % (a[0], a[1], b[0], b[1])
+    hit = _ROUTE_CACHE.get(key)
+    if hit and time.time() - hit[0] < 120:
+        return jsonify(dict(hit[1], ok=True))
+    rt = None
+    for fn in ((_route_google_routes, _route_google, _route_osrm) if GOOGLE_KEY else (_route_osrm,)):
+        try:
+            rt = fn(a, b)
+        except Exception:
+            rt = None
+        if rt:
+            break
+    if not rt:
+        return jsonify({"ok": False, "error": "Couldn't get directions right now. Use Maps app instead."}), 502
+    if len(_ROUTE_CACHE) > 500:
+        _ROUTE_CACHE.clear()
+    _ROUTE_CACHE[key] = (time.time(), rt)
+    return jsonify(dict(rt, ok=True))
 
 @app.get("/api/driver/state")
 def api_driver_state():
+    remind_unreceived()
     try:
         payout_sweep(); auto_driver_pay_sweep()
     except Exception as e:
@@ -6903,7 +7514,8 @@ def api_driver_state():
     scheduled = d["status"] != "offline" or driver_group(d) == "scheduled"
     return jsonify({"ok": True,
                     "business_open": business_is_open(),
-                    "dispatch_tel": tel_digits(dispatch_phone()),
+                    "dispatch_tel": tel_digits(dispatch_phone(driver_phone_region(did))),
+                    "dispatch_phone": nice_phone(dispatch_phone(driver_phone_region(did))),
                     "late": [x for x in late_accepts() if x["kind"] == "driver" and x["driver_id"] == did],
                     "business_name": (setting("business_name", str) or "Fleet Delivery"),
                     "scheduled": scheduled,
@@ -7127,8 +7739,11 @@ def rest_home():
     if not session.get("restaurant_id"):
         return redirect(url_for("rest_login"))
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (session["restaurant_id"],)).fetchone()
+    _ph = dispatch_phone(r["region_id"])
     return render_template("rest.html", r=r, open=is_open(r), hours=hours_label(r),
-                           dispatch_phone=dispatch_phone(), dispatch_tel=tel_digits(dispatch_phone()))
+                           awake_default=awake_default("kitchen"),
+                           dispatch_phone=nice_phone(_ph), dispatch_tel=tel_digits(_ph),
+                           region_phone=nice_phone(_ph) if r["region_id"] and _ph != dispatch_phone() else "")
 
 @app.get("/api/restaurant/orders")
 def api_rest_orders():
@@ -7217,7 +7832,7 @@ def api_catalog():
                 "regions_label": region_names(driver_region_ids(d["id"])) if driver_region_ids(d["id"]) else "No region",
                 "locked": not driver_unlocked(d["id"]),
                 "unlock_block": driver_unlock_block(d["id"]) or ""}
-               for d in db().execute("SELECT * FROM drivers ORDER BY name").fetchall()]
+               for d in scoped_drivers(db().execute("SELECT * FROM drivers ORDER BY name").fetchall())]
     return jsonify({"ok": True, "restaurants": rests, "drivers": drivers, "owner": is_owner()})
 
 
@@ -7502,6 +8117,10 @@ def api_driver_crud():
         return jsonify({"ok": False}), 403
     b = request.get_json(force=True)
     op = b.get("op")
+    if op in ("update", "delete"):
+        bad = out_of_scope(b.get("driver_id"))
+        if bad:
+            return bad
     if op in ("update", "delete") and not driver_unlocked(b.get("driver_id")):
         return jsonify({"ok": False, "error": "This driver is locked. Press Unlock and enter your username and password first."}), 403
     if op in ("update", "delete") and not is_owner():
@@ -7910,8 +8529,37 @@ def portal_front_door():
     return None
 
 
-def dispatch_phone():
+def dispatch_phone(rid=None):
+    """The dispatch number for a region when it has its own, otherwise the business number."""
+    if rid:
+        try:
+            r = db().execute("SELECT phone FROM regions WHERE id=?", (int(rid),)).fetchone()
+            if r and (r["phone"] or "").strip():
+                return r["phone"].strip()
+        except Exception:
+            pass
     return (setting("dispatch_phone", str) or "").strip()
+
+
+def driver_phone_region(did):
+    """Which region's dispatch number a driver should call: the region of their live order,
+    else the one region they are working. None when it's unclear (business number)."""
+    if not did:
+        return None
+    lk = driver_locked_regions(did)
+    if len(lk) == 1:
+        return next(iter(lk))
+    wr = driver_work_regions(did)
+    if len(wr) == 1:
+        return next(iter(wr))
+    return None
+
+
+def nice_phone(p):
+    d = "".join(c for c in (p or "") if c.isdigit())
+    if len(d) == 11 and d.startswith("1"):
+        d = d[1:]
+    return ("(%s) %s-%s" % (d[:3], d[3:6], d[6:])) if len(d) == 10 else (p or "")
 
 def tel_digits(p):
     """Phone number in the form every phone dials: +1 and ten digits."""
@@ -7934,7 +8582,7 @@ def open_call_alerts():
                            WHERE a.cleared_at IS NULL ORDER BY a.id DESC LIMIT 20""").fetchall()
     out = []
     for a in rows:
-        item = {"id": a["id"], "who": a["who"], "name": a["name"],
+        item = {"id": a["id"], "who": a["who"], "name": a["name"], "driver_id": a["driver_id"],
                 "phone": a["phone"] or "", "tel": tel_digits(a["phone"]),
                 "note": a["note"] or "", "order": a["code"] or "",
                 "at": clock(a["created_at"]), "when": a["created_at"], "location": None}
@@ -7952,8 +8600,12 @@ def open_call_alerts():
 
 
 def accept_limit(key, default):
+    """Minutes from Settings. A saved 0 means off, so only a missing value uses the default."""
     try:
-        return max(0, min(60, int(setting(key) or default)))
+        v = setting(key, str)
+        if v is None or str(v).strip() == "":
+            return default
+        return max(0, min(60, int(float(v))))
     except Exception:
         return default
 
@@ -7988,6 +8640,28 @@ def late_accepts():
                         "driver_id": x["driver_id"], "minutes": mins,
                         "loud": True})
     return out
+
+def remind_unreceived():
+    """No chat message goes out when an order is handed to a driver. Only if they still
+    haven't tapped Received after the minutes set in Settings (Driver must tap Received
+    within) does an automatic reminder go out, once per hand-off. 0 turns reminders off."""
+    dm = accept_limit("driver_accept_min", 3)
+    if not dm:
+        return 0
+    cut = (dt.datetime.now() - dt.timedelta(minutes=dm)).isoformat(timespec="seconds")
+    rows = db().execute("""SELECT id, code, driver_id, driver_paged_at FROM orders
+                           WHERE dispatch_status='assigned' AND driver_id IS NOT NULL
+                             AND driver_paged_at IS NOT NULL AND driver_paged_at < ?
+                             AND COALESCE(driver_reminded_for,'') != driver_paged_at""", (cut,)).fetchall()
+    for o in rows:
+        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                     (o["driver_id"], "system", "Order " + o["code"] + " is still waiting for you. "
+                      "Tap Received to accept it, or call dispatch if you can't take it.", now()))
+        db().execute("UPDATE orders SET driver_reminded_for=? WHERE id=?", (o["driver_paged_at"], o["id"]))
+    if rows:
+        db().commit()
+    return len(rows)
+
 
 def awaiting_accept():
     """Orders handed to a driver who has not tapped Received yet."""
@@ -8178,7 +8852,10 @@ def business_is_open():
 def api_dispatch_alerts():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
-    return jsonify({"ok": True, "alerts": open_call_alerts(), "awaiting": awaiting_accept()})
+    alerts = open_call_alerts()
+    if dispatcher_driver_scope() is not None:
+        alerts = [a for a in alerts if a.get("who") != "driver" or driver_in_scope(a.get("driver_id"))]
+    return jsonify({"ok": True, "alerts": alerts, "awaiting": awaiting_accept()})
 
 @app.post("/api/driver/call-dispatch")
 def api_driver_call_dispatch():
@@ -8197,7 +8874,11 @@ def api_driver_call_dispatch():
         update_driver_addr(did, lat, lng, force=True)
     raise_call_alert("driver", d["name"], d["phone"], (data.get("note") or "").strip()[:160],
                      driver_id=did, order_id=data.get("order_id") or None)
-    return jsonify({"ok": True, "phone": dispatch_phone()})
+    oreg = None
+    if data.get("order_id"):
+        _o = db().execute("SELECT region_id FROM orders WHERE id=? AND driver_id=?", (data.get("order_id"), did)).fetchone()
+        oreg = _o["region_id"] if _o else None
+    return jsonify({"ok": True, "phone": dispatch_phone(oreg or driver_phone_region(did))})
 
 @app.post("/api/restaurant/call-dispatch")
 def api_rest_call_dispatch():
@@ -8210,7 +8891,7 @@ def api_rest_call_dispatch():
     o = db().execute("SELECT * FROM orders WHERE code=? AND restaurant_id=?", (code, rid)).fetchone() if code else None
     raise_call_alert("restaurant", r["name"], r["phone"], (data.get("note") or "").strip()[:160],
                      restaurant_id=rid, order_id=(o["id"] if o else None))
-    return jsonify({"ok": True, "phone": dispatch_phone()})
+    return jsonify({"ok": True, "phone": dispatch_phone((o["region_id"] if o else None) or r["region_id"])})
 
 @app.post("/api/dispatch/alert-clear")
 def api_alert_clear():

@@ -98,12 +98,23 @@ async function hrSave(){
   document.getElementById('hrModal').remove();
   load();
 }
+
+async function phoneRegion(id){
+  const r = RG.regions.find(x => x.id === id); if (!r) return;
+  const v = prompt('Dispatch number for '+r.name+'. Drivers, kitchens and customers in this region call this number.\nLeave it blank to use the business number'+(r.business_phone?' ('+r.business_phone+')':'')+'.', r.phone || '');
+  if (v === null) return;
+  const res = await jpost('/api/dispatch/region-phone', {region_id:id, phone:v});
+  if (!res.ok){ alert(res.error || 'That did not save.'); return; }
+  load();
+}
 async function load(){ const r = await jget('/api/dispatch/regions'); if(!r.ok){ window.location='/dispatch/login'; return; } RG = r; draw(); }
 function draw(){
   document.getElementById('rgList').innerHTML = RG.regions.length ? RG.regions.map(r=>
     '<div class="row between schedrow"><span><strong>'+e(r.name)+'</strong> <span class="muted small">'+r.restaurants+' restaurant'+(r.restaurants===1?'':'s')+'</span>'+
-    '<div class="muted small">Hours: '+e(r.own_hours ? r.hours_label : 'business hours ('+r.hours_label+')')+(r.closed_label?' &middot; '+e(r.closed_label):'')+'</div></span>'+
+    '<div class="muted small">Hours: '+e(r.own_hours ? r.hours_label : 'business hours ('+r.hours_label+')')+(r.closed_label?' &middot; '+e(r.closed_label):'')+'</div>'+
+    '<div class="muted small">Dispatch number: '+e(r.phone ? r.phone : 'business number'+(r.business_phone?' ('+r.business_phone+')':''))+'</div></span>'+
     '<span><button class="btn tiny" onclick="hoursRegion('+r.id+')">Hours &amp; closed dates</button>'+
+    '<button class="btn tiny" onclick="phoneRegion('+r.id+')">Dispatch number</button>'+
     '<button class="btn tiny" onclick="renRegion('+r.id+')">Rename</button>'+
     '<button class="btn tiny danger" onclick="delRegion('+r.id+')">Delete</button></span></div>').join('')
     : '<p class="muted small">No regions yet. Add one below.</p>';
