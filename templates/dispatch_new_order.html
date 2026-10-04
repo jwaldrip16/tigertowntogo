@@ -58,12 +58,6 @@
     {% endif %}
     <h3>Customer</h3>
     <input id="ref" placeholder="Their order number (optional)">
-    <label>Tag</label>
-    <select id="token">
-      <option value="">Match how it came in</option>
-      {% for t in tokens %}<option value="{{ t }}">{{ t }}</option>{% endfor %}
-    </select>
-    <div class="muted small" id="refNote">Whatever the shop calls this order. Ours is assigned on its own.</div>
     <input id="name" placeholder="Customer name">
     <input id="phone" placeholder="Phone">
     <textarea id="address" rows="2" placeholder="Street, city, state, ZIP"></textarea>

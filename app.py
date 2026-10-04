@@ -381,6 +381,11 @@ def init_db():
     ensure_column(con, "regions", "hours", "TEXT")          # blank = use the business hours
     ensure_column(con, "regions", "closed_dates", "TEXT")   # "2026-11-26,2026-12-25"
     ensure_column(con, "regions", "phone", "TEXT")          # blank = the business dispatch number
+    ensure_column(con, "regions", "min_order_cents", "INTEGER")   # blank = no minimum
+    ensure_column(con, "regions", "max_miles", "REAL")            # blank = no radius limit
+    ensure_column(con, "restaurants", "min_order_cents", "INTEGER")  # blank = use the region's
+    ensure_column(con, "restaurants", "max_miles", "REAL")           # blank = use the region's
+    ensure_column(con, "drivers", "active", "INTEGER DEFAULT 1")
     ensure_column(con, "orders", "region_id", "INTEGER")
     ensure_column(con, "availability", "region_ids", "TEXT")
     ensure_column(con, "dispatchers", "is_owner", "INTEGER DEFAULT 0")
@@ -757,6 +762,55 @@ def geocode(raw):
     db().commit()
     return res
 
+ZIP_RE = re.compile(r"\b(\d{5})(?:-\d{4})?\b")
+
+def zip_of(text):
+    hits = ZIP_RE.findall(text or "")
+    return hits[-1] if hits else None
+
+def zip_center(z):
+    """Center point of a 5-digit US ZIP code, cached. None when it can't be found."""
+    key = "zip:" + z
+    row = db().execute("SELECT * FROM geocache WHERE q=? AND ok=1", (key,)).fetchone()
+    if row:
+        return {"lat": row["lat"], "lng": row["lng"], "formatted": row["formatted"]}
+    res = None
+    try:
+        if GOOGLE_KEY:
+            url = ("https://maps.googleapis.com/maps/api/geocode/json?components=postal_code:"
+                   + z + "|country:US&key=" + GOOGLE_KEY)
+            data = json.loads(urllib.request.urlopen(url, timeout=8).read())
+            if data.get("status") == "OK":
+                loc = data["results"][0]["geometry"]["location"]
+                res = {"lat": loc["lat"], "lng": loc["lng"], "formatted": data["results"][0]["formatted_address"]}
+        else:
+            url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&postalcode=" + z
+            req = urllib.request.Request(url, headers={"User-Agent": "fleetdelivery/1.0"})
+            data = json.loads(urllib.request.urlopen(req, timeout=8).read())
+            if data:
+                res = {"lat": float(data[0]["lat"]), "lng": float(data[0]["lon"]), "formatted": data[0]["display_name"]}
+    except Exception:
+        res = None
+    if res:
+        db().execute("INSERT OR REPLACE INTO geocache(q,formatted,lat,lng,ok) VALUES(?,?,?,?,1)",
+                     (key, res["formatted"], res["lat"], res["lng"]))
+        db().commit()
+    return res
+
+def zip_check(r, typed):
+    """For an address we couldn't verify: is its ZIP code inside the delivery radius?"""
+    z = zip_of(typed)
+    if not z:
+        return {"zip": None, "found": False}
+    zc = zip_center(z)
+    if not zc or not _rv(r, "lat") or not _rv(r, "lng"):
+        return {"zip": z, "found": False}
+    miles = round(haversine_miles(r["lat"], r["lng"], zc["lat"], zc["lng"]) * ROAD_FACTOR, 2)
+    rules = delivery_rules(r)
+    return {"zip": z, "found": True, "miles": miles, "fee": fee_for_miles(miles),
+            "max_miles": rules["max_miles"],
+            "within": (not rules["max_miles"]) or miles <= rules["max_miles"]}
+
 def fee_for_miles(miles):
     base_fee = setting("base_fee_cents")
     base_miles = setting("base_miles")
@@ -764,6 +818,25 @@ def fee_for_miles(miles):
     if miles <= base_miles:
         return base_fee
     return base_fee + int(math.ceil(miles - base_miles)) * per_mile
+
+def _rv(row, key):
+    try:
+        return row[key]
+    except Exception:
+        return None
+
+def delivery_rules(r):
+    """Minimum order and delivery radius for a restaurant. The restaurant's own setting wins;
+    blank uses its region's; blank there means no limit."""
+    reg = _region(_rv(r, "region_id"))
+    mn, mn_src = _rv(r, "min_order_cents"), "restaurant"
+    if mn is None:
+        mn, mn_src = (_rv(reg, "min_order_cents") if reg is not None else None), "region"
+    mx, mx_src = _rv(r, "max_miles"), "restaurant"
+    if mx is None:
+        mx, mx_src = (_rv(reg, "max_miles") if reg is not None else None), "region"
+    return {"min_cents": int(mn or 0), "max_miles": float(mx or 0),
+            "min_from": mn_src if mn else "", "miles_from": mx_src if mx else ""}
 
 def quote(restaurant, lat, lng):
     miles = round(haversine_miles(restaurant["lat"], restaurant["lng"], lat, lng) * ROAD_FACTOR, 2)
@@ -1176,7 +1249,7 @@ def on_shift_drivers():
         SELECT d.*, (SELECT COUNT(*) FROM orders o
                      WHERE o.driver_id=d.id
                        AND o.dispatch_status NOT IN ('delivered','cancelled')) AS load
-        FROM drivers d WHERE d.status='online'
+        FROM drivers d WHERE d.status='online' AND COALESCE(d.active,1)=1
         ORDER BY load ASC,
                  MAX(COALESCE(d.last_completed_at,''), COALESCE(d.last_assigned_at,''),
                      COALESCE(d.online_since,'')) ASC,
@@ -2115,7 +2188,7 @@ def home():
         # restaurants with no region show in every area
         rs = [r for r in rs if not r["region_id"] or r["region_id"] == sel_id]
     cards = [{"r": r, "open": biz_on and business_in_hours(rid=r["region_id"]) and is_open(r),
-              "hours": hours_label(r)} for r in rs]
+              "hours": hours_label(r), "rules": delivery_rules(r)} for r in rs]
     sel_name = next((g["name"] for g in regions if g["id"] == sel_id), "")
     if sel_id:
         biz = biz_on and business_in_hours(rid=sel_id)
@@ -2137,7 +2210,7 @@ def menu(slug):
     items = db().execute("SELECT * FROM menu_items WHERE restaurant_id=? AND active=1", (r["id"],)).fetchall()
     biz = business_is_open() and business_in_hours(rid=r["region_id"])
     open_now = biz and (any_rest_open() if r["slug"] == "oneoff" else is_open(r))
-    return render_template("menu.html", r=r, items=items, open=open_now, biz_open=biz,
+    return render_template("menu.html", r=r, rules=delivery_rules(r), items=items, open=open_now, biz_open=biz,
                            hours=hours_label(r), custom=(r["slug"] == "oneoff"),
                            base_fee=money(setting("base_fee_cents")),
                            base_miles=setting("base_miles"),
@@ -2161,13 +2234,40 @@ def api_quote():
         r["address"], r["lat"], r["lng"] = gp["formatted"], gp["lat"], gp["lng"]
     g1 = geocode(data.get("address", ""))
     if not g1["ok"]:
-        return jsonify({"ok": False, "error": "We could not verify that address. Add the city, state and ZIP."})
+        # street not found: fall back to the ZIP code and the delivery radius
+        zc = zip_check(r, data.get("address", ""))
+        if zc["found"] and zc["within"]:
+            return jsonify({"ok": False, "zip_ok": True, "zip": zc["zip"], "miles": zc["miles"],
+                            "fee_cents": zc["fee"], "fee": money(zc["fee"]),
+                            "error": "We couldn't find that exact street, but ZIP %s is in %s's delivery area (about %.1f mi)."
+                                     % (zc["zip"], r["name"], zc["miles"])})
+        if zc["found"]:
+            return jsonify({"ok": False, "out_of_range": True, "zip": zc["zip"], "error":
+                            "ZIP %s is about %.1f mi from %s. %s delivers up to %g mi."
+                            % (zc["zip"], zc["miles"], r["name"], r["name"], zc["max_miles"])})
+        if zc["zip"]:
+            return jsonify({"ok": False, "error": "We could not verify that address or find ZIP %s. "
+                                                  "Check the ZIP code or call dispatch." % zc["zip"]})
+        return jsonify({"ok": False, "error": "We could not verify that address. Add the 5-digit ZIP code "
+                                              "so we can check it's in our delivery area."})
     miles, fee = quote(r, g1["lat"], g1["lng"])
     if miles > 60:
         return jsonify({"ok": False, "error":
                         "That matched a place %s mi from %s. Add the street number, city, state and ZIP."
                         % (int(miles), r["name"])})
+    rules = delivery_rules(r)
+    warning = ""
+    if rules["max_miles"] and miles > rules["max_miles"]:
+        txt = ("That address is %.1f mi from %s. %s delivers up to %g mi."
+               % (miles, r["name"], r["name"], rules["max_miles"]))
+        if dispatcher_required():
+            warning = txt + " Dispatch can still place it."
+        else:
+            return jsonify({"ok": False, "out_of_range": True, "error": txt})
     return jsonify({"ok": True, "formatted": g1["formatted"], "lat": g1["lat"], "lng": g1["lng"],
+                    "warning": warning, "min_order_cents": rules["min_cents"],
+                    "min_order": money(rules["min_cents"]) if rules["min_cents"] else "",
+                    "max_miles": rules["max_miles"],
                     "miles": miles, "fee_cents": fee, "fee": money(fee),
                     "restaurant": r["name"], "restaurant_address": r["address"],
                     "restaurant_lat": r["lat"], "restaurant_lng": r["lng"]})
@@ -3168,6 +3268,12 @@ def checkout():
     ifee = item_fees(items)
     if subtotal <= 0:
         return jsonify({"ok": False, "error": "Your cart is empty."}), 400
+    if not dispatcher_required():
+        _mr = delivery_rules(r)
+        if _mr["min_cents"] and subtotal < _mr["min_cents"]:
+            return jsonify({"ok": False, "below_minimum": True, "error":
+                            "%s has a %s minimum order. Add %s more to check out."
+                            % (r["name"], money(_mr["min_cents"]), money(_mr["min_cents"] - subtotal))}), 400
     # items with set days or hours: customers and drivers cannot order them outside those times.
     # A dispatcher can still add one by hand for a call-in.
     if not dispatcher_required():
@@ -3234,8 +3340,27 @@ def checkout():
     else:
         formatted, lat, lng = typed, None, None
         miles, fee = 0, setting("base_fee_cents")
+        _zc = zip_check(r, typed)
+        if _zc["found"]:                 # priced from the ZIP code's center until dispatch confirms the address
+            miles, fee = _zc["miles"], _zc["fee"]
     if payload.get("fee_cents_override") not in (None, ""):
         fee = max(0, int(round(float(payload["fee_cents_override"]))))
+    if not dispatcher_required():
+        # customers and drivers: the restaurant's (or its region's) minimum and delivery radius.
+        # Dispatch can still place an order outside them for a call-in.
+        rules = delivery_rules(r)
+        if not address_ok:
+            if not _zc["found"]:
+                return jsonify({"ok": False, "error":
+                                "We could not verify that address. Add the 5-digit ZIP code or call dispatch."}), 400
+            if not _zc["within"]:
+                return jsonify({"ok": False, "out_of_range": True, "error":
+                                "ZIP %s is about %.1f mi from %s. %s delivers up to %g mi."
+                                % (_zc["zip"], _zc["miles"], r["name"], r["name"], _zc["max_miles"])}), 400
+        if rules["max_miles"] and address_ok and miles > rules["max_miles"]:
+            return jsonify({"ok": False, "out_of_range": True, "error":
+                            "That address is %.1f mi from %s. %s delivers up to %g mi."
+                            % (miles, r["name"], r["name"], rules["max_miles"])}), 400
     tax = int(round(subtotal * setting("tax_rate_bp") / 10000.0))
     service = int(round(subtotal * setting("service_fee_bp") / 10000.0))
     tip = int(payload.get("tip_cents", 0))
@@ -4157,7 +4282,7 @@ def api_board():
                            ORDER BY COALESCE(delivered_at, created_at) DESC LIMIT 500""", (done_day,)).fetchall()
     drivers = db().execute("""SELECT d.*, (SELECT COUNT(*) FROM orders o WHERE o.driver_id=d.id
                               AND o.dispatch_status IN ('assigned','received','at_restaurant','enroute')) load
-                              FROM drivers d ORDER BY d.name""").fetchall()
+                              FROM drivers d WHERE COALESCE(d.active,1)=1 ORDER BY d.name""").fetchall()
     lines = line_positions()
     rotation = {k: v["pos"] for k, v in lines.items()}
     lineups = region_lineups()
@@ -4258,6 +4383,9 @@ def api_driver_status():
     bad = out_of_scope(did)
     if bad:
         return bad
+    _dv = db().execute("SELECT name, active FROM drivers WHERE id=?", (did,)).fetchone()
+    if _dv and status != "offline" and not (_dv["active"] if _dv["active"] is not None else 1):
+        return jsonify({"ok": False, "error": _dv["name"] + " is inactive. Make them active on the Drivers page first."}), 400
     msg = "Dispatch set you " + status + "."
     if "regions" in data:
         drow = db().execute("SELECT name FROM drivers WHERE id=?", (did,)).fetchone()
@@ -6075,6 +6203,8 @@ def regions_payload():
     return {"ok": True, "me": session.get("dispatcher_id"), "owner": is_owner(),
             "regions": [{"id": r["id"], "name": r["name"],
                          "own_hours": bool(region_own_hours(r["id"])),
+                         "min_order_cents": _rv(_region(r["id"]), "min_order_cents"),
+                         "max_miles": _rv(_region(r["id"]), "max_miles"),
                          "phone": nice_phone((_region(r["id"])["phone"] or "")) if (_region(r["id"])["phone"] or "") else "",
                          "business_phone": nice_phone(dispatch_phone()),
                          "hours_label": business_hours_label(r["id"]) or "no hours limit",
@@ -6082,7 +6212,9 @@ def regions_payload():
                          "restaurants": con.execute("SELECT COUNT(*) c FROM restaurants WHERE region_id=? AND slug!='oneoff'",
                                                     (r["id"],)).fetchone()["c"]} for r in regs],
             "restaurants": [{"id": r["id"], "name": r["name"], "address": r["address"] or "",
-                             "region_id": r["region_id"] or 0}
+                             "region_id": r["region_id"] or 0,
+                             "min_order_cents": r["min_order_cents"], "max_miles": r["max_miles"],
+                             "rules": delivery_rules(r)}
                             for r in con.execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()],
             "drivers": [{"id": d["id"], "name": d["name"], "regions": sorted(driver_region_ids(d["id"]))}
                         for d in con.execute("SELECT id, name FROM drivers ORDER BY name").fetchall()],
@@ -6530,6 +6662,91 @@ def dispatch_hours_page():
     return render_template("dispatch_hours.html")
 
 STACK_UNLIMITED = 999
+
+@app.post("/api/dispatch/driver-active")
+def api_driver_active():
+    """Make a driver inactive (can't sign in, go online or get orders) or active again.
+    Their history and pay records stay."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(silent=True) or {}
+    try:
+        did = int(b.get("driver_id") or 0)
+    except Exception:
+        did = 0
+    d = db().execute("SELECT id, name FROM drivers WHERE id=?", (did,)).fetchone()
+    if not d:
+        return jsonify({"ok": False, "error": "Driver not found."}), 404
+    if out_of_scope(did):
+        return jsonify({"ok": False, "error": "That driver is not in your region."}), 403
+    want = 1 if str(b.get("active")).lower() in ("1", "true", "yes") else 0
+    if not want:
+        live = db().execute("""SELECT COUNT(*) c FROM orders WHERE driver_id=?
+                               AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
+                            (did,)).fetchone()["c"]
+        if live:
+            return jsonify({"ok": False, "error": "%s still has %d live order%s. Move or finish %s first."
+                            % (d["name"], live, "" if live == 1 else "s", "it" if live == 1 else "them")}), 400
+        db().execute("UPDATE drivers SET active=0, status='offline', pending_request=NULL WHERE id=?", (did,))
+    else:
+        db().execute("UPDATE drivers SET active=1 WHERE id=?", (did,))
+    db().commit()
+    log("driver_active", d["name"] + (" active" if want else " inactive") + " by " + (session.get("dispatcher_name") or "dispatch"))
+    auto_assign()
+    return jsonify({"ok": True, "active": want, "driver": d["name"]})
+
+
+@app.post("/api/dispatch/delivery-rules")
+def api_delivery_rules():
+    """Minimum order (dollars) and delivery radius (miles) for a region or one restaurant.
+    Blank clears it: a restaurant then uses its region's, a region then has no limit."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(silent=True) or {}
+    kind = b.get("kind")
+    try:
+        oid = int(b.get("id") or 0)
+    except Exception:
+        oid = 0
+    def num(v, lo, hi, what):
+        v = str(v if v is not None else "").strip().replace("$", "").replace(",", "")
+        if v == "":
+            return None, None
+        try:
+            f = float(v)
+        except Exception:
+            return None, "Enter a number for the " + what + ", or leave it blank."
+        if f < lo or f > hi:
+            return None, "The %s has to be from %g to %g, or blank." % (what, lo, hi)
+        return f, None
+    mn, e1 = num(b.get("min_order"), 0, 500, "minimum order")
+    mx, e2 = num(b.get("max_miles"), 0.5, 100, "delivery radius")
+    if e1 or e2:
+        return jsonify({"ok": False, "error": e1 or e2}), 400
+    mn_c = int(round(mn * 100)) if mn is not None else None
+    if kind == "region":
+        if not _region(oid):
+            return jsonify({"ok": False, "error": "Region not found."}), 404
+        if not _can_edit_region(oid):
+            return jsonify({"ok": False, "error": "You can only change regions you're assigned to."}), 403
+        db().execute("UPDATE regions SET min_order_cents=?, max_miles=? WHERE id=?", (mn_c, mx, oid))
+        name = _region(oid)["name"]
+    elif kind == "restaurant":
+        r = db().execute("SELECT id, name, region_id FROM restaurants WHERE id=?", (oid,)).fetchone()
+        if not r:
+            return jsonify({"ok": False, "error": "Restaurant not found."}), 404
+        if not _can_edit_region(r["region_id"] or 0):
+            return jsonify({"ok": False, "error": "You can only change restaurants in your regions."}), 403
+        db().execute("UPDATE restaurants SET min_order_cents=?, max_miles=? WHERE id=?", (mn_c, mx, oid))
+        name = r["name"]
+    else:
+        return jsonify({"ok": False, "error": "Pick a region or a restaurant."}), 400
+    db().commit()
+    log("delivery_rules", "%s: min %s, radius %s by %s" % (name, money(mn_c) if mn_c else "none",
+                                                          ("%g mi" % mx) if mx else "none",
+                                                          session.get("dispatcher_name") or "dispatch"))
+    return jsonify({"ok": True})
+
 
 @app.post("/api/dispatch/driver-stack")
 def api_driver_stack():
@@ -7223,11 +7440,14 @@ def driver_login():
         phone = "".join(ch for ch in request.form.get("phone", "") if ch.isdigit())
         pin = request.form.get("pin", "")
         row = db().execute("SELECT * FROM drivers WHERE phone=? AND pin=?", (phone, pin)).fetchone()
-        if row:
+        if row and not (row["active"] if row["active"] is not None else 1):
+            err = "Your driver account is inactive. Call dispatch."
+        elif row:
             session["driver_id"] = row["id"]
             session["driver_name"] = row["name"]
             return redirect(url_for("driver"))
-        err = "No driver with that phone and PIN."
+        else:
+            err = "No driver with that phone and PIN."
     return render_template("driver_login.html", err=err)
 
 @app.route("/driver/logout")
@@ -7494,6 +7714,11 @@ def api_driver_state():
     did = session.get("driver_id")
     if not did:
         return jsonify({"ok": False}), 403
+    d = db().execute("SELECT * FROM drivers WHERE id=?", (did,)).fetchone()
+    if not d or not (d["active"] if d["active"] is not None else 1):
+        session.pop("driver_id", None)
+        return jsonify({"ok": False, "inactive": True,
+                        "error": "Your driver account is inactive. Call dispatch."}), 403
     auto_assign()
     d = db().execute("SELECT * FROM drivers WHERE id=?", (did,)).fetchone()
     recompute_queue()
@@ -7824,6 +8049,7 @@ def api_catalog():
                       "paused": r["closed_override"], "open_24": r["open_24"], "items": items})
     drivers = [{"id": d["id"], "name": d["name"], "phone": d["phone"], "pin": d["pin"],
                 "status": d["status"], "payout_wallet": d["payout_wallet"] or "paypal",
+                "active": 0 if d["active"] == 0 else 1,
                 "bank_name": d["bank_name"] or "", "bank_last4": d["bank_last4"] or "",
                 "payout_email": d["payout_email"] or "", "payout_phone": d["payout_phone"] or "",
                 "active_orders": db().execute("""SELECT COUNT(*) c FROM orders WHERE driver_id=?

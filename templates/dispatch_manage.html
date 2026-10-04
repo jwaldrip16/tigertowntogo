@@ -118,8 +118,10 @@ async function load(){
         '<button class="btn tiny" onclick="lockDriver('+d.id+')">Lock</button></div>');
     return '<div class="card pad"><div class="row between"><div><strong>'+esc(d.name)+'</strong> '+
     '<span class="pill '+(d.status==='online'?'green':(d.status==='break'?'amber':'grey'))+'">'+d.status+'</span>'+
+    (d.active ? '' : ' <span class="pill amber">Inactive</span>')+
     '<div class="muted">'+d.active_orders+' live order(s) &middot; '+esc(d.regions_label)+'</div></div>'+
-    (L ? '' : '<button class="btn tiny danger" onclick="delDriver('+d.id+",'"+d.name.replace(/'/g,"")+"'"+')">Delete</button>')+'</div>'+
+    '<span><button class="btn tiny" onclick="setActive('+d.id+','+(d.active?0:1)+')">'+(d.active?'Make inactive':'Make active')+'</button>'+
+    (L ? '' : '<button class="btn tiny danger" onclick="delDriver('+d.id+",'"+d.name.replace(/'/g,"")+"'"+')">Delete</button>')+'</span></div>'+
     lockRow+
     '<div class="row"><input id="dn'+d.id+'" value="'+esc(d.name)+'"'+dis+'>'+
     '<input id="dp'+d.id+'" value="'+esc(d.phone)+'" placeholder="Phone"'+dis+'>'+
@@ -226,6 +228,11 @@ async function saveDriver(id){
     payout_phone:document.getElementById('dv'+id).value,
     bank_name:document.getElementById('dbn'+id).value,
     bank_last4:document.getElementById('dbl'+id).value});
+  if(!res.ok) alert(res.error); load();
+}
+async function setActive(id, on){
+  if (!on && !confirm('Make this driver inactive? They will be signed out and cannot sign in, go online or get orders until you make them active again.')) return;
+  const res = await jpost('/api/dispatch/driver-active', {driver_id:id, active:on});
   if(!res.ok) alert(res.error); load();
 }
 async function delDriver(id, name){

@@ -30,6 +30,7 @@ the driver actually has to go.</p>
     <h3>{{ c.r['name'] }}</h3>
     <p class="muted">{{ c.r['address'] }}</p>
     <p class="muted">{{ c.hours }}</p>
+    {% if c.rules and (c.rules.min_cents or c.rules.max_miles) %}<p class="muted small">{% if c.rules.min_cents %}{{ c.rules.min_cents|money }} minimum{% endif %}{% if c.rules.min_cents and c.rules.max_miles %} &middot; {% endif %}{% if c.rules.max_miles %}Delivers within {{ '%g' % c.rules.max_miles }} mi{% endif %}</p>{% endif %}
     <span class="pill {{ 'green' if c.open else 'grey' }}">{{ 'Open now' if c.open else 'Closed' }}</span>
   </a>
   {% endfor %}
