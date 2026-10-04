@@ -6,6 +6,18 @@
 <div class="panel" id="confirmBox" style="display:none;border-left:4px solid #E8590C"></div>
 <div class="panel" id="live"></div>
 <div class="panel mt" id="payBox" style="display:none"></div>
+<div class="panel mt" id="creditBox" style="display:none;border-left:4px solid #2f9e44"></div>
+<div class="panel mt" id="multiPanel" style="display:none">
+  <h3>Ordering from another restaurant too?</h3>
+  <p class="small muted">{{ MULTI_POLICY }}</p>
+  <p id="multiLinked" class="small"></p>
+  <button class="btn primary" onclick="startMulti()">Order from another restaurant</button>
+  <h3 style="margin-top:14px">Leave us a comment</h3>
+  <label class="small"><input type="checkbox" id="cmMulti"> This is part of a multiple order</label>
+  <input id="cmOther" placeholder="Other order number (optional), like FF123456789" style="max-width:320px">
+  <textarea id="cmText" rows="2" placeholder="Anything dispatch should know"></textarea>
+  <button class="btn" onclick="sendComment()">Send comment</button>
+</div>
 {% endif %}
 {% endblock %}
 {% block scripts %}{% if order %}<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
@@ -13,6 +25,33 @@
 <script src="/static/maptiles.js"></script>
 <script>
 const CODE = '{{ order.code }}';
+function drawMulti(o){
+  const p = document.getElementById('multiPanel');
+  if(!o || o.dispatch_status === 'delivered' || o.dispatch_status === 'cancelled'){ p.style.display='none'; return; }
+  p.style.display='';
+  const g = o.multi_group || [];
+  document.getElementById('multiLinked').innerHTML = g.length ? 'Part of a multiple order with <b>'+g.join(', ')+'</b>.' : '';
+}
+function drawCredit(o){
+  const b = document.getElementById('creditBox');
+  const c = (o && o.credits || []).filter(x=>x.balance_cents > 0);
+  if(!c.length){ b.style.display='none'; return; }
+  b.style.display='';
+  b.innerHTML = '<b>You have store credit.</b> '+c.map(x=>x.balance+' with code <b>'+x.code+'</b>').join(', ')+
+    '. Enter it in the gift card box on your next order, or give it to dispatch on a phone order.';
+}
+function startMulti(){
+  try { localStorage.setItem('ffMulti', JSON.stringify({code: CODE, at: Date.now()})); } catch(e){}
+  window.location = '/';
+}
+async function sendComment(){
+  const r = await jpost('/api/track/'+CODE+'/comment', {text: document.getElementById('cmText').value,
+                        multi: document.getElementById('cmMulti').checked, other_code: document.getElementById('cmOther').value});
+  if(!r || !r.ok){ alert((r && r.error) || 'Could not send.'); return; }
+  document.getElementById('cmText').value=''; document.getElementById('cmOther').value='';
+  alert('Thanks, dispatch can see your comment.');
+  tick();
+}
 function drawConfirm(o){
   const b = document.getElementById('confirmBox');
   if(!o || !o.confirm_call){ b.style.display='none'; return; }
@@ -61,6 +100,8 @@ async function saveTip(){
 async function tick(){
   const res = await jget('/api/track/'+CODE);
   try { drawConfirm(res.order || res); } catch(e){}
+  try { drawMulti(res.order); } catch(e){}
+  try { drawCredit(res.order); } catch(e){}
   if(!res.ok) return;
   const o = res.order;
   try { drawPay(res.pay || {}, o); } catch(e) { console.log('pay box skipped', e); }

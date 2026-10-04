@@ -1045,7 +1045,8 @@ function payButtons(o){
       h += '<button class="btn tiny primary" onclick="runCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">Run card '+(o.card_brand||'')+' &bull;'+o.card_last4+'</button>';
     else if(!o.cash && !(o.pp && o.pp.enabled))
       h += '<button class="btn tiny primary" onclick="cardFor('+o.id+',\''+o.code+'\',\''+o.total+'\')">Card</button>';
-    h += '<label class="switch tiny" title="Cash order: the driver collects at the door">'+
+    if(ALLOW_CASH || o.cash)
+      h += '<label class="switch tiny" title="Cash order: the driver collects at the door">'+
          '<input type="checkbox" '+(o.cash?'checked':'')+' onchange="setCash('+o.id+',this.checked)"> Cash</label>';
     h += '<button class="btn tiny" onclick="keyed('+o.id+')">Mark paid</button>';
     h += '<button class="btn tiny" onclick="houseAcct('+o.id+',\''+o.code+'\',\''+o.total+'\')">House account</button>';
@@ -1065,6 +1066,7 @@ function payButtons(o){
   }
   if(o.paid && (o.refunded_cents||0) < 100000){
     h += '<button class="btn tiny" onclick="refund('+o.id+',\''+o.total+'\')">Refund</button>';
+    h += '<button class="btn tiny" onclick="giveCredit('+o.id+',\''+o.code+'\')" title="Store credit instead of a refund">Credit</button>';
   }
   if(o.tip_sig){
     h += '<a class="btn tiny" target="_blank" href="'+o.tip_sig+'">Signature</a>';
@@ -1113,7 +1115,17 @@ function etaPill(o){
   const t = o.eta_note==='scheduled' ? 'Due '+o.eta_clock : 'ETA '+o.eta_clock+' ('+o.eta_min+' min)';
   return '<span class="pill blue" title="'+(o.eta_note?esc(o.eta_note):'estimate')+'">'+t+(o.eta_note==='live GPS'?' &#9679;':'')+'</span> ';
 }
-function srcPill(o){
+function multiPill(o){
+  let h = (o.multi_group && o.multi_group.length) ? ' <span class="pill amber" title="Separate orders for the same customer, coordinate the delivery">Multiple order with '+esc(o.multi_group.join(', '))+'</span>' : '';
+  if(o.dispatch_status !== 'delivered' && o.dispatch_status !== 'cancelled')
+    h += ' <a class="btn tiny" href="/dispatch/new-order?multi='+encodeURIComponent(o.code)+'" title="Place a separate order from another restaurant for this customer">+ Another restaurant</a>';
+  return h;
+}
+function creditPill(o){
+  return (o.credits && o.credits.length) ? ' <span class="pill grey" title="'+esc(o.credits.map(c=>c.code+' ('+c.balance+' left)').join(', '))+'">Credit '+esc(o.credits.map(c=>c.amount).join(' + '))+'</span>' : '';
+}
+function srcPill(o){ return srcPill0(o) + multiPill(o) + creditPill(o); }
+function srcPill0(o){
   // customer placed it themselves on the website
   if(o.source==='website') return '<span class="pill green" title="Customer ordered on the website">Web</span>'+
     (o.confirm_waiting ? ' <span class="pill amber" title="The customer was asked to call and confirm">Waiting for confirm call</span> <button class="btn tiny" onclick="confirmCall('+o.id+')">Customer called</button>' : '')+
@@ -1138,9 +1150,22 @@ async function sendKitchen(id){
   if(!res.ok){ alert(res.error || 'Could not send it.'); return; }
   board(true);
 }
+const ALLOW_CASH = {{ 'true' if allow_cash else 'false' }};
 async function setCash(id, on){
   const res = await jpost('/api/order/cash', {order_id:id, cash:on});
   if(!res.ok) alert(res.error || 'That did not save.');
+  board(true);
+}
+async function giveCredit(id, code){
+  const amt = prompt('Store credit for '+code+' instead of a refund.\nAmount in dollars (leave blank for everything that is left):', '');
+  if(amt === null) return;
+  const note = prompt('Reason (optional):', '') || '';
+  const cents = amt.trim() === '' ? '' : Math.round(parseFloat(amt.replace('$',''))*100);
+  if(cents !== '' && !(cents > 0)){ alert('Enter an amount.'); return; }
+  const txt = {{ 'true' if texting_ok else 'false' }} ? confirm('Text the credit code to the customer?') : false;
+  const r = await jpost('/api/order/credit', {order_id:id, cents:cents, note:note, text_customer:txt});
+  if(!r || !r.ok){ alert((r && r.error) || 'Could not give credit.'); return; }
+  alert('Credit '+r.amount+' for '+code+'.\nCode: '+r.code+'\n\nGive the customer this code. It works like a gift card on the website or on a phone order, and it shows on their tracking page.'+(r.texted?'\nTexted to the customer.':''));
   board(true);
 }
 async function refund(id, total, suggest){

@@ -8,7 +8,7 @@
   <label>Buyer email (optional)</label><input id="sEmail"><label>For (optional)</label><input id="sTo">
   <label>Message (optional)</label><input id="sMsg" maxlength="240">
   <label>How they paid</label>
-  <select id="sMethod"><option value="cash">Cash</option><option value="card_terminal">Card, ran on our terminal</option>
+  <select id="sMethod">{% if allow_cash %}<option value="cash">Cash</option>{% endif %}<option value="card_terminal">Card, ran on our terminal</option>
     <option value="house_account">House account</option>{% if pp_on %}<option value="link">Send them a pay link (card or PayPal)</option>{% endif %}
     {% if owner %}<option value="comp">Free (owner)</option>{% endif %}</select>
   <input id="sRef" placeholder="Receipt or reference number (optional)">

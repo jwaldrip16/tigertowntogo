@@ -46,6 +46,8 @@
 
   <aside class="panel">
     <h2>Your order</h2>
+    <p class="small muted">{{ MULTI_POLICY }}</p>
+    <div id="multiBox" class="small hidden" style="background:#fff7ed;border:1px solid #fed7aa;border-radius:8px;padding:8px;margin-bottom:8px"></div>
     <div id="cart"><p class="muted">Nothing added yet.</p></div>
     <h3>Delivery details</h3>
     <input id="name" placeholder="Your name">
@@ -113,6 +115,18 @@
 <style>.cc-err{color:#c0392b;min-height:1em}</style>
 <script>
 const RID = {{ r['id'] }};
+// "Order from another restaurant" on the tracking page links the next order to the first one
+let MULTI = null;
+try { MULTI = JSON.parse(localStorage.getItem('ffMulti')||'null');
+      if(MULTI && (Date.now() - MULTI.at > 3*3600*1000)){ localStorage.removeItem('ffMulti'); MULTI = null; } } catch(e){ MULTI = null; }
+document.addEventListener('DOMContentLoaded', function(){
+  const b = document.getElementById('multiBox');
+  if(!b || !MULTI) return;
+  b.classList.remove('hidden');
+  b.innerHTML = '<label><input type="checkbox" id="multiOn" checked> This order goes with order <b>'+MULTI.code+'</b> (a multiple order)</label>'+
+    '<div class="muted">It is a separate order with its own delivery fee and minimum, and it may come with a different driver, so tip this order on its own. '+
+    '<a href="#" onclick="localStorage.removeItem(\'ffMulti\');document.getElementById(\'multiBox\').classList.add(\'hidden\');document.getElementById(\'multiOn\').checked=false;return false">Not a multiple order</a></div>';
+});
 const CUSTOM = {{ 'true' if custom else 'false' }};
 function pickup(){
   if (!CUSTOM) return {};
@@ -361,6 +375,7 @@ async function placeOrder(){
     customer_phone: document.getElementById('phone').value,
     address: document.getElementById('address').value,
     note: document.getElementById('note').value, items: cart, tip_cents: tipCents,
+    multi_with: ((document.getElementById('multiOn')||{}).checked ? MULTI.code : ''),
     scheduled_for: document.getElementById('whenMode').value === 'later' ? document.getElementById('whenTime').value : '',
     gift_code: document.getElementById('giftCode').value.trim(),
     redeem_rewards: parseInt((document.getElementById('useRewards')||{}).value||'0',10) || 0,
@@ -371,6 +386,7 @@ async function placeOrder(){
   try{
     const seen = JSON.parse(localStorage.getItem('ffOrders')||'[]');
     seen.unshift(res.code); localStorage.setItem('ffOrders', JSON.stringify(seen.slice(0,10)));
+    localStorage.setItem('ffLastOrder', JSON.stringify({code: res.code, at: Date.now()}));
   }catch(e){}
   for(const k in CC) document.getElementById(CC[k]).value = '';
   if(res.pay_url){ window.location = res.pay_url; return; }

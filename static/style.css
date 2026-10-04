@@ -517,3 +517,10 @@ body.cust main{padding-top:0}
 .faq h3{margin:18px 0 4px}.faqbig{font-size:18px;font-weight:700;margin:6px 0}
 .custrow{display:flex;justify-content:space-between;gap:10px;border-bottom:1px solid #eee;padding:8px 0;flex-wrap:wrap}
 @media (max-width:700px){body.cust .topbar{flex-direction:column;gap:6px}body.cust .topbar nav{display:flex;flex-wrap:wrap;justify-content:center}body.cust .topbar nav a{margin:2px 8px}.phone{transform:rotate(-8deg)}}
+/* address suggestions: readable everywhere, and not clipped by the home-page search pill */
+.acbox{color:#16181d;text-align:left;text-shadow:none}
+.herosearch{position:relative;overflow:visible}
+.herosearch input{border-radius:22px 0 0 22px}
+.herosearch button{border-radius:0 22px 22px 0}
+.herosearch .acbox{position:absolute;top:calc(100% + 6px);left:0;right:0;z-index:60;box-shadow:0 8px 24px rgba(0,0,0,.25)}
+.herosearch .acitem{padding:10px 14px;font-size:15px}

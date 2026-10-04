@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% block title %}Customers{% endblock %}{% block body %}
 <h1>Customers</h1>
-<p class="muted small">Existing customers skip the confirm call on website orders. A customer becomes existing when you add them here as existing, tap Customer called on one of their orders, or once an order of theirs is delivered.</p>
+<p class="muted small">Existing customers skip the confirm call on website orders. A customer becomes existing once an order of theirs is delivered{% if owner %}, or when you (an owner) mark them existing here or tap Customer called on their order{% endif %}.</p>
 <div class="grid" style="grid-template-columns:minmax(280px,360px) 1fr">
 <div class="panel">
   <h2 id="fTitle">Add a customer</h2>
@@ -8,7 +8,8 @@
   <label>Name</label><input id="cName"><label>Phone</label><input id="cPhone" type="tel">
   <label>Address</label><input id="cAddr"><label>Email (optional)</label><input id="cEmail">
   <label>Notes (optional)</label><input id="cNotes" maxlength="300">
-  <label><input type="checkbox" id="cExisting" checked> Existing customer (no confirm call)</label>
+  {% if owner %}<label><input type="checkbox" id="cExisting" checked> Existing customer (no confirm call)</label>
+  {% else %}<input type="checkbox" id="cExisting" class="hidden"><p class="small muted">New customers become existing after their first delivered order. Only an owner can mark them existing sooner.</p>{% endif %}
   <div class="row"><button class="btn primary" onclick="saveCust()">Save</button><button class="btn" onclick="clearForm()">New</button></div>
   <div id="cMsg" class="small"></div>
 </div>

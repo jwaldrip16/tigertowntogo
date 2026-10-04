@@ -243,6 +243,8 @@ def init_db():
     con.execute("UPDATE settings SET value='0' WHERE key='assign_on_pending'")
     # Business now starts Closed. Existing databases are closed once, then dispatch opens it.
     con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('order_keep_days','0')")
+    con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('allow_cash','0')")
+    con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('gps_help_text','')")
     con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('order_purge_last','')")
     if not con.execute("SELECT 1 FROM settings WHERE key='biz_default_closed_v1'").fetchone():
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('business_open','0')")
@@ -391,7 +393,9 @@ def init_db():
     for _c, _t in (("customer_id", "INTEGER"), ("gift_card_id", "INTEGER"),
                    ("gift_cents", "INTEGER NOT NULL DEFAULT 0"), ("reward_cents", "INTEGER NOT NULL DEFAULT 0"),
                    ("reward_points", "INTEGER NOT NULL DEFAULT 0"), ("credits_settled", "INTEGER NOT NULL DEFAULT 0"),
-                   ("points_awarded", "INTEGER"), ("confirm_state", "TEXT"), ("save_card", "INTEGER NOT NULL DEFAULT 0")):
+                   ("points_awarded", "INTEGER"), ("confirm_state", "TEXT"), ("save_card", "INTEGER NOT NULL DEFAULT 0"),
+                   ("multi_with", "TEXT"), ("cust_comments", "INTEGER NOT NULL DEFAULT 0"),
+                   ("credit_cents", "INTEGER NOT NULL DEFAULT 0")):
         ensure_column(con, "orders", _c, _t)
     con.execute("CREATE TABLE IF NOT EXISTS revgeo (k TEXT PRIMARY KEY, address TEXT, created_at TEXT)")
     con.execute("""CREATE TABLE IF NOT EXISTS regions (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2170,6 +2174,8 @@ def order_dict(o):
         "tip_signed_at": o["tip_signed_at"] or "",
         "tip_declined": bool(o["tip_declined"]),
         "cash": is_cash(o),
+        "multi_group": multi_codes(o),
+        "credits": order_credits(o), "credit_cents": int(o["credit_cents"] or 0) if "credit_cents" in _okeys(o) else 0,
         "card_on_file": bool(card_info(o["id"])),
         "card_last4": (card_info(o["id"]) or {"last4": ""})["last4"] or "",
         "card_brand": (card_info(o["id"]) or {"brand": ""})["brand"] or "",
@@ -3276,6 +3282,12 @@ def checkout():
         return jsonify({"ok": False, "error": "Unknown restaurant"}), 400
     placed_by = payload.get("placed_by", "customer")
     house = bool(payload.get("house")) and placed_by == "dispatch" and bool(dispatcher_required())
+    multi_root, _merr = multi_resolve(payload.get("multi_with"), payload.get("customer_phone"),
+                                      placed_by == "dispatch" and bool(dispatcher_required()))
+    if _merr:
+        return jsonify({"ok": False, "error": _merr}), 400
+    if payload.get("cash") and not house and not cash_allowed():
+        return jsonify({"ok": False, "error": "We don't take cash orders. Pay by card, PayPal, Venmo, gift card, or house account."}), 400
     if house:
         payload["cash"] = True   # created like a cash order (no card), then marked paid to the house account
     sched = None
@@ -3321,6 +3333,13 @@ def checkout():
             return jsonify({"ok": False, "below_minimum": True, "error":
                             "%s has a %s minimum order. Add %s more to check out."
                             % (r["name"], money(_mr["min_cents"]), money(_mr["min_cents"] - subtotal))}), 400
+    # one restaurant per order (customers, drivers and dispatch alike)
+    for i in items:
+        if i.get("menu_item_id"):
+            _row = db().execute("SELECT restaurant_id FROM menu_items WHERE id=?", (i["menu_item_id"],)).fetchone()
+            if _row and _row["restaurant_id"] != r["id"]:
+                return jsonify({"ok": False, "error": "One restaurant per order. Take the other restaurant's items out "
+                                "and place them as a separate order. The order minimum and delivery fee apply to each order."}), 400
     # items with set days or hours: customers and drivers cannot order them outside those times.
     # A dispatcher can still add one by hand for a call-in.
     if not dispatcher_required():
@@ -3525,6 +3544,10 @@ def checkout():
         future_note = "Scheduled for " + when_label(sched.isoformat()) + "."
         if dispatcher_required() and not is_open(r, sched):
             future_note += " Heads up: " + r["name"] + " is not normally open then."
+    if multi_root:
+        db().execute("UPDATE orders SET multi_with=? WHERE id=?", (multi_root, oid))
+        db().commit()
+        log("order", code + " is part of a multiple order with " + multi_root)
     credit_note = apply_checkout_credits(oid, code, cr, placed_by)
     send_note = ""
     if src_id and dispatcher_required() and payload.get("send_to") == "driver":
@@ -3548,8 +3571,7 @@ def checkout():
                     "future_note": future_note, "ok": True, "cash": cash, "code": code, "order_id": oid, "total": money(total),
                     "send_note": send_note,
                     "address_ok": bool(address_ok),
-                    "message": (("Call dispatch at " + confirm["phone"] + " to confirm your order. It won't go to the "
-                                 "kitchen until you call. ") if confirm else "") + (credit_note.get("message", "") + " " if credit_note.get("message") else "") + ("" if address_ok and cash else
+                    "message": (credit_note.get("message", "") + " " if credit_note.get("message") else "") + ("" if address_ok and cash else
                                 "Thanks! Waiting on payment. Your order has not gone to the "
                                 "kitchen yet. It goes as soon as your payment is marked paid." if address_ok else
                                 "We could not verify that address, so dispatch will confirm it shortly. "
@@ -3611,7 +3633,7 @@ def track(code):
         return render_template("track.html", order=None, code=code)
     return render_template("track.html", order={"code": o["code"]}, code=code)
 
-TRACK_FIELDS = ("code", "dispatch_status", "kitchen_status", "restaurant", "restaurant_nav", "address",
+TRACK_FIELDS = ("code", "multi_group", "note", "credits", "dispatch_status", "kitchen_status", "restaurant", "restaurant_nav", "address",
                 "scheduled_label", "needs_address_approval", "timeline", "timer_seconds",
                 "queue_position", "hold_reason", "miles", "subtotal", "fee", "service", "service_cents",
                 "tax", "tip", "total", "delivered_time", "lines", "uses_app", "manual_state",
@@ -4720,6 +4742,8 @@ def api_order_cash():
         return lk
     if o["payment_status"] == "paid" and not is_cash(o):
         return jsonify({"ok": False, "error": "That order is already paid by card."}), 400
+    if data.get("cash") and not cash_allowed():
+        return jsonify({"ok": False, "error": "Cash orders are turned off in Settings."}), 400
     if data.get("cash"):
         db().execute("UPDATE orders SET pay_method='cash', payment_status='cash_due' WHERE id=?", (o["id"],))
         if o["dispatch_status"] == "awaiting_payment":
@@ -4739,6 +4763,57 @@ def api_order_cash():
     auto_assign()
     return jsonify({"ok": True})
 
+def order_credits(o):
+    rows = db().execute("""SELECT * FROM gift_cards WHERE pay_method='credit' AND pay_ref=? AND status!='void'
+                           ORDER BY id""", (o["code"],)).fetchall()
+    return [{"code": g["code"], "amount": money(g["initial_cents"]), "balance": money(g["balance_cents"]),
+             "balance_cents": int(g["balance_cents"])} for g in rows]
+
+@app.post("/api/order/credit")
+def api_order_credit():
+    """Store credit instead of a refund. Dispatchers and owners. The customer gets a credit code
+    (it works like a gift card on the website and on phone orders)."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(force=True) or {}
+    o = db().execute("SELECT * FROM orders WHERE id=?", (data.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False}), 404
+    left = int(o["paid_cents"] or 0) - int(o["refunded_cents"] or 0) - int(o["credit_cents"] or 0)
+    if left <= 0:
+        return jsonify({"ok": False, "error": "Nothing collected on that order is left to credit or refund."}), 400
+    try:
+        raw = data.get("cents")
+        cents = left if raw in (None, "", "all") else int(round(float(raw)))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Enter an amount."}), 400
+    if cents <= 0:
+        return jsonify({"ok": False, "error": "Enter an amount."}), 400
+    if cents > left:
+        return jsonify({"ok": False, "error": "That is more than is left on the order (" + money(left) + ")."}), 400
+    note = (data.get("note") or "").strip()[:120]
+    who = dispatcher_row()
+    by = who["name"] if who else "dispatch"
+    code = gift_new_code()
+    cur = db().execute("""INSERT INTO gift_cards (code, ref, initial_cents, balance_cents, buyer_name, buyer_phone,
+                          to_name, message, status, pay_method, pay_ref, sold_by, customer_id, created_at, activated_at)
+                          VALUES (?,?,?,0,?,?,?,?,'active','credit',?,?,?,?,?)""",
+                       (code, secrets.token_hex(8), cents, o["customer_name"], phone_digits(o["customer_phone"] or ""),
+                        o["customer_name"], "Credit for order " + o["code"] + (": " + note if note else ""),
+                        o["code"], by, (o["customer_id"] if "customer_id" in _okeys(o) else None), now(), now()))
+    g = db().execute("SELECT * FROM gift_cards WHERE id=?", (cur.lastrowid,)).fetchone()
+    gift_move(g, cents, "Credit for order " + o["code"] + (": " + note if note else ""), o["id"], by)
+    db().execute("UPDATE orders SET credit_cents=credit_cents+? WHERE id=?", (cents, o["id"]))
+    db().commit()
+    log("refund", by + " gave " + money(cents) + " store credit on " + o["code"] + " (code ending " + code[-4:] + ")" +
+        (": " + note if note else ""))
+    texted = False
+    if data.get("text_customer") and o["customer_phone"]:
+        texted = send_text("+1" + phone_digits(o["customer_phone"])[-10:],
+                           (setting("business_name", str) or "Dispatch") + ": you have a " + money(cents) +
+                           " credit for order " + o["code"] + ". Use code " + code + " on your next order.")
+    return jsonify({"ok": True, "code": code, "amount": money(cents), "left": money(left - cents), "texted": texted})
+
 @app.post("/api/order/refund")
 def api_refund():
     """Full or partial refund, dispatcher only. cents blank = everything collected."""
@@ -4751,7 +4826,7 @@ def api_refund():
     lk = delivered_lock(o)
     if lk:
         return lk
-    paid = int(o["paid_cents"] or 0)
+    paid = int(o["paid_cents"] or 0) - int(o["credit_cents"] or 0)
     already = int(o["refunded_cents"] or 0)
     left = paid - already
     if left <= 0:
@@ -4994,9 +5069,17 @@ def dispatch_new_order():
                    "fee_cents": o["fee_cents"], "driver_id": o["driver_id"],
                    "driver": (db().execute("SELECT name FROM drivers WHERE id=?", (o["driver_id"],)).fetchone() or {"name": ""})["name"] if o["driver_id"] else ""}
     oneoff = oneoff_id()
+    multi_src = None
+    mc = (request.args.get("multi") or "").strip().upper()
+    if mc:
+        mo = db().execute("SELECT * FROM orders WHERE code=?", (mc,)).fetchone()
+        if mo:
+            multi_src = {"code": mo["code"], "restaurant_id": mo["restaurant_id"], "customer_name": mo["customer_name"],
+                         "customer_phone": mo["customer_phone"], "address": mo["address"],
+                         "address_note": mo["address_note"] or ""}
     return render_template("dispatch_new_order.html",
                            restaurants=[dict(r) for r in rests if r["slug"] != "oneoff"],
-                           menus=menus, src=src, oneoff=oneoff, tokens=token_list(),
+                           menus=menus, src=src, multi_src=multi_src, multi_policy=MULTI_POLICY, oneoff=oneoff, tokens=token_list(),
                            reasons=[{"key": k, "label": v} for k, v in REDO_REASONS.items()])
 
 
@@ -5383,6 +5466,129 @@ def driver_track_id(did):
     db().commit()
     return tid
 
+
+# ---- One restaurant per order. A customer who wants two restaurants places two orders;
+# the second is linked to the first so dispatch can coordinate (it may still go with a different driver).
+MULTI_POLICY = ("One restaurant per order. Want food from another restaurant too? Place a separate order. "
+                "The order minimum and delivery fee apply to each order, and a different driver may bring it, "
+                "so split the tip between your orders.")
+
+app.jinja_env.globals["MULTI_POLICY"] = MULTI_POLICY
+
+def multi_resolve(code, phone, by_dispatch):
+    code = (code or "").strip().upper()
+    if not code:
+        return "", ""
+    o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
+    if not o or o["dispatch_status"] == "cancelled":
+        return "", "We couldn't find order " + code + " to link this order to."
+    if not by_dispatch and phone_digits(o["customer_phone"] or "")[-10:] != phone_digits(phone or "")[-10:]:
+        return "", "Order " + code + " was placed with a different phone number."
+    return (o["multi_with"] or o["code"]), ""
+
+def multi_codes(o):
+    root = (o["multi_with"] if "multi_with" in _okeys(o) else "") or o["code"]
+    rows = db().execute("""SELECT code FROM orders WHERE (code=? OR multi_with=?) AND dispatch_status!='cancelled'
+                           ORDER BY id""", (root, root)).fetchall()
+    return [x["code"] for x in rows if x["code"] != o["code"]]
+
+@app.post("/api/track/<code>/comment")
+def api_track_comment(code):
+    o = db().execute("SELECT * FROM orders WHERE code=?", (code.upper(),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    if o["dispatch_status"] in ("delivered", "cancelled"):
+        return jsonify({"ok": False, "error": "This order is finished. Call dispatch if you need anything."}), 400
+    if int(o["cust_comments"] or 0) >= 5:
+        return jsonify({"ok": False, "error": "You've sent the most comments for this order. Please call dispatch."}), 429
+    b = request.get_json(force=True) or {}
+    text = " ".join((b.get("text") or "").split())[:300]
+    other = (b.get("other_code") or "").strip().upper()
+    if other and other != o["code"]:
+        root, err = multi_resolve(other, o["customer_phone"], False)
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
+        mine = o["multi_with"] or o["code"]
+        # join the two groups under the older root
+        keep, drop = sorted([root, mine])[0], sorted([root, mine])[1]
+        if keep != drop:
+            db().execute("UPDATE orders SET multi_with=? WHERE multi_with=? OR code=?", (keep, drop, drop))
+        if o["code"] != keep:
+            db().execute("UPDATE orders SET multi_with=? WHERE id=?", (keep, o["id"]))
+    if b.get("multi") and not text:
+        text = "This is part of a multiple order."
+    if not text and not other:
+        return jsonify({"ok": False, "error": "Type a comment."}), 400
+    if text:
+        note = ((o["address_note"] or "").strip() + " | Customer: " + text).strip(" |")[:600]
+        db().execute("UPDATE orders SET address_note=?, cust_comments=cust_comments+1 WHERE id=?", (note, o["id"]))
+    db().commit()
+    log("order", o["code"] + " customer comment: " + (text or "") + ((" (linked to " + other + ")") if other else ""))
+    o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
+    return jsonify({"ok": True, "multi_group": multi_codes(o)})
+
+def cash_allowed():
+    return (setting("allow_cash", str) or "0") == "1"
+
+DEFAULT_GPS_HELP = """{business}: set up GPS so dispatch can see you while you use Google Maps or Apple Maps.
+1. Install Traccar Client (free). iPhone: https://itunes.apple.com/us/app/traccar-client/id843156974  Android: https://play.google.com/store/apps/details?id=org.traccar.client
+2. Open it. Device identifier: {id}
+3. Server URL: {url}
+4. Location accuracy: High. Distance: 50.
+5. Turn on Continuous tracking (or tap Start). Allow location Always.
+6. Android: set Traccar Client battery use to Unrestricted.
+Turn it on when you go online, off when you go offline. Questions? Call dispatch {phone}."""
+
+def gps_help_for(d):
+    t = (setting("gps_help_text", str) or "").strip() or DEFAULT_GPS_HELP
+    return (t.replace("{business}", setting("business_name", str) or "Dispatch")
+             .replace("{id}", driver_track_id(d["id"]) or "")
+             .replace("{url}", gps_server_url())
+             .replace("{phone}", nice_phone(setting("dispatch_phone", str) or ""))
+             .replace("{name}", (d["name"] or "").split(" ")[0]))
+
+def gps_settings_ctx():
+    ds = db().execute("SELECT id, name, phone, track_id, COALESCE(active,1) AS active FROM drivers ORDER BY name").fetchall()
+    return {"drivers": [{"id": d["id"], "name": d["name"], "phone": nice_phone(d["phone"] or ""),
+                         "active": bool(d["active"])} for d in ds],
+            "text": (setting("gps_help_text", str) or "").strip() or DEFAULT_GPS_HELP,
+            "texting": texting_on(), "allow_cash": cash_allowed()}
+app.jinja_env.globals["gps_settings_ctx"] = gps_settings_ctx
+
+@app.post("/api/dispatch/gps-text")
+def api_gps_text():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    q = "SELECT * FROM drivers WHERE COALESCE(active,1)=1"
+    args = ()
+    if b.get("driver_id"):
+        q, args = "SELECT * FROM drivers WHERE id=?", (int(b["driver_id"]),)
+    rows = db().execute(q, args).fetchall()
+    if not rows:
+        return jsonify({"ok": False, "error": "No drivers to text."}), 400
+    texted, app_only, links = [], [], []
+    for d in rows:
+        body = gps_help_for(d)
+        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                     (d["id"], "dispatcher", body, now()))
+        ph = phone_digits(d["phone"] or "")
+        if ph and send_text("+1" + ph[-10:], body):
+            texted.append(d["name"])
+        else:
+            app_only.append(d["name"])
+            if ph:
+                links.append({"name": d["name"], "phone": nice_phone(ph),
+                              "sms": "sms:" + ph[-10:] + "?&body=" + urllib.parse.quote(body)})
+    db().commit()
+    log("gps_help", "GPS setup sent to " + ", ".join(d["name"] for d in rows))
+    msg = ""
+    if texted:
+        msg += "Texted " + ", ".join(texted) + ". "
+    if app_only:
+        msg += "Sent to the driver chat for " + ", ".join(app_only) + "." + ("" if texting_on() else
+               " Text messages need Twilio set up, so tap a name below to text it from your phone.")
+    return jsonify({"ok": True, "message": msg.strip(), "links": links})
 
 def gps_server_url():
     root = request.url_root
@@ -7360,6 +7566,13 @@ def dispatch_settings():
         return redirect(url_for("dispatch_login"))
     saved = False
     if request.method == "POST":
+        if "cashgps_present" in request.form:
+            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('allow_cash',?)",
+                         ("1" if request.form.get("allow_cash") else "0",))
+            _g = (request.form.get("gps_help_text") or "").strip()[:1500]
+            if _g == DEFAULT_GPS_HELP.strip():
+                _g = ""
+            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('gps_help_text',?)", (_g,))
         if "site_present" in request.form:
             for _k, _n in (("business_email", 120), ("home_headline", 120), ("social_x", 200),
                            ("social_facebook", 200), ("social_instagram", 200), ("faq_text", 12000)):
@@ -8908,6 +9121,9 @@ def inject_portal():
                         "year": dt.date.today().year})
         elif _cp == "dispatch" and session.get("dispatcher_id"):
             biz["app_new"] = new_application_count()
+            biz["is_owner_flag"] = is_owner()
+            biz["allow_cash"] = cash_allowed()
+            biz["texting_ok"] = texting_on()
     except Exception:
         biz = {"biz_name": "Fleet Delivery", "biz_address": "", "biz_phone": "", "biz_tel": "",
                "tax_bp": 900, "service_bp": 0, "logo_url": DEFAULT_LOGO}
@@ -9470,11 +9686,13 @@ def checkout_credits(payload, placed_by, dg, subtotal, total):
     elif placed_by == "dispatch" and dg:
         cust = db().execute("SELECT * FROM customers WHERE phone=?", (phone_digits(dg),)).fetchone()
     if placed_by == "dispatch" and payload.get("save_customer") and len(phone_digits(dg)) == 10:
+        _ver = 1 if is_owner() else 0
         if cust:
-            db().execute("UPDATE customers SET verified=1 WHERE id=?", (cust["id"],))
+            if _ver:
+                db().execute("UPDATE customers SET verified=1 WHERE id=?", (cust["id"],))
         else:
             cur = db().execute("""INSERT INTO customers (name, phone, address, verified, source, added_by, created_at)
-                                  VALUES (?,?,?,1,'dispatch',?,?)""",
+                                  VALUES (?,?,?,""" + str(_ver) + """,'dispatch',?,?)""",
                                ((payload.get("customer_name") or "").strip()[:80], phone_digits(dg),
                                 (payload.get("address") or "").strip()[:200], session.get("dispatcher_name") or "dispatch", now()))
             cust = db().execute("SELECT * FROM customers WHERE id=?", (cur.lastrowid,)).fetchone()
@@ -9878,6 +10096,8 @@ def api_dispatch_gift_sell():
     method = b.get("method") or ""
     if method not in ("cash", "card_terminal", "house_account", "comp", "link"):
         return jsonify({"ok": False, "error": "Pick how they paid."}), 400
+    if method == "cash" and not cash_allowed():
+        return jsonify({"ok": False, "error": "Cash is turned off in Settings."}), 400
     if method == "comp" and not is_owner():
         return jsonify({"ok": False, "error": "Only an owner can give a free gift card."}), 403
     if method == "link" and not pp_enabled():
@@ -9959,7 +10179,8 @@ def api_dispatch_confirm_call():
     if not o:
         return jsonify({"ok": False}), 404
     db().execute("UPDATE orders SET confirm_state='confirmed' WHERE id=?", (o["id"],))
-    db().execute("UPDATE customers SET verified=1 WHERE phone=?", (phone_digits(o["customer_phone"]),))
+    if is_owner():
+        db().execute("UPDATE customers SET verified=1 WHERE phone=?", (phone_digits(o["customer_phone"]),))
     db().commit()
     log("order", o["code"] + " confirmed by phone with " + (session.get("dispatcher_name") or "dispatch"))
     return jsonify({"ok": True})
@@ -9993,7 +10214,7 @@ def customer_row_public(c):
 def dispatch_customers():
     if not dispatcher_required():
         return redirect("/dispatch/login")
-    return render_template("dispatch_customers.html")
+    return render_template("dispatch_customers.html", owner=is_owner())
 
 @app.get("/api/dispatch/customers")
 def api_dispatch_customers():
@@ -10020,10 +10241,15 @@ def api_dispatch_customer_save():
         return jsonify({"ok": False, "error": "Enter a 10 digit phone number."}), 400
     if not name:
         return jsonify({"ok": False, "error": "Enter the customer's name."}), 400
-    vals = (name, ph, (b.get("email") or "").strip()[:120], (b.get("address") or "").strip()[:200],
-            (b.get("notes") or "").strip()[:300], 1 if b.get("existing", True) else 0)
     cid = b.get("id")
     other = db().execute("SELECT * FROM customers WHERE phone=?", (ph,)).fetchone()
+    _cur = db().execute("SELECT verified FROM customers WHERE id=?", (int(cid),)).fetchone() if cid else other
+    if is_owner():
+        _ver = 1 if b.get("existing", True) else 0
+    else:
+        _ver = int(_cur["verified"]) if _cur else 0      # unchanged: they become existing after a delivered order
+    vals = (name, ph, (b.get("email") or "").strip()[:120], (b.get("address") or "").strip()[:200],
+            (b.get("notes") or "").strip()[:300], _ver)
     if cid:
         c = db().execute("SELECT * FROM customers WHERE id=?", (int(cid),)).fetchone()
         if not c:
@@ -10043,6 +10269,8 @@ def api_dispatch_customer_save():
     log("customer", name + " saved to the customer list" + (" as existing" if vals[-1] else "") + " by " +
         (session.get("dispatcher_name") or "dispatch"))
     c = db().execute("SELECT * FROM customers WHERE id=?", (int(cid),)).fetchone()
+    if not is_owner() and b.get("existing") and customer_is_new(ph):
+        msg += " They become an existing customer after their first delivered order (only an owner can mark them existing sooner)."
     return jsonify({"ok": True, "message": msg, "customer": customer_row_public(c)})
 
 

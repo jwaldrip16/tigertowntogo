@@ -8,6 +8,7 @@
 <div class="cols">
   <section>
     <h2>Restaurant</h2>
+    <p class="small muted">One restaurant per order. For a second restaurant, place a separate order and link it below. The order minimum and delivery fee apply to each order, and it may go with a different driver, so the tip is per order.</p>
     <select id="rest" onchange="drawMenu()">
       {% for r in restaurants %}<option value="{{ r['id'] }}">{{ r['name'] }}</option>{% endfor %}
       <option value="{{ oneoff }}">Not on the list, type the pickup in</option>
@@ -61,10 +62,11 @@
     <input id="name" placeholder="Customer name">
     <input id="phone" placeholder="Phone" onchange="rewardsLookup()">
     <div id="rwBox" class="small muted"></div>
-    <label class="small"><input type="checkbox" id="saveCust"> Save to the customer list as an existing customer</label>
+    <label class="small"><input type="checkbox" id="saveCust"> {% if is_owner_flag %}Save to the customer list as an existing customer{% else %}Save to the customer list (they become existing after delivery){% endif %}</label>
     <input id="giftCode" placeholder="Gift card number (optional)" autocomplete="off">
     <textarea id="address" rows="2" placeholder="Street, city, state, ZIP"></textarea>
     <input id="note" placeholder="Gate code, apartment, door instructions">
+    <label class="small">Part of a multiple order with order # <input id="multiWith" placeholder="FF123456789" style="max-width:180px"></label>
     <div id="quote" class="quote"></div>
     <div id="omap" class="minimap hidden"></div>
     <div id="omapNote" class="muted small"></div>
@@ -83,9 +85,9 @@
       <input id="whenAt" type="datetime-local" class="hidden" style="max-width:220px">
     </div>
     <div class="muted small" id="whenNote"></div>
-    <label class="switch" style="display:flex;gap:8px;align-items:center;margin:8px 0">
+    {% if allow_cash %}<label class="switch" style="display:flex;gap:8px;align-items:center;margin:8px 0">
       <input type="checkbox" id="cashOrder"> <b>Cash order</b>
-      <span class="muted small">the driver collects at the door, no card needed</span></label>
+      <span class="muted small">the driver collects at the door, no card needed</span></label>{% else %}<input type="checkbox" id="cashOrder" class="hidden" disabled>{% endif %}
     <label class="switch" style="display:flex;gap:8px;align-items:center;margin:8px 0">
       <input type="checkbox" id="houseOrder"> <b>House account</b>
       <span class="muted small">marked paid now, nothing collected at the door</span></label>
@@ -115,6 +117,20 @@ document.addEventListener('DOMContentLoaded', function(){
 const MENUS = {{ menus | tojson }};
 let cart = [], geo = null, feeCents = 0, miles = 0;
 const SRC = {{ src|tojson if src else 'null' }};
+const MULTI_SRC = {{ multi_src|tojson if multi_src else 'null' }};
+document.addEventListener('DOMContentLoaded', function(){
+  if(!MULTI_SRC) return;
+  document.getElementById('multiWith').value = MULTI_SRC.code;
+  document.getElementById('name').value = MULTI_SRC.customer_name || '';
+  document.getElementById('phone').value = MULTI_SRC.customer_phone || '';
+  document.getElementById('address').value = MULTI_SRC.address || '';
+  document.getElementById('note').value = MULTI_SRC.address_note || '';
+  // start on a different restaurant than the first order
+  const sel = document.getElementById('rest');
+  for(const op of sel.options){ if(parseInt(op.value,10) !== MULTI_SRC.restaurant_id){ sel.value = op.value; break; } }
+  try { sel.onchange(); } catch(e){}
+  try { validate(); } catch(e){}
+});
 const ONEOFF = String({{ oneoff|tojson }});
 function typedPickup(){ return document.getElementById('rest').value === ONEOFF; }
 function pickupPayload(){
@@ -295,6 +311,7 @@ async function placeOrder(){
     placed_by: 'dispatch',
     cash: document.getElementById('cashOrder').checked,
     house: document.getElementById('houseOrder').checked,
+    multi_with: document.getElementById('multiWith').value.trim(),
     house_account: document.getElementById('houseName').value,
     gift_code: document.getElementById('giftCode').value.trim(),
     save_customer: document.getElementById('saveCust').checked,
