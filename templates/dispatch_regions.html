@@ -49,9 +49,11 @@ function draw(){
   only.value = keep;
   drawRests();
   const boxes = (kind, p) => RG.regions.map(r=>'<label class="rgchip"><input type="checkbox" '+(p.regions.includes(r.id)?'checked ':'')+
+      (kind==='p' && !RG.owner ? 'disabled title="Only an owner can change dispatcher regions" ' : '')+
       'onchange="setPerson(\''+kind+'\','+p.id+')" class="'+kind+p.id+'" value="'+r.id+'"> '+e(r.name)+'</label>').join('');
   const row = (kind, p) => '<div class="schedrow"><div class="row between"><strong>'+e(p.name)+'</strong><span class="muted small">'+
-      (p.regions.length ? '' : 'Covers every region')+'</span></div><div class="rgpick">'+boxes(kind, p)+'</div></div>';
+      (p.regions.length ? '' : (kind==='d' ? 'No region yet, cannot set availability' : 'No region yet, cannot set a schedule'))+
+      (kind==='p' && !RG.owner ? ' <span class="pill">Set by the owner</span>' : '')+'</span></div><div class="rgpick">'+boxes(kind, p)+'</div></div>';
   document.getElementById('drList').innerHTML = RG.drivers.map(p=>row('d', p)).join('') || '<p class="muted small">No drivers yet.</p>';
   document.getElementById('dpList').innerHTML = RG.dispatchers.map(p=>row('p', p)).join('');
 }

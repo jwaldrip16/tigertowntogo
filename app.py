@@ -876,6 +876,30 @@ def dispatcher_region_ids(did):
         "SELECT region_id FROM dispatcher_regions WHERE dispatcher_id=?", (did,)).fetchall()} if did else set()
 
 
+def slot_regions_for(kind, pid, raw, by_self):
+    """Regions for one availability slot. Only regions dispatch (drivers) or the owner
+    (dispatchers) assigned count; nothing assigned means no availability at all."""
+    assigned = driver_region_ids(pid) if kind == "driver" else dispatcher_region_ids(pid)
+    name = ""
+    if not by_self:
+        row = db().execute("SELECT name FROM " + ("drivers" if kind == "driver" else "dispatchers") +
+                           " WHERE id=?", (pid,)).fetchone()
+        name = row["name"] if row else "This person"
+    if not assigned:
+        if by_self:
+            boss = "dispatch" if kind == "driver" else "the owner"
+            return None, ("You are not assigned a region yet, so you can't set your availability. "
+                          "Ask " + boss + " to assign you one.")
+        boss = "dispatch or the owner" if kind == "driver" else "the owner"
+        return None, name + " is not assigned a region yet. " + boss[0].upper() + boss[1:] + " has to assign one first."
+    picked = parse_rids(clean_region_ids(raw))
+    extra = picked - assigned
+    if extra:
+        return None, (("You can" if by_self else name + " can") + " only pick " +
+                      ("your" if by_self else "their") + " assigned regions: " + region_names(assigned) + ".")
+    return ",".join(str(x) for x in sorted(picked or assigned)), None
+
+
 def clean_region_ids(lst):
     """Checked regions from a form -> '1,3'. Blank means the person's usual regions."""
     valid = {r["id"] for r in all_regions()}
@@ -5038,10 +5062,12 @@ def api_driver_availability():
                 return jsonify({"ok": False, "error": "Pick a date."}), 400
         else:
             _d = dt.date.today() + dt.timedelta(days=(dow - dt.date.today().weekday()) % 7)
+        rids, rerr = slot_regions_for("driver", did, data.get("regions"), True)
+        if rerr:
+            return jsonify({"ok": False, "error": rerr}), 400
         db().execute("""INSERT INTO availability(driver_id,dow,start_time,end_time,note,status,created_at,
                         week_start,region_ids) VALUES(?,?,?,?,?,'pending',?,?,?)""",
-                     (did, dow, start, end, data.get("note", ""), now(), monday_of(_d).isoformat(),
-                      clean_region_ids(data.get("regions"))))
+                     (did, dow, start, end, data.get("note", ""), now(), monday_of(_d).isoformat(), rids))
         name = db().execute("SELECT name FROM drivers WHERE id=?", (did,)).fetchone()["name"]
         log("availability", name + " asked for " + DOW_NAMES[dow] + " " + start + "-" + end)
     db().commit()
@@ -5091,8 +5117,10 @@ def api_driver_week_save():
         if end <= start:
             return jsonify({"ok": False,
                             "error": DOW_NAMES[int(d.get("dow", 0))] + ": the end time has to be after the start."}), 400
-        clean.append((int(d.get("dow", 0)), start, end, (d.get("note") or "").strip(),
-                      clean_region_ids(d.get("regions"))))
+        rids, rerr = slot_regions_for("driver", did, d.get("regions"), True)
+        if rerr:
+            return jsonify({"ok": False, "error": rerr}), 400
+        clean.append((int(d.get("dow", 0)), start, end, (d.get("note") or "").strip(), rids))
     stamp = now()
     key = ws.isoformat()
     db().execute("DELETE FROM availability WHERE driver_id=? AND week_start=?", (did, key))
@@ -5290,14 +5318,16 @@ def api_dispatch_schedule_edit():
                 return jsonify({"ok": False, "error": "Enter a start and an end time."}), 400
             if end <= start:
                 return jsonify({"ok": False, "error": "The end time has to be after the start time."}), 400
+            rids, rerr = slot_regions_for("driver", did, b.get("regions"), False)
+            if rerr:
+                return jsonify({"ok": False, "error": rerr}), 400
             if op == "set_day":
                 db().execute("DELETE FROM availability WHERE driver_id=? AND week_start=? AND dow=?",
                              (did, ws, dow))
             db().execute("""INSERT INTO availability(driver_id,dow,start_time,end_time,note,status,
                             decided_by,decided_at,created_at,week_start,region_ids)
                             VALUES(?,?,?,?,?,'approved',?,?,?,?,?)""",
-                         (did, dow, start, end, b.get("note", ""), who, now(), now(), ws,
-                          clean_region_ids(b.get("regions"))))
+                         (did, dow, start, end, b.get("note", ""), who, now(), now(), ws, rids))
             body = ("Dispatch put you on for " + DOW_NAMES[dow] + " " + short_date(day) + " " +
                     start + "-" + end + ".")
         db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
@@ -5307,10 +5337,12 @@ def api_dispatch_schedule_edit():
         start, end = b.get("start") or "09:00", b.get("end") or "17:00"
         if end <= start:
             return jsonify({"ok": False, "error": "The end time has to be after the start time."}), 400
+        rids, rerr = slot_regions_for("driver", b["driver_id"], b.get("regions"), False)
+        if rerr:
+            return jsonify({"ok": False, "error": rerr}), 400
         db().execute("""INSERT INTO availability(driver_id,dow,start_time,end_time,note,status,
                         decided_by,decided_at,created_at,region_ids) VALUES(?,?,?,?,?,'approved',?,?,?,?)""",
-                     (b["driver_id"], dow, start, end, b.get("note", ""), who, now(), now(),
-                      clean_region_ids(b.get("regions"))))
+                     (b["driver_id"], dow, start, end, b.get("note", ""), who, now(), now(), rids))
         db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
                      (b["driver_id"], "dispatch", who,
                       "Dispatch put you on for " + DOW_NAMES[dow] + " " + start + "-" + end + ".", now()))
@@ -5469,6 +5501,10 @@ def api_dispatcher_avail_edit():
     if _hm(st) == _hm(en):
         return jsonify({"ok": False, "error": "The start and end time cannot be the same."}), 400
     note = " ".join(str(b.get("note") or "").split())[:80]
+    rids, rerr = slot_regions_for("dispatcher", d["id"], b.get("regions"),
+                                  d["id"] == session.get("dispatcher_id"))
+    if rerr:
+        return jsonify({"ok": False, "error": rerr}), 400
     added = 0
     for dow in days:
         if con.execute("""SELECT 1 FROM dispatcher_availability WHERE dispatcher_id=? AND dow=?
@@ -5476,7 +5512,7 @@ def api_dispatcher_avail_edit():
             continue
         con.execute("""INSERT INTO dispatcher_availability(dispatcher_id,dow,start_time,end_time,note,
                        created_by,created_at,region_ids,status,decided_by,decided_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                    (d["id"], dow, st, en, note, who, now(), clean_region_ids(b.get("regions")),
+                    (d["id"], dow, st, en, note, who, now(), rids,
                      "approved" if owner else "pending", who if owner else None, now() if owner else None))
         added += 1
     con.commit()
@@ -5493,7 +5529,7 @@ def api_dispatcher_avail_edit():
 def regions_payload():
     con = db()
     regs = all_regions()
-    return {"ok": True, "me": session.get("dispatcher_id"),
+    return {"ok": True, "me": session.get("dispatcher_id"), "owner": is_owner(),
             "regions": [{"id": r["id"], "name": r["name"],
                          "restaurants": con.execute("SELECT COUNT(*) c FROM restaurants WHERE region_id=? AND slug!='oneoff'",
                                                     (r["id"],)).fetchone()["c"]} for r in regs],
@@ -5504,6 +5540,80 @@ def regions_payload():
                         for d in con.execute("SELECT id, name FROM drivers ORDER BY name").fetchall()],
             "dispatchers": [{"id": d["id"], "name": d["name"], "regions": sorted(dispatcher_region_ids(d["id"]))}
                             for d in con.execute("SELECT id, name FROM dispatchers ORDER BY name").fetchall()]}
+
+
+
+_DEL_FAILS = {}   # dispatcher id -> list of wrong-password times
+PAYOUT_DEAD = ("FAILED", "RETURNED", "BLOCKED", "REFUNDED", "REVERSED", "DENIED", "CANCELED", "CANCELLED")
+
+
+@app.post("/api/dispatch/delete-orders")
+def api_delete_orders():
+    """Owner-only: wipe test orders for good. The owner re-enters their own password."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 401
+    did = session.get("dispatcher_id")
+    if not is_owner(did):
+        return jsonify({"ok": False, "error": "Only an owner can delete orders."}), 403
+    b = request.get_json(force=True) or {}
+    nowt = time.time()
+    fails = [t for t in _DEL_FAILS.get(did, []) if nowt - t < 600]
+    _DEL_FAILS[did] = fails
+    if len(fails) >= 5:
+        return jsonify({"ok": False, "error": "Too many wrong passwords. Try again in 10 minutes."}), 429
+    pw = b.get("password") or ""
+    me = db().execute("SELECT name, username FROM dispatchers WHERE id=? AND password=?", (did, pw)).fetchone()
+    if not pw or not me:
+        fails.append(nowt)
+        return jsonify({"ok": False, "error": "That password is not right."}), 403
+    want = set()
+    for x in (b.get("ids") or []):
+        try:
+            want.add(int(x))
+        except Exception:
+            pass
+    codes = [c.strip().upper() for c in re.split(r"[\s,]+", b.get("codes") or "") if c.strip()]
+    missing = []
+    for c in codes:
+        r = db().execute("SELECT id FROM orders WHERE UPPER(code)=?", (c,)).fetchone()
+        if r:
+            want.add(r["id"])
+        else:
+            missing.append(c)
+    if not want and not missing:
+        return jsonify({"ok": False, "error": "Pick at least one order."}), 400
+    live = PAYPAL_ENV == "live"
+    deleted, skipped = [], []
+    for oid in sorted(want):
+        o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
+        if not o:
+            continue
+        cols = o.keys()
+        if "pp_state" in cols and (o["pp_state"] or "") == "authorized":
+            v = pp_void(o, "order deleted")
+            if not v.get("ok"):
+                skipped.append({"code": o["code"], "why": "PayPal hold could not be released: " + v.get("error", "")})
+                continue
+        if live and "pp_captured_cents" in cols and int(o["pp_captured_cents"] or 0) > 0:
+            skipped.append({"code": o["code"], "why": "PayPal charged " + money(int(o["pp_captured_cents"])) +
+                            ". Refund it first, or keep it for your records."})
+            continue
+        if live:
+            paid = db().execute("SELECT COUNT(*) n FROM driver_payouts WHERE order_id=? AND UPPER(COALESCE(status,'')) NOT IN (" +
+                                ",".join("?" * len(PAYOUT_DEAD)) + ")", (oid,) + PAYOUT_DEAD).fetchone()["n"]
+            if paid:
+                skipped.append({"code": o["code"], "why": "A driver was paid for it, so it stays for your pay records."})
+                continue
+        for table in ("card_vault", "status_log", "call_alerts", "driver_payouts"):
+            db().execute("DELETE FROM " + table + " WHERE order_id=?", (oid,))
+        db().execute("DELETE FROM orders WHERE id=?", (oid,))
+        deleted.append(o["code"])
+    db().commit()
+    if deleted:
+        log("order_delete", "%s deleted %d order(s): %s" % (me["name"] or me["username"], len(deleted), ", ".join(deleted)[:900]))
+        db().commit()
+    _DEL_FAILS.pop(did, None)
+    return jsonify({"ok": True, "deleted": deleted, "skipped": skipped, "missing": missing})
 
 
 @app.get("/api/dispatch/find-order")
@@ -5542,10 +5652,15 @@ def api_regions_list():
     if not (session.get("dispatcher_id") or session.get("driver_id")):
         return jsonify({"ok": False}), 403
     stamp_regions()
-    mine = (driver_region_ids(session["driver_id"]) if session.get("driver_id") and not session.get("dispatcher_id")
+    as_driver = bool(session.get("driver_id") and not session.get("dispatcher_id"))
+    mine = (driver_region_ids(session["driver_id"]) if as_driver
             else dispatcher_region_ids(session.get("dispatcher_id")))
-    return jsonify({"ok": True, "regions": [{"id": r["id"], "name": r["name"]} for r in all_regions()],
-                    "mine": sorted(mine)})
+    regs = all_regions()
+    if as_driver:
+        regs = [r for r in regs if r["id"] in mine]   # drivers only see the regions dispatch gave them
+    return jsonify({"ok": True, "regions": [{"id": r["id"], "name": r["name"]} for r in regs],
+                    "mine": sorted(mine), "driver": as_driver, "none_assigned": as_driver and not mine,
+                    "owner": is_owner() if session.get("dispatcher_id") else False})
 
 
 @app.get("/dispatch/regions")
@@ -5636,12 +5751,16 @@ def api_regions_edit():
         me = session.get("dispatcher_id")
         if not me:
             return jsonify({"ok": False, "error": "Sign in again."}), 403
+        if not is_owner(me):
+            return jsonify({"ok": False, "error": "Only an owner can change which regions a dispatcher works."}), 403
         chosen = ids(b.get("regions"))
         con.execute("DELETE FROM dispatcher_regions WHERE dispatcher_id=?", (me,))
         for x in chosen:
             con.execute("INSERT INTO dispatcher_regions(dispatcher_id,region_id) VALUES(?,?)", (me, x))
         log("region", who + " picked " + region_names(chosen) + " for themselves")
     elif op in ("set_driver", "set_dispatcher"):
+        if op == "set_dispatcher" and not is_owner():
+            return jsonify({"ok": False, "error": "Only an owner can change which regions a dispatcher works."}), 403
         table, col = ("driver_regions", "driver_id") if op == "set_driver" else ("dispatcher_regions", "dispatcher_id")
         src = "drivers" if op == "set_driver" else "dispatchers"
         p = con.execute("SELECT id, name FROM " + src + " WHERE id=?", (b.get("id"),)).fetchone()

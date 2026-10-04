@@ -9,6 +9,8 @@ async function loadRegions(){
 function rgEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function regionBoxes(cls, selected, extra){
   selected = selected || [];
+  if (REGIONS && REGIONS.none_assigned)
+    return '<span class="muted small">You are not assigned a region yet, so you cannot set availability. Ask dispatch to assign you one.</span>';
   if (!REGIONS || !REGIONS.regions.length) return '';
   return '<span class="rgpick"><span class="muted small">Region:</span>' + REGIONS.regions.map(r=>
     '<label class="rgchip"><input type="checkbox" class="'+cls+'" value="'+r.id+'"'+(extra||'')+

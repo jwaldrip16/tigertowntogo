@@ -12,6 +12,7 @@
   <a class="btn small" href="/dispatch/gps-log">GPS log</a>
   <a class="btn small" href="/dispatch/account">Dispatchers</a>
        <a class="btn small" href="/dispatch/settings">Fees</a>
+       <button class="btn small danger" id="delOrdersBtn" style="display:none" onclick="deleteOrders([],'')">Delete orders</button>
        <a class="btn small" href="/dispatch/logout">Sign out</a></div>
 </div>
 <div class="row regionbar"><span class="pill blue" id="rgLabel">All regions</span>
@@ -143,6 +144,7 @@
 let DRAGGED = null;
 let SEEN_PENDING = null;
 let LAST = null;
+let IS_OWNER = false;
 let REDO = [];
 
 let CHAT_SEEN = null;
@@ -218,6 +220,41 @@ function chatNotify(res){
     if (!first) document.title = '(' + n + ') Dispatch board';
   }
   if (n === 0) document.title = 'Dispatch board';
+}
+
+function deleteOrders(ids, code){
+  const old = document.getElementById('delModal'); if (old) old.remove();
+  const m = document.createElement('div');
+  m.id = 'delModal'; m.className = 'delmodal';
+  m.innerHTML = '<div class="delbox"><h3>Delete orders</h3>'+
+    '<p class="small muted">For test orders. This removes the order, its status history and its card record for good. '+
+    'A live order also disappears from the driver and the kitchen. A PayPal hold is released first.</p>'+
+    '<label class="small">Order numbers (separate with commas or spaces)</label>'+
+    '<input id="delCodes" value="'+(code||'')+'" placeholder="FF1001, FF1002">'+
+    '<label class="small">Your owner password</label>'+
+    '<input id="delPw" type="password" autocomplete="current-password">'+
+    '<div id="delMsg" class="small"></div>'+
+    '<div class="row"><button class="btn danger" id="delGo">Delete for good</button> '+
+    '<button class="btn" onclick="document.getElementById(\'delModal\').remove()">Cancel</button></div></div>';
+  document.body.appendChild(m);
+  document.getElementById(code ? 'delPw' : 'delCodes').focus();
+  document.getElementById('delPw').addEventListener('keydown', e=>{ if (e.key==='Enter') document.getElementById('delGo').click(); });
+  document.getElementById('delGo').onclick = async ()=>{
+    const msg = document.getElementById('delMsg');
+    const codes = document.getElementById('delCodes').value.trim();
+    if (!codes){ msg.textContent = 'Type at least one order number.'; return; }
+    msg.textContent = 'Deleting...';
+    const r = await fetch('/api/dispatch/delete-orders', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({codes: codes, password: document.getElementById('delPw').value})});
+    const j = await r.json().catch(()=>({ok:false, error:'Something went wrong.'}));
+    if (!j.ok){ msg.textContent = j.error || 'Could not delete.'; return; }
+    let t = j.deleted.length ? 'Deleted ' + j.deleted.join(', ') + '.' : 'Nothing was deleted.';
+    j.skipped.forEach(x=>{ t += ' Kept ' + x.code + ': ' + x.why; });
+    if (j.missing.length) t += ' Not found: ' + j.missing.join(', ') + '.';
+    msg.textContent = t;
+    document.getElementById('delPw').value = '';
+    if (typeof refresh === 'function') refresh();
+  };
 }
 function clearFlash(){
   document.getElementById('flash').classList.add('hidden');
@@ -699,6 +736,7 @@ function renderCompleted(res){
     (o.driver?' &middot; driver '+o.driver:'')+'</div>'+
     '<div class="order-actions">'+
       '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>'+
+      (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
       (!o.driver_id && o.dispatch_status!=='cancelled' ? '<select class="sendsel" id="sd'+o.id+'">'+
         '<option value="">Next up</option>'+ (res.drivers||[]).filter(d=>d.status==='online')
           .map(d=>'<option value="'+d.id+'">'+d.name+'</option>').join('') + '</select>'+
@@ -709,6 +747,7 @@ function renderCompleted(res){
           .map(d=>'<option value="'+d.id+'">'+d.name+'</option>').join('')+'</select>'+
         '<button class="btn tiny" onclick="moveToDriver('+o.id+')">Move order</button>' : '')+
     '<button class="btn tiny primary" onclick="redoDialog('+o.id+')">New order from this</button>'+
+    (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
     (o.card_on_file ? '<button class="btn tiny" onclick="viewCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">View card &bull;'+o.card_last4+'</button>' : '')+
 
     payBlock(o)+
@@ -795,6 +834,7 @@ async function findAny(){
     (o.hold_reason?' &middot; '+fEsc(o.hold_reason):'')+'</div>'+
     '<div class="row"><button class="btn tiny primary" onclick="editOrder('+o.id+')">Edit order</button>'+
     '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>'+
+      (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
     '<a class="btn tiny" target="_blank" href="'+o.track+'">Tracking page</a></div></div>').join('')
     : '<p class="muted small">No orders match that.</p>') +
     '<button class="btn tiny" onclick="document.getElementById(\'findAnyOut\').innerHTML=\'\';document.getElementById(\'findAny\').value=\'\'">Close</button>';
@@ -848,6 +888,8 @@ async function board(force){
       res.auto ? 'Auto dispatch on' : 'Auto dispatch off, assign by hand';
   }
   LAST = res;
+  IS_OWNER = !!res.is_owner;
+  const dob = document.getElementById('delOrdersBtn'); if (dob) dob.style.display = IS_OWNER ? '' : 'none';
   const unconfirmed = res.orders.filter(o=>o.uses_app && o.kitchen_status==='pending' && o.manual_state!=='ordering' &&
     ['awaiting_payment','cancelled','delivered','scheduled'].indexOf(o.dispatch_status) < 0);
   if (unconfirmed.length) flashPending(unconfirmed.length);
@@ -1134,6 +1176,7 @@ function orderCard(o, opts, drivers){
       '<button class="btn tiny" onclick="setToken('+o.id+')">'+(o.token?'Tag: '+esc(o.token):'Add tag')+'</button>'+
       '<button class="btn tiny" onclick="noteOrder('+o.id+')">'+(o.dispatch_note?'Edit note':'Add note')+'</button>'+
       '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>'+
+      (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
       '<select id="as'+o.id+'" onchange="assign('+o.id+',this.value)">'+opts+'</select>'+
       '<button class="btn tiny" onclick="dstat('+o.id+',\'received\')">Received</button>'+
       '<button class="btn tiny" onclick="dstat('+o.id+',\'at_restaurant\')">At rest</button>'+
