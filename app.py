@@ -2236,6 +2236,10 @@ def mark_paid(o, method="recorded", ref="", cents=None):
     """Payment landed: record it and let the order into the queue."""
     cents = int(o["total_cents"]) if cents is None else int(cents)
     released = o["dispatch_status"] == "awaiting_payment"
+    if o["dispatch_status"] == "scheduled" and (o["sched_dispatch"] or "") == "awaiting_payment":
+        db().execute("""UPDATE orders SET sched_dispatch='held', sched_kitchen=?, sched_hold=? WHERE id=?""",
+                     ("pending" if o["address_ok"] else "waiting",
+                      "waiting on kitchen" if o["address_ok"] else "address needs dispatch approval", o["id"]))
     db().execute("""UPDATE orders SET payment_status='paid', paid_at=?, pay_method=?,
                     pay_ref=?, paid_cents=? WHERE id=?""",
                  (now(), method, ref, cents, o["id"]))
@@ -2273,7 +2277,7 @@ PAYPAL_CLIENT_ID = os.environ.get("PAYPAL_CLIENT_ID", "").strip()
 PAYPAL_SECRET = os.environ.get("PAYPAL_SECRET", "").strip()
 PAYPAL_ENV = (os.environ.get("PAYPAL_ENV", "sandbox") or "sandbox").strip().lower()
 PP_BASE = "https://api-m.paypal.com" if PAYPAL_ENV == "live" else "https://api-m.sandbox.paypal.com"
-PP_SOURCES = {"venmo": "Venmo", "paypal": "PayPal", "card": "card"}
+PP_SOURCES = {"venmo": "Venmo", "paypal": "PayPal", "card": "card"}   # venmo kept only for old orders
 _pp_tok = {"t": "", "exp": 0.0}
 _pp_lock = threading.Lock()
 _pp_last_sweep = [0.0]
@@ -2381,6 +2385,41 @@ def pp_void(o, why="cancelled"):
     db().commit()
     return {"ok": False, "error": msg}
 
+@app.get("/api/paypal/client")
+def api_pp_client():
+    return jsonify({"ok": True, "enabled": pp_enabled(), "client_id": PAYPAL_CLIENT_ID, "env": PAYPAL_ENV})
+
+@app.post("/api/paypal/replace-card")
+def api_pp_replace_card():
+    """Dispatch swaps the card on a current or future order: release the old hold, then a new card goes on."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    o = db().execute("SELECT * FROM orders WHERE id=?", (request.get_json(force=True).get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
+    if o["dispatch_status"] in ("delivered", "cancelled"):
+        return jsonify({"ok": False, "error": "This order is closed, so the card can't be changed."}), 400
+    st = o["pp_state"] or ""
+    if st == "captured":
+        return jsonify({"ok": False, "error": "This card was already charged. Refund it first, then put the new card on."}), 400
+    if st == "authorized":
+        r = pp_void(o, "card replaced by dispatch")
+        if not r["ok"]:
+            return jsonify(r), 400
+    db().execute("""UPDATE orders SET pp_state=NULL, pp_auth_id=NULL, pp_auth_cents=NULL, pp_order_id=NULL,
+                    pp_source=NULL, pp_error=NULL, payment_status='unpaid', paid_at=NULL, pay_method=NULL,
+                    pay_ref=NULL, paid_cents=0 WHERE id=?""", (o["id"],))
+    if o["dispatch_status"] == "scheduled":
+        db().execute("""UPDATE orders SET sched_dispatch='awaiting_payment', sched_kitchen='waiting',
+                        sched_hold='waiting on card' WHERE id=?""", (o["id"],))
+    db().execute("DELETE FROM card_vault WHERE order_id=?", (o["id"],))
+    db().commit()
+    log("payment", o["code"] + " card removed by " + (session.get("dispatcher_name") or "dispatch") + " to put a new one on")
+    return jsonify({"ok": True})
+
 def pp_sweep(force=False):
     """Charge delivered orders once the tip window is over; release holds on cancelled ones."""
     if not pp_enabled():
@@ -2400,13 +2439,22 @@ def pp_sweep(force=False):
     except Exception as e:
         print("paypal sweep skipped:", e)
 
+def pp_can_pay(o, st=None):
+    """A card can go on this order through PayPal: open, not cash, nothing held or charged yet."""
+    if st is None:
+        st = (o["pp_state"] or "") if "pp_state" in o.keys() else ""
+    return bool(pp_enabled() and st not in ("authorized", "captured")
+                and not is_cash(o)
+                and (o["payment_status"] or "") not in ("paid", "cash_due")
+                and o["dispatch_status"] not in ("delivered", "cancelled"))
+
 def pp_info(o):
     """Payment bits the tracking page and the dispatch card need."""
     st = (o["pp_state"] or "") if "pp_state" in o.keys() else ""
     owed = balance_cents(o) if st == "captured" else 0
     return {"enabled": pp_enabled(), "state": st, "source": PP_SOURCES.get(o["pp_source"] or "", ""),
             "pay_url": "/pay/" + o["code"],
-            "can_pay": pp_enabled() and o["dispatch_status"] == "awaiting_payment" and st != "authorized",
+            "can_pay": pp_can_pay(o, st),
             "tip_editable": st in ("authorized", "captured") and o["dispatch_status"] != "cancelled",
             "owed_cents": max(0, owed), "owed": money(max(0, owed)),
             "held": money(o["pp_auth_cents"] or 0) if st else "",
@@ -2438,7 +2486,7 @@ def api_pp_create():
         return jsonify({"ok": False, "error": "Order not found."}), 404
     kind = "balance" if b.get("kind") == "balance" else "order"
     if kind == "order":
-        if o["dispatch_status"] != "awaiting_payment" or (o["pp_state"] or "") == "authorized":
+        if not pp_can_pay(o):
             return jsonify({"ok": False, "error": "This order is already paid."}), 400
         cents, intent = int(o["total_cents"]), "AUTHORIZE"
     else:
@@ -2588,7 +2636,7 @@ def api_track_tip(code):
 
 @app.context_processor
 def inject_paypal():
-    return {"pp_enabled": pp_enabled()}
+    return {"pp_enabled": pp_enabled(), "pp_on": pp_enabled()}
 
 
 # ---------------------------------------------------------------- future orders
@@ -2862,7 +2910,7 @@ def checkout():
                 return jsonify({"ok": False, "error": row["name"] + " is only available " + avail_label(row) +
                                 ". Take it out of your bag or pick a time when it is available."}), 400
     card = None
-    use_pp = bool(payload.get("paypal")) and pp_enabled()
+    use_pp = (bool(payload.get("paypal")) or placed_by == "customer") and pp_enabled()
     if placed_by == "customer" and not use_pp:
         card, card_err = check_card(payload.get("card"))
         if not card:
@@ -4457,6 +4505,8 @@ def api_dispatch_user_save():
                          (username, uid)).fetchone()
     if clash:
         return jsonify({"ok": False, "error": "That username is already taken."}), 400
+    if uid and is_owner(uid) and not is_owner():
+        return jsonify({"ok": False, "error": "Only an owner can change an owner account's name, username or password."}), 403
     if uid:
         if password:
             db().execute("UPDATE dispatchers SET name=?,username=?,password=? WHERE id=?",

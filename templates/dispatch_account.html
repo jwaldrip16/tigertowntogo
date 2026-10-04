@@ -62,7 +62,7 @@ async function loadUsers(){
       (u.id===res.me ? ' <span class="pill blue">you</span>' : '')+
       (u.owner ? ' <span class="pill green">owner</span>' : '')+
       '<div class="muted small">'+u.username+(u.created_at?(' · added '+u.created_at):'')+'</div></div>'+
-      '<div><button class="btn tiny" onclick="editUser('+u.id+',\''+u.name.replace(/'/g,"\\'")+'\',\''+u.username+'\')">Edit</button>'+
+      '<div>'+(u.owner && !res.i_am_owner ? '' : '<button class="btn tiny" onclick="editUser('+u.id+',\''+u.name.replace(/'/g,"\\'")+'\',\''+u.username+'\')">Edit</button>')+
       (res.i_am_owner ? '<button class="btn tiny" onclick="setOwner('+u.id+','+(!u.owner)+')">'+(u.owner?'Remove owner':'Make owner')+'</button>' : '')+
       (u.id===res.me || (u.owner && !res.i_am_owner) ? '' : '<button class="btn tiny danger" onclick="delUser('+u.id+')">Remove</button>')+
       '</div></div></div>').join('');

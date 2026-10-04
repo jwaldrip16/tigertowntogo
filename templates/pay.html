@@ -20,20 +20,19 @@
     {% endif %}
     {% if is_dispatch %}<p class="small"><strong>Dispatch:</strong> tap <em>Debit or Credit Card</em> to type in the customer's card.</p>{% endif %}
     <div id="ppButtons"></div>
-    <p class="small muted">Venmo shows up on phones that have the Venmo app. The card form is run by PayPal,
-      so your card number never touches our site.</p>
+    <p class="small muted">The card form is run by PayPal, so your card number never touches our site.</p>
     <div id="payMsg" class="small"></div>
   {% endif %}
 </div>
 {% endif %}
 {% endblock %}
 {% block scripts %}{% if order and pp_ready and ((kind == 'order' and info.can_pay) or (kind == 'balance' and info.owed_cents > 0)) %}
-<script src="https://www.paypal.com/sdk/js?client-id={{ client_id }}&currency=USD&intent={{ 'authorize' if kind == 'order' else 'capture' }}&enable-funding=venmo,card&components=buttons"></script>
+<script src="https://www.paypal.com/sdk/js?client-id={{ client_id }}&currency=USD&intent={{ 'authorize' if kind == 'order' else 'capture' }}&enable-funding=card&disable-funding=venmo&components=buttons"></script>
 <script>
 const CODE = '{{ order.code }}', KIND = '{{ kind }}', DISPATCH = {{ 'true' if is_dispatch else 'false' }};
 function say(t, bad){ const m = document.getElementById('payMsg'); m.textContent = t; m.style.color = bad ? '#c0392b' : ''; }
-const sources = DISPATCH ? [paypal.FUNDING.CARD, paypal.FUNDING.VENMO, paypal.FUNDING.PAYPAL]
-                         : [paypal.FUNDING.VENMO, paypal.FUNDING.PAYPAL, paypal.FUNDING.CARD];
+const sources = DISPATCH ? [paypal.FUNDING.CARD, paypal.FUNDING.PAYPAL]
+                         : [paypal.FUNDING.PAYPAL, paypal.FUNDING.CARD];
 sources.forEach(src=>{
   const b = paypal.Buttons({
     fundingSource: src,

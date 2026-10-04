@@ -17,7 +17,7 @@ function drawPay(p, o){
   if(document.activeElement && document.activeElement.id === 'tipBox') return;
   let h = '';
   if(p.can_pay){
-    h = '<h3>Pay now</h3><p>Pay with Venmo, PayPal or a debit or credit card. Your order goes to the kitchen the moment it is paid.</p>'+
+    h = '<h3>Pay now</h3><p>Pay with PayPal or a debit or credit card. Your order goes to the kitchen the moment it is paid.</p>'+
         '<a class="btn primary" href="'+p.pay_url+'">Pay '+o.total+'</a>';
   } else {
     const tipNum = (o.tip||'$0.00').replace(/[^0-9.]/g,'');

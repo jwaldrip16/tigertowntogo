@@ -54,7 +54,7 @@
       {% if src['driver_id'] %}<option value="driver">{{ src['driver'] }} (original driver)</option>{% endif %}
       <option value="queue">The queue (next driver up)</option>
     </select>
-    <div class="muted small">A card order still waits until you mark it paid, then goes where you picked.</div>
+    <div class="muted small">A card order waits until the card goes through, then goes where you picked. You type the card right after you place the order.</div>
     {% endif %}
     <h3>Customer</h3>
     <input id="ref" placeholder="Their order number (optional)">
@@ -109,7 +109,7 @@ document.addEventListener('DOMContentLoaded', function(){
 });
 </script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
-<script src="/static/cardbox.js"></script>
+<script src="/static/cardbox.js"></script><script src="/static/ppcard.js"></script>
 <script src="/static/itempick.js"></script>
 <script src="/static/avail.js"></script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
@@ -304,6 +304,11 @@ async function placeOrder(){
   if(res.future_note) alert(res.code + ': ' + res.future_note + ' It waits on the Future orders tab until then.');
   if(!res.cash){
     // card order: type the card, copy it to your terminal, mark paid. Nothing is saved.
+    if ({{ 'true' if pp_on else 'false' }}){
+      ppCard.open({code:res.code, amount:res.total, closeLabel:'Close and go to the board',
+                   onClose:function(){ window.location = '/dispatch'; }});
+      return;
+    }
     ffCard.open({id:res.order_id, code:res.code, amount:res.total, closeLabel:'Close and go to the board',
                  onClose:function(){ window.location = '/dispatch'; }});
     return;

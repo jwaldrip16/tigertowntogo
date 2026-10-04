@@ -139,7 +139,7 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="/static/itempick.js"></script><script src="/static/cardbox.js"></script>
+<script src="/static/itempick.js"></script><script src="/static/cardbox.js"></script><script src="/static/ppcard.js"></script>
 <script>
 let DRAGGED = null;
 let SEEN_PENDING = null;
@@ -434,7 +434,7 @@ async function edSave(){
   btn.disabled=false;
   if(r2 && r2.ok){
     if(r2.dupe) alert('Heads up: '+ref+' is already on order '+r2.dupe+' today.');
-    edClose(); board(true);
+    edClose(); refreshAll();
   } else document.getElementById('edErr').textContent = (r2 && r2.error) || 'Edit failed.';
 }
 let DRIVERS = [];
@@ -1009,7 +1009,10 @@ function ppButtons(o){
   if(!p.enabled) return '';
   let h = '';
   if(p.can_pay)
-    h += '<a class="btn tiny primary" href="'+p.pay_url+'" target="_blank" rel="noopener">Take card / Venmo</a>';
+    h += '<button class="btn tiny primary" onclick="typeCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">Type card</button>'+
+         '<a class="btn tiny" href="'+p.pay_url+'" target="_blank" rel="noopener">Pay page</a>';
+  if(p.state === 'authorized' && o.dispatch_status !== 'delivered' && o.dispatch_status !== 'cancelled')
+    h += '<button class="btn tiny" onclick="replaceCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">Change card</button>';
   if(p.state === 'authorized'){
     h += '<button class="btn tiny" onclick="ppSettle('+o.id+',\'charge\')">Charge now ('+o.total+')</button>';
     h += '<button class="btn tiny" style="color:#c0392b" onclick="ppSettle('+o.id+',\'void\')">Release hold</button>';
@@ -1032,7 +1035,7 @@ function payButtons(o){
       h += '<button class="btn tiny" onclick="viewCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">View card '+(o.card_brand||'')+' &bull;'+o.card_last4+'</button>';
     else if(!o.cash && o.card_on_file)
       h += '<button class="btn tiny primary" onclick="runCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">Run card '+(o.card_brand||'')+' &bull;'+o.card_last4+'</button>';
-    else if(!o.cash)
+    else if(!o.cash && !(o.pp && o.pp.enabled))
       h += '<button class="btn tiny primary" onclick="cardFor('+o.id+',\''+o.code+'\',\''+o.total+'\')">Card</button>';
     h += '<label class="switch tiny" title="Cash order: the driver collects at the door">'+
          '<input type="checkbox" '+(o.cash?'checked':'')+' onchange="setCash('+o.id+',this.checked)"> Cash</label>';
@@ -1069,6 +1072,16 @@ async function runCard(id, code, amount){
   const res = await jpost('/api/order/card-view', {order_id:id});
   if(!res.ok){ alert(res.error || 'Could not open that card.'); board(true); return; }
   ffCard.open({id:id, code:code, amount:amount, prefill:res.card, onClose:function(){ board(true); }});
+}
+function refreshAll(){ board(true); if (typeof TAB !== 'undefined' && TAB === 'future') loadFuture(); }
+function typeCard(id, code, amount){
+  ppCard.open({code: code, amount: amount, onDone: refreshAll, onClose: refreshAll});
+}
+async function replaceCard(id, code, amount){
+  if(!confirm('Take the current card off '+code+' and put a new one on? The hold on the old card is released.')) return;
+  const r = await jpost('/api/paypal/replace-card', {order_id: id});
+  if(!r || !r.ok){ alert((r && r.error) || 'Could not change the card.'); refreshAll(); return; }
+  typeCard(id, code, amount);
 }
 function cardFor(id, code, amount){
   ffCard.open({id:id, code:code, amount:amount, onClose:function(){ board(true); }});
@@ -1504,8 +1517,10 @@ async function loadFuture(){
       '<div class="muted small">'+o.address+'</div>'+
       (items ? '<div class="small">'+items+'</div>' : '')+
       '<div class="small">Total '+o.total+' &middot; '+(o.pay_method==='cash' ? 'cash' : 'card')+
-      ' &middot; goes to the kitchen '+o.release_label+'</div>'+
+      ' &middot; goes to the kitchen '+o.release_label+payPill(o)+'</div>'+
       '<div class="order-actions">'+
+      '<button class="btn tiny" onclick="editOrder('+o.id+')">Edit order</button>'+
+      payButtons(o)+
       (o.kitchen_closed
         ? '<button class="btn tiny" disabled title="'+(o.kitchen_hours||'Closed')+'">Send now (kitchen closed)</button>'
         : '<button class="btn tiny" onclick="releaseFuture('+o.id+',\''+o.code+'\')">Send now</button>')+
