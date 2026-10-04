@@ -11,7 +11,7 @@
 <script src="/static/maptiles.js"></script>
 <script src="/static/nosleep.min.js"></script>
 <script src="/static/keepawake.js"></script>
-<script src="/static/drivernav.js"></script>
+
 <script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/static/sw.js").catch(function(){});}</script>
 {% endblock %}
 {% block body %}
@@ -26,21 +26,23 @@
 </div>
 <div class="panel" id="status"></div>
 <div class="row"><span class="muted small" id="locNote">Checking your location...</span></div>
+<details class="panel small" id="bgGps" {% if not bg_seen %}open{% endif %}>
+  <summary><strong>Keep GPS on while you use Google Maps or Apple Maps</strong>
+    {% if bg_seen %}<span class="pill green">Set up</span>{% else %}<span class="pill amber">Not set up</span>{% endif %}</summary>
+  <p class="muted">Your phone pauses this app while you're in a maps app. Traccar Client keeps your location going to dispatch. One-time setup:</p>
+  <ol>
+    <li>Install <b>Traccar Client</b> from the App Store or Google Play (<a href="https://www.traccar.org/client/" target="_blank">app info</a>).</li>
+    <li>Open it and set <b>Device identifier</b> to <b>{{ track_id }}</b>.</li>
+    <li>Set <b>Server URL</b> to <b>{{ gps_url }}</b></li>
+    <li>Set Location accuracy to <b>High</b> and Distance to <b>50</b>.</li>
+    <li>Turn on <b>Continuous tracking</b> (or Start). When asked, allow location <b>Always</b>.</li>
+    <li>Android: set battery use for Traccar Client to <b>Unrestricted</b>.</li>
+  </ol>
+  <p class="muted">Leave it running all shift. Dispatch only sees your location while you're online or on break.</p>
+</details>
 <div class="row"><span class="muted small" id="soundNote"></span>
   <button class="btn tiny" id="soundBtn" onclick="toggleSound()">Sound</button>
   <button class="btn tiny" data-awake-btn onclick="ffAwake.toggle()">Keep screen awake</button></div>
-<div id="navBox" class="navbox hidden">
-  <div class="navtop"><div id="navArrow" class="navarrow">&uarr;</div>
-    <div><div id="navNext" class="navnext">Getting directions...</div><div id="navDist" class="navdist"></div></div></div>
-  <div id="navMap" class="navmap"></div>
-  <button id="navRecenter" class="btn small primary navrecenter hidden" onclick="ffNav.recenter()">Recenter</button>
-  <div class="navbot"><div><span id="navEta" class="naveta"></span> <span id="navLeft" class="muted"></span>
-      <div class="small muted" id="navDest"></div></div>
-    <div class="navbtns"><button class="btn tiny" id="navVoice" onclick="ffNav.voice()">Voice on</button>
-      <button class="btn tiny" onclick="ffNav.overview()">Overview</button>
-      <a class="btn tiny" id="navExt" target="_blank">Maps app</a>
-      <button class="btn tiny red" onclick="ffNav.close()">End</button></div></div>
-</div>
 <div id="newalert" class="newalert hidden">New order assigned to you. Tap Received on the stop
   below to accept it and stop the alert.</div>
 <div class="tabbar">
@@ -66,7 +68,11 @@
     </div>
     <div class="muted small callnote"></div>
   </section>
-  <section><h2>Your run</h2><div id="stack"></div></section>
+  <section><h2>Your run</h2>
+    <div class="row small muted" style="gap:6px;align-items:center">Directions open in
+      <button id="mapsGoogle" class="btn tiny" onclick="setMapsApp('google')">Google Maps</button>
+      <button id="mapsApple" class="btn tiny" onclick="setMapsApp('apple')">Apple Maps</button></div>
+    <div id="stack"></div></section>
 </div>
 
 <div id="paneChat" class="hidden">
@@ -281,7 +287,7 @@ function renderDone(list){
       '<div class="small">Order total ' + o.total + '</div>' +
       '<div class="row" style="gap:6px;flex-wrap:wrap;margin-top:6px">' +
         (o.phone ? '<a class="btn tiny" href="tel:' + ph + '">Call customer</a><a class="btn tiny" href="sms:' + ph + '">Text customer</a>' : '') +
-        (o.customer_nav ? '<a class="btn tiny" target="_blank" href="' + o.customer_nav + '">Map</a>' : '') +
+        (o.address ? '<a class="btn tiny" target="_blank" href="' + mapsUrl(o.customer_ll, o.address) + '">Map</a>' : '') +
       '</div></div>';
   }).join('') : '<p class="muted">No completed orders in the last 14 hours.</p>';
 }
@@ -366,20 +372,36 @@ function renderRun(stack, total){
     ((o.timeline||[]).length ? '<div class="trailline"><b>Times:</b> '+
       o.timeline.map(x=>x.label+' '+x.time).join(' &middot; ')+'</div>' : '')+
     '<div class="order-actions">'+
-    (o.restaurant_ll ? '<button class="btn tiny primary" onclick="navStop('+ix+',\'r\')">Navigate to restaurant</button>' : '')+
-    '<a class="btn tiny" target="_blank" href="'+o.restaurant_nav+'">'+(o.restaurant_ll?'Restaurant in Maps app':'Navigate to restaurant')+'</a>'+
-    (o.customer_ll ? '<button class="btn tiny primary" onclick="navStop('+ix+',\'c\')">Navigate to customer</button>' : '')+
-    '<a class="btn tiny" target="_blank" href="'+o.customer_nav+'">'+(o.customer_ll?'Customer in Maps app':'Navigate to customer')+'</a>'+
+    '<button class="btn tiny primary" onclick="navStop('+ix+',\'r\')">Navigate to restaurant</button>'+
+    '<button class="btn tiny primary" onclick="navStop('+ix+',\'c\')">Navigate to customer</button>'+
     (o.restaurant_phone ? '<a class="btn tiny" href="'+o.restaurant_tel+'">Call '+o.restaurant+'</a>' : '')+
     (o.phone ? '<a class="btn tiny" href="'+o.customer_tel+'">Call customer</a>' : '')+
     (o.phone ? '<a class="btn tiny" href="sms:'+o.phone.replace(/[^0-9]/g,"")+'">Text customer</a>' : '')+
     stageButtons(o)+'</div></div>'
   ).join('') || '<p class="muted">Nothing assigned to you right now.</p>';
 }
+// Directions open in Google Maps or Apple Maps (the driver picks; iPhone defaults to Apple Maps).
+function mapsApp(){
+  const saved = localStorage.getItem('ffMapsApp');
+  if (saved === 'google' || saved === 'apple') return saved;
+  return /iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent) && 'ontouchend' in document ? 'apple' : 'google';
+}
+function setMapsApp(v){ localStorage.setItem('ffMapsApp', v); paintMapsApp(); }
+function paintMapsApp(){
+  const a = mapsApp();
+  const g = document.getElementById('mapsGoogle'), ap = document.getElementById('mapsApple');
+  if (g) g.className = 'btn tiny' + (a === 'google' ? ' primary' : '');
+  if (ap) ap.className = 'btn tiny' + (a === 'apple' ? ' primary' : '');
+}
+function mapsUrl(ll, address){
+  const dest = ll ? (ll[0] + ',' + ll[1]) : (address || '');
+  if (mapsApp() === 'apple') return 'https://maps.apple.com/?daddr=' + encodeURIComponent(dest) + '&dirflg=d';
+  return 'https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=' + encodeURIComponent(dest);
+}
 function navStop(ix, which){
   const o = (LAST_STACK || [])[ix]; if (!o) return;
-  if (which === 'r') ffNav.open({ll:o.restaurant_ll, label:o.restaurant, address:o.restaurant_address, ext:o.restaurant_nav});
-  else ffNav.open({ll:o.customer_ll, label:o.customer || 'Customer', address:o.address, ext:o.customer_nav});
+  const url = which === 'r' ? mapsUrl(o.restaurant_ll, o.restaurant_address) : mapsUrl(o.customer_ll, o.address);
+  window.open(url, '_blank');
 }
 function newOrderAlert(stack){
   // a stop still sitting at "assigned" has not been accepted by the driver yet
@@ -776,4 +798,6 @@ async function copyLast(){
 }
 loadWeek();
 try { ffNotify.button('notifBtn','notifNote'); } catch(e){}
+
+paintMapsApp();
 </script>{% endblock %}

@@ -74,7 +74,7 @@
     open:function(t){
       TARGET=t; ARRIVED=false; RT=null; CUR=1; FOLLOW=true; SPOKEN={}; OFF=0;
       $('navBox').classList.remove('hidden'); document.body.classList.add('navopen');
-      $('navDest').textContent=t.label+(t.address?' \u00b7 '+t.address:''); $('navExt').href=t.ext||'#';
+      $('navDest').textContent=t.label+(t.address?' \u00b7 '+t.address:'');
       $('navNext').textContent='Getting directions...'; $('navDist').textContent=''; $('navEta').textContent=''; $('navLeft').textContent='';
       $('navRecenter').classList.add('hidden'); paintVoice();
       try{ if(window.ffAwake) ffAwake.hold(true); }catch(e){}

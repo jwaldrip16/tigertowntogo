@@ -367,6 +367,8 @@ def init_db():
     ensure_column(con, "drivers", "last_addr", "TEXT")
     ensure_column(con, "drivers", "last_addr_lat", "REAL")
     ensure_column(con, "drivers", "last_addr_lng", "REAL")
+    ensure_column(con, "drivers", "track_id", "TEXT")
+    ensure_column(con, "drivers", "last_bg_at", "TEXT")
     con.execute("CREATE TABLE IF NOT EXISTS revgeo (k TEXT PRIMARY KEY, address TEXT, created_at TEXT)")
     con.execute("""CREATE TABLE IF NOT EXISTS regions (id INTEGER PRIMARY KEY AUTOINCREMENT,
                    name TEXT UNIQUE NOT NULL, sort INTEGER DEFAULT 0, created_at TEXT)""")
@@ -5298,6 +5300,114 @@ def miles_between(lat1, lng1, lat2, lng2):
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return round(R * 2 * math.asin(math.sqrt(a)) * 1.3, 1)
 
+# ---- Background GPS from the Traccar Client app (free on iPhone and Android) ----
+# The driver app is a web page, and phones pause web pages while the driver is in
+# Google Maps or Apple Maps. Traccar Client keeps sending location in the background.
+# Each driver's phone uses their own Tracking ID as its "Device identifier".
+
+def driver_track_id(did):
+    row = db().execute("SELECT track_id FROM drivers WHERE id=?", (did,)).fetchone()
+    if not row:
+        return None
+    if row["track_id"]:
+        return row["track_id"]
+    while True:
+        tid = str(secrets.randbelow(90000000) + 10000000)
+        if not db().execute("SELECT 1 FROM drivers WHERE track_id=?", (tid,)).fetchone():
+            break
+    db().execute("UPDATE drivers SET track_id=? WHERE id=?", (tid, did))
+    db().commit()
+    return tid
+
+
+def gps_server_url():
+    root = request.url_root
+    host = request.host.split(":")[0]
+    if root.startswith("http://") and host not in ("localhost", "127.0.0.1") and not host.startswith("192.168."):
+        root = "https://" + root[len("http://"):]
+    return root.rstrip("/") + "/api/gps/traccar"
+
+
+def _gps_ts(v):
+    """Traccar sends ISO time, or seconds / milliseconds since 1970. Returns local time."""
+    if v in (None, ""):
+        return None
+    try:
+        x = float(v)
+        if x > 1e11:
+            x = x / 1000.0
+        return dt.datetime.fromtimestamp(x)
+    except (TypeError, ValueError):
+        pass
+    try:
+        t = dt.datetime.fromisoformat(str(v).replace("Z", "+00:00").replace(" ", "T"))
+        if t.tzinfo:
+            t = t.astimezone().replace(tzinfo=None)
+        return t
+    except ValueError:
+        return None
+
+
+@app.route("/api/gps/traccar", methods=["GET", "POST"])
+@app.route("/api/gps/traccar/", methods=["GET", "POST"])
+def api_gps_traccar():
+    def num(v):
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+    fixes = []
+    data = request.get_json(silent=True)
+    if isinstance(data, dict) and ("location" in data or "device_id" in data):
+        dev = str(data.get("device_id") or data.get("id") or "")
+        locs = data.get("location")
+        for loc in (locs if isinstance(locs, list) else [locs]):
+            if isinstance(loc, dict):
+                c = loc.get("coords") or {}
+                fixes.append((num(c.get("latitude")), num(c.get("longitude")),
+                              num(c.get("accuracy")), _gps_ts(loc.get("timestamp"))))
+    else:
+        f = request.values
+        dev = f.get("id") or f.get("deviceid") or ""
+        lat, lng = num(f.get("lat")), num(f.get("lon"))
+        if (lat is None or lng is None) and f.get("location"):
+            parts = f.get("location").split(",")
+            if len(parts) >= 2:
+                lat, lng = num(parts[0]), num(parts[1])
+        fixes.append((lat, lng, num(f.get("accuracy")), _gps_ts(f.get("timestamp"))))
+    dev = re.sub(r"\D", "", dev)
+    # Always answer 200 so the phone doesn't pile up retries for a fix we won't use.
+    if not dev:
+        return jsonify({"ok": False, "error": "no device id"})
+    d = db().execute("SELECT * FROM drivers WHERE track_id=?", (dev,)).fetchone()
+    if not d:
+        return jsonify({"ok": False, "error": "unknown tracking id"})
+    good = [x for x in fixes if x[0] is not None and x[1] is not None
+            and -90 <= x[0] <= 90 and -180 <= x[1] <= 180 and (x[2] is None or x[2] <= 1000)]
+    if not good:
+        return jsonify({"ok": False, "error": "no usable fix"})
+    db().execute("UPDATE drivers SET last_bg_at=? WHERE id=?", (now(), d["id"]))
+    if d["status"] == "offline" or not (d["active"] if "active" in d.keys() and d["active"] is not None else 1):
+        db().commit()
+        return jsonify({"ok": True, "tracking": False})
+    lat, lng, acc, ts = max(good, key=lambda x: x[3] or dt.datetime.now())
+    t = ts if ts and ts <= dt.datetime.now() else dt.datetime.now()
+    if d["last_loc_at"]:
+        try:
+            if t <= dt.datetime.fromisoformat(d["last_loc_at"]):
+                db().commit()
+                return jsonify({"ok": True, "tracking": True, "stale": True})
+        except ValueError:
+            pass
+    db().execute("UPDATE drivers SET last_lat=?,last_lng=?,last_loc_at=? WHERE id=?",
+                 (lat, lng, t.isoformat(timespec="seconds"), d["id"]))
+    db().commit()
+    if (dt.datetime.now() - t).total_seconds() < 180:
+        addr = update_driver_addr(d["id"], lat, lng)
+        log_gps_fix(d["id"], lat, lng, addr)
+    return jsonify({"ok": True, "tracking": True})
+
+
 @app.post("/api/driver/ping")
 def api_driver_ping():
     """The driver app posts a GPS fix every 2-3 seconds while the driver is on shift."""
@@ -5347,8 +5457,15 @@ def api_locations():
                     "where": nxt["address"] if heading_to_customer else nxt["rname"],
                     "miles_away": miles_between(d["last_lat"], d["last_lng"], tlat, tlng)
                                   if loc else None}
+        bg_on = False
+        if d["last_bg_at"]:
+            try:
+                bg_on = (dt.datetime.now() - dt.datetime.fromisoformat(d["last_bg_at"])).total_seconds() < 900
+            except ValueError:
+                pass
         out.append({"id": d["id"], "name": d["name"], "phone": d["phone"], "status": d["status"],
-                    "roster": d["roster"], "location": loc, "next_stop": stop})
+                    "roster": d["roster"], "location": loc, "next_stop": stop,
+                    "track_id": driver_track_id(d["id"]), "bg_gps": bg_on})
     return jsonify({"ok": True, "drivers": out})
 
 @app.get("/dispatch/map")
@@ -7460,8 +7577,11 @@ def driver():
     if not session.get("driver_id"):
         return redirect(url_for("driver_login"))
     _ph = dispatch_phone(driver_phone_region(session["driver_id"]))
+    _bg = db().execute("SELECT last_bg_at FROM drivers WHERE id=?", (session["driver_id"],)).fetchone()
     return render_template("driver.html", driver_id=session["driver_id"],
                            driver_name=session["driver_name"],
+                           track_id=driver_track_id(session["driver_id"]), gps_url=gps_server_url(),
+                           bg_seen=(_bg["last_bg_at"] if _bg else None),
                            dispatch_phone=nice_phone(_ph), dispatch_tel=tel_digits(_ph),
                            awake_default=awake_default("driver"))
 

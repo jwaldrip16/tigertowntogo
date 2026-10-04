@@ -1,10 +1,20 @@
-{% extends "base.html" %}{% block body %}
+{% extends "base.html" %}
+{% block title %}Driver tracker{% endblock %}
+{% block head %}
+<link rel="manifest" href="/static/manifest-tracker.json">
+<meta name="theme-color" content="#1B2A41">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Tracker">
+<link rel="apple-touch-icon" href="/brand/icon-192.png">
+<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/static/sw.js").catch(function(){});}</script>
+{% endblock %}{% block body %}
 <div class="head"><h1>Driver map</h1>
   <div><a class="btn small" href="/dispatch">Board</a>
        <a class="btn small" href="/dispatch/account">Dispatchers</a>
        <a class="btn small" href="/dispatch/logout">Sign out</a></div></div>
 <p class="muted small">Live positions from each driver's phone. Pins move every 2 seconds, with the closest street address. A pin goes
-grey once a fix is more than 10 minutes old, which usually means the driver closed the app.</p>
+grey once a fix is more than 10 minutes old, which usually means the driver closed the app.
+Add this page to your home screen to keep it as its own Tracker app.</p>
 <div class="maprow">
   <div id="map" class="map"></div>
   <aside class="panel" id="side"></aside>
@@ -75,7 +85,9 @@ async function refresh(){
       rows.push('<div class="muted small">No location yet. The driver needs to open their app and allow '+
         'location once.</div>');
     }
-    rows.push('<div class="muted small">'+(d.roster||'scheduled').replace('_',' ')+'</div>');
+    rows.push('<div class="muted small">'+(d.roster||'scheduled').replace('_',' ')+' · '+
+      (d.bg_gps ? '<span class="pill green">Background GPS on</span>'
+                : 'Background GPS off (Tracking ID '+(d.track_id||'')+')')+'</div>');
     const div = document.createElement('div');
     div.className = 'card pad';
     div.innerHTML = rows.join('');
