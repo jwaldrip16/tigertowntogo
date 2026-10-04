@@ -202,7 +202,7 @@ function chatNotify(res){
   if (tabBtn) tabBtn.classList.toggle('alerting', n > 0 && PAGE !== 'comms');
   const alert = document.getElementById('chatAlert');
   if (!m){
-    CHAT_SEEN = null;
+    CHAT_SEEN = 0;      // loaded with no messages, so the very next one is new and should alert
     if (alert) alert.classList.add('hidden');
     document.title = 'Dispatch board';
     return;
@@ -216,11 +216,23 @@ function chatNotify(res){
   if (CHAT_SEEN !== m.id){
     const first = CHAT_SEEN === null;
     CHAT_SEEN = m.id;
-    if (!first && window.ffSound && ffSound.play) ffSound.play('ping');
-    if (!first) document.title = '(' + n + ') Dispatch board';
+    if (!first){
+      try { ffSound.play('ping'); } catch(e){}
+      document.title = '(' + n + ') Dispatch board';
+      try {
+        const pop = ffNotify.show('Driver chat: ' + m.driver, m.body, 'drvchat');
+        if (pop) pop.onclick = function(){ window.focus(); openChatWith(m.driver_id); this.close(); };
+      } catch(e){}
+      if (typeof ffToast === 'function') ffToast('New chat from ' + m.driver + ': ' + m.body);
+    }
   }
+  // keep a soft reminder chime going every 30 seconds while driver messages sit unread
+  if (n > 0 && PAGE !== 'comms'){
+    if (!CHAT_REMIND) CHAT_REMIND = setInterval(function(){ try { ffSound.play('ping'); } catch(e){} }, 30000);
+  } else if (CHAT_REMIND){ clearInterval(CHAT_REMIND); CHAT_REMIND = null; }
   if (n === 0) document.title = 'Dispatch board';
 }
+let CHAT_REMIND = null;
 
 function deleteOrders(ids, code){
   const old = document.getElementById('delModal'); if (old) old.remove();
@@ -1410,6 +1422,10 @@ function restChatNotify(res){
   }
   if (m && REST_LAST !== null && lid > REST_LAST){
     try { ffSound.beep(); } catch(e) {}
+    try {
+      const pop = ffNotify.show('Restaurant chat: ' + m.name, m.body, 'restchat');
+      if (pop) pop.onclick = function(){ window.focus(); openRestChat(m.restaurant_id); this.close(); };
+    } catch(e) {}
     const a = document.getElementById('restAlert');
     a.textContent = m.name + ': ' + m.body + '  (tap to reply)';
     a.onclick = function(){ openRestChat(m.restaurant_id); };
