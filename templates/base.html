@@ -114,6 +114,33 @@ if (!window.ffNotify){
   window.ffNotify = {ask:function(){return Promise.resolve('unsupported');}, show:function(){return null;},
                      state:function(){return 'unsupported';}, button:function(){}, supported:false};
 }
+// Pop-ups on every app: alerts permission (asked on the first tap, once per browser for the whole site)
+// and links that would open a new window fall back to this tab if the browser blocks them.
+(function(){
+  var _open = window.open;
+  window.open = function(url, target, feat){
+    var w = null;
+    try { w = _open.call(window, url, target, feat); } catch(e){}
+    if (!w && url){ window.location.href = url; }
+    return w;
+  };
+  try {
+    if (!('Notification' in window) || Notification.permission !== 'default') return;
+    var appPage = /^\/(dispatch|driver|restaurant|track|t\/|order)/.test(location.pathname);
+    if (!appPage) return;
+    var bar = document.createElement('div');
+    bar.id = 'ffPopBar';
+    bar.style.cssText = 'position:fixed;left:0;right:0;bottom:0;background:#1f6f43;color:#fff;padding:10px 14px;z-index:9998;display:flex;gap:10px;align-items:center;justify-content:center;font-size:14px';
+    bar.innerHTML = '<span>Allow pop-up alerts so you never miss an order update.</span>'+
+      '<button type="button" style="background:#fff;color:#1f6f43;border:0;border-radius:6px;padding:6px 12px;font-weight:600">Allow</button>'+
+      '<button type="button" style="background:transparent;color:#fff;border:1px solid #fff;border-radius:6px;padding:6px 10px">Later</button>';
+    function ask(){ try { Notification.requestPermission().then(function(){ bar.remove(); }); } catch(e){ bar.remove(); } }
+    bar.children[1].onclick = ask;
+    bar.children[2].onclick = function(){ bar.remove(); };
+    document.addEventListener('DOMContentLoaded', function(){ document.body.appendChild(bar); });
+    if (document.readyState !== 'loading') document.body.appendChild(bar);
+  } catch(e){}
+})();
 if (!window.ffSound){
   window.ffSound = {play:function(){}, startLoop:function(){}, stopLoop:function(){},
                     looping:function(){return false;}, toggle:function(){return false;},

@@ -21,6 +21,7 @@
 {% endblock %}
 {% block scripts %}<script>
 let ROWS = [];
+const OWNER = {{ 'true' if owner else 'false' }};
 function esc(x){ return String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 async function load(){
   const r = await jget('/api/dispatch/customers?q='+encodeURIComponent(q.value)); ROWS = r.customers||[];
@@ -28,7 +29,7 @@ async function load(){
   list.innerHTML = ROWS.map(c=>'<div class="custrow"><div><b>'+esc(c.name)+'</b> '+esc(c.phone)+
     (c.existing?' <span class="pill green">Existing</span>':' <span class="pill amber">New</span>')+(c.online?' <span class="pill grey">Online account</span>':'')+
     '<div class="small muted">'+esc(c.address)+(c.notes?' &middot; '+esc(c.notes):'')+'</div><div class="small muted">'+c.orders+' orders &middot; '+c.points+' points &middot; added '+esc(c.added)+(c.added_by?' by '+esc(c.added_by):'')+'</div></div>'+
-    '<div class="row"><button class="btn tiny" onclick="edit('+c.id+')">Edit</button><button class="btn tiny" onclick="resetCode('+c.id+')">Password reset code</button></div></div>').join('') || '<p class="muted">No customers found.</p>';
+    '<div class="row"><button class="btn tiny" onclick="edit('+c.id+')">Edit</button><button class="btn tiny" onclick="resetCode('+c.id+')">Password reset code</button>'+(OWNER?'<button class="btn tiny danger" onclick="delCust('+c.id+')">Delete</button>':'')+'</div></div>').join('') || '<p class="muted">No customers found.</p>';
 }
 function edit(id){ const c = ROWS.find(x=>x.id===id); fTitle.textContent='Edit customer'; cId.value=c.id; cName.value=c.name; cPhone.value=c.phone_digits; cAddr.value=c.address; cEmail.value=c.email; cNotes.value=c.notes; cExisting.checked=c.marked_existing||c.existing; window.scrollTo({top:0,behavior:'smooth'}); }
 function clearForm(){ fTitle.textContent='Add a customer'; [cId,cName,cPhone,cAddr,cEmail,cNotes].forEach(x=>x.value=''); cExisting.checked=true; cMsg.textContent=''; }
@@ -39,6 +40,14 @@ async function saveCust(){
 async function resetCode(id){
   if(!confirm('Make a password reset code for this customer? Only give it to the customer themselves.')) return;
   const r = await jpost('/api/dispatch/customer-reset-code',{id:id}); alert(r.ok ? ('Code: '+r.code+'\n\n'+r.message) : r.error);
+}
+async function delCust(id){
+  const c = ROWS.find(x=>x.id===id); if(!c) return;
+  if(!confirm('Delete '+c.name+' ('+c.phone+') from the customer list? Their saved cards and points are removed. Past orders stay in your records. This cannot be undone.')) return;
+  const r = await jpost('/api/dispatch/customer-delete',{id:id});
+  if(!r.ok){ alert(r.error||'Could not delete.'); return; }
+  if(String(cId.value)===String(id)) clearForm();
+  cMsg.textContent = r.message; load();
 }
 try { attachAddressPicker('cAddr', ()=>{}); } catch(e){}
 load();

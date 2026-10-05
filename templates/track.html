@@ -139,6 +139,14 @@ async function tick(){
     return;
   }
   const withDriver = ['assigned','received','at_restaurant','enroute','delivered'].includes(o.dispatch_status);
+  try {
+    const stg = o.dispatch_status==='delivered' ? 'Your order was delivered.' :
+                o.dispatch_status==='enroute' ? 'Your order is on the way.' :
+                o.kitchen_status==='ready' ? 'Your food is ready for pickup by your driver.' :
+                o.kitchen_status==='preparing' ? 'The restaurant is preparing your order.' : '';
+    if (stg && window._ffStage !== undefined && window._ffStage !== stg) ffNotify.show('Order '+(o.code||''), stg, 'track');
+    window._ffStage = stg;
+  } catch(e){}
   if (o.dispatch_status==='awaiting_payment' || o.kitchen_status==='waiting'){
     document.getElementById('box').innerHTML = '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+
       '<p><b>Waiting on payment.</b> Your order has not gone to the kitchen yet. It goes as soon as your payment is marked paid. '+

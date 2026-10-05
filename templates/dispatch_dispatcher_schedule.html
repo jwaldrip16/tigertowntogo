@@ -32,6 +32,51 @@ Only approved times count.</p>
   </div>
 </div>
 <div id="daList"></div>
+
+<div class="panel mt" id="actPanel">
+  <div class="row" style="justify-content:space-between;align-items:center">
+    <h2 style="margin:0">Live active time</h2>
+    <div class="row"><button class="btn tiny" onclick="actWeek(-7)">&larr; Week</button>
+      <span class="muted small" id="actLabel"></span>
+      <button class="btn tiny" onclick="actWeek(7)">Week &rarr;</button></div>
+  </div>
+  <p class="muted small">Time each dispatcher actually had the dispatch board open and signed in. Five minutes with no board open ends the stretch. Owners see everyone; dispatchers see their own time. Scheduled is their approved weekly hours.</p>
+  <div style="overflow-x:auto"><table class="tbl" id="actTbl"></table></div>
+  <div id="actSessions"></div>
+</div>
+<script>
+(function(){
+  const KIND = 'dispatcher';
+  let WEEK = null, OPEN = null;
+  function e(s){ return String(s==null?'':s).replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+  window.actWeek = function(n){
+    const d = WEEK ? new Date(WEEK+'T12:00:00') : new Date();
+    d.setDate(d.getDate()+n); WEEK = d.toISOString().slice(0,10); actLoad();
+  };
+  window.actOpen = function(id){ OPEN = (OPEN===id ? null : id); actLoad(); };
+  async function actLoad(){
+    const r = await fetch('/api/dispatch/active-time?kind='+KIND+(WEEK?'&week='+WEEK:'')).then(x=>x.json()).catch(()=>null);
+    if(!r || !r.ok) return;
+    WEEK = r.week_start;
+    document.getElementById('actLabel').textContent = r.week_label;
+    let h = '<tr><th>Name</th><th>Now</th>'+r.days.map(d=>'<th>'+e(d)+'</th>').join('')+
+            '<th>Total active</th><th>Break</th><th>Scheduled</th></tr>';
+    for(const p of r.people){
+      h += '<tr><td><a href="#" onclick="actOpen('+p.id+');return false">'+e(p.name)+'</a></td><td>'+
+           (p.now ? '<span class="pill '+(p.now==='On break'?'amber':'green')+'">'+e(p.now)+'</span>' : '<span class="muted small">off</span>')+'</td>'+
+           p.days.map(d=>'<td>'+e(d.online)+(d.break?'<div class="muted small">break '+e(d.break)+'</div>':'')+'</td>').join('')+
+           '<td><b>'+e(p.total)+'</b></td><td>'+e(p.break_total)+'</td><td>'+(e(p.scheduled)||'<span class="muted small">none</span>')+'</td></tr>';
+    }
+    document.getElementById('actTbl').innerHTML = h;
+    const p = r.people.find(x=>x.id===OPEN);
+    document.getElementById('actSessions').innerHTML = !p ? '' :
+      '<h3>'+e(p.name)+'</h3>'+(p.sessions.length ? '<table class="tbl"><tr><th>Day</th><th>Status</th><th>From</th><th>To</th><th>Length</th></tr>'+
+      p.sessions.map(s=>'<tr><td>'+e(s.day)+'</td><td>'+e(s.state)+'</td><td>'+e(s.start)+'</td><td>'+e(s.end)+'</td><td>'+e(s.length)+'</td></tr>').join('')+'</table>'
+      : '<p class="muted small">No live time this week.</p>');
+  }
+  actLoad(); setInterval(actLoad, 30000);
+})();
+</script>
 {% endblock %}
 {% block scripts %}<script src="/static/regionpick.js"></script>
 <script>

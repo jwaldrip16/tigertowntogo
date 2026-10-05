@@ -1109,6 +1109,14 @@ async function houseAcct(id, code, total){
   const res = await jpost('/api/order/mark-paid', {order_id:id, method:'house', account:acct});
   if(!res.ok){ alert(res.error || 'That did not save.'); return; }
   board(true);
+  ffToast(code+' marked paid to the house account. Tap Send to kitchen when it is ready to go.');
+}
+function ffToast(msg){
+  let t=document.getElementById('ffToast');
+  if(!t){ t=document.createElement('div'); t.id='ffToast';
+    t.style.cssText='position:fixed;left:50%;bottom:24px;transform:translateX(-50%);background:#222;color:#fff;padding:10px 16px;border-radius:8px;z-index:9999;max-width:90%;font-size:14px';
+    document.body.appendChild(t); }
+  t.textContent=msg; t.style.display='block'; clearTimeout(t._h); t._h=setTimeout(()=>{t.style.display='none';},5000);
 }
 function etaPill(o){
   if (!o.eta_clock || o.dispatch_status==='delivered' || o.dispatch_status==='cancelled') return '';

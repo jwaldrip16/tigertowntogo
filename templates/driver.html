@@ -93,6 +93,8 @@
 <div id="paneDone" class="hidden"><div id="doneList"></div></div>
 
 <div id="paneSched" class="hidden">
+  <aside class="panel"><h2>My time this week</h2>
+    <div id="myAct" class="muted small">Loading…</div></aside>
   <aside class="panel"><h2>Next week</h2>
     <div id="weekDue" class="duebar"></div>
     <div class="row">
@@ -682,7 +684,16 @@ function renderAvail(av, off){
     (o.status==='pending'?'<button class="btn tiny" onclick="cancelOff('+o.id+')">Cancel</button>':'')+
     '</div>').join('') : 'No time off requested.';
 }
+async function loadMyAct(){
+  const r = await jget('/api/driver/active-time').catch(()=>null);
+  const el = document.getElementById('myAct'); if(!r || !r.ok || !el) return;
+  const p = r.people[0];
+  if(!p){ el.textContent = 'No time yet this week.'; return; }
+  el.innerHTML = 'Online <b>'+p.total+'</b>, break '+p.break_total+(p.scheduled?', scheduled '+p.scheduled:'')+
+    '<br>'+r.days.map((d,i)=>p.days[i].online?d+': '+p.days[i].online:'').filter(Boolean).join(' &middot; ');
+}
 async function refreshSchedule(){
+  loadMyAct();
   const r = await jget('/api/driver/schedule');
   if(r.ok) renderAvail(r.availability, r.time_off);
 }

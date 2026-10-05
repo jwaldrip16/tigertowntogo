@@ -121,8 +121,7 @@ async function setLogo(inp){
   <div class="muted small">Both apply to the food subtotal on new orders and on orders you edit. Orders already placed keep what they were charged.</div>
   <label>Auto assign to drivers (1 on, 0 off)</label>
   <input name="auto_assign" value="{{ s['auto_assign'] }}">
-  <label>Hold new orders until dispatch taps Send to kitchen (1 on, 0 off)</label>
-  <input name="kitchen_hold" value="{{ s['kitchen_hold'] }}">
+  <div class="muted small">Orders never go to the kitchen on their own, even after they are paid. Dispatch taps Send to kitchen on each one.</div>
   <label>Keep the driver app screen awake by default (1 on, 0 off)</label>
   <input name="keep_awake_driver" value="{{ s['keep_awake_driver'] if s['keep_awake_driver'] is defined and s['keep_awake_driver'] != None else '1' }}">
   <label>Keep the restaurant app screen awake by default (1 on, 0 off)</label>

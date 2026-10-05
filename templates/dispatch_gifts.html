@@ -8,11 +8,18 @@
   <label>Buyer email (optional)</label><input id="sEmail"><label>For (optional)</label><input id="sTo">
   <label>Message (optional)</label><input id="sMsg" maxlength="240">
   <label>How they paid</label>
-  <select id="sMethod">{% if allow_cash %}<option value="cash">Cash</option>{% endif %}<option value="card_terminal">Card, ran on our terminal</option>
+  <select id="sMethod">{% if allow_cash %}<option value="cash">Cash</option>{% endif %}{% if pp_on %}<option value="paypal_terminal" selected>Card, type it in here (PayPal)</option>{% endif %}<option value="card_terminal">Card, ran on another terminal</option>
     <option value="house_account">House account</option>{% if pp_on %}<option value="link">Send them a pay link (card or PayPal)</option>{% endif %}
     {% if owner %}<option value="comp">Free (owner)</option>{% endif %}</select>
   <input id="sRef" placeholder="Receipt or reference number (optional)">
   <button class="btn primary" onclick="sell()">Sell gift card</button>
+  <div id="ppTerm" class="panel mt" style="display:none">
+    <b id="ppLine"></b>
+    <p class="small muted">Type the buyer's card below while they're on the phone. It goes straight to PayPal and is never saved here. The card number shows as soon as it's paid.</p>
+    <div id="ppBtn"></div>
+    <div id="ppMsg" class="small"></div>
+    <button class="btn tiny" onclick="cancelTerm()">Start over</button>
+  </div>
   <div id="sOut" class="panel mt" style="display:none"></div>
 </div>
 <div class="panel">
@@ -27,15 +34,34 @@
   <span>{{ g.buyer }}</span><span class="muted">{{ g.status }} · {{ g.pay_method }} · {{ g.sold_by }}</span></div>
 {% else %}<p class="muted">No gift cards yet.</p>{% endfor %}</div>
 {% endblock %}
-{% block scripts %}<script>
+{% block scripts %}{% if pp_on %}<script src="https://www.paypal.com/sdk/js?client-id={{ pp_client }}&currency=USD&intent=capture&enable-funding=card&disable-funding=venmo,paylater&components=buttons"></script>{% endif %}
+<script>
 const OWNER = {{ 'true' if owner else 'false' }};
 function esc(x){ return String(x==null?'':x).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 async function sell(){
   const r = await jpost('/api/dispatch/gift/sell',{amount:sAmt.value,buyer_name:sName.value,buyer_phone:sPhone.value,buyer_email:sEmail.value,to_name:sTo.value,message:sMsg.value,method:sMethod.value,pay_ref:sRef.value});
   if(!r.ok){ alert(r.error); return; }
+  if(r.terminal){ openTerm(r.ref, r.amount); return; }
   sOut.style.display='';
   sOut.innerHTML = r.pending ? ('<b>Pay link</b><p class="small">'+esc(r.message)+'</p><input readonly value="'+esc(r.pay_link)+'" onclick="this.select()">')
     : ('<b>Card number: '+esc(r.card.code)+'</b><p>Balance '+esc(r.card.balance)+'</p><p class="small">Read the number to the buyer. Their receipt page: <a target="_blank" href="'+esc(r.receipt)+'">'+esc(r.receipt)+'</a></p>');
+}
+let TREF = '';
+function tsay(m,bad){ ppMsg.textContent = m; ppMsg.style.color = bad ? '#c0392b' : ''; }
+function cancelTerm(){ TREF=''; ppTerm.style.display='none'; ppBtn.innerHTML=''; tsay(''); }
+function openTerm(ref, amount){
+  if(!window.paypal){ alert('PayPal did not load. Refresh the page and try again.'); return; }
+  TREF = ref; sOut.style.display='none'; ppTerm.style.display=''; ppBtn.innerHTML=''; tsay('');
+  ppLine.textContent = 'Charge '+amount+' for the gift card';
+  const b = paypal.Buttons({fundingSource: paypal.FUNDING.CARD,
+    createOrder: async()=>{ const r = await jpost('/api/gift/pp-create',{ref:TREF}); if(!r.ok){ tsay(r.error,true); throw new Error('x'); } return r.id; },
+    onApprove: async(d)=>{ tsay('Finishing...');
+      const r = await jpost('/api/gift/pp-approve',{ref:TREF,id:d.orderID});
+      if(!r.ok){ tsay(r.error,true); return; }
+      ppTerm.style.display='none'; ppBtn.innerHTML=''; sOut.style.display='';
+      sOut.innerHTML = '<b>Paid. Card number: '+esc(r.card.code)+'</b><p>Balance '+esc(r.card.balance)+'</p><p class="small">Read the number to the buyer. Their receipt page: <a target="_blank" href="/gift/'+esc(TREF)+'">/gift/'+esc(TREF)+'</a></p>'; },
+    onError: ()=>tsay('The card did not go through. Check the numbers or try another card.',true)});
+  if(b.isEligible()) b.render('#ppBtn'); else tsay('Card payments are not turned on for this PayPal account.',true);
 }
 async function look(){
   const r = await jpost('/api/dispatch/gift/lookup',{code:lCode.value});
