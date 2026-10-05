@@ -1,19 +1,55 @@
-{% extends "base.html" %}{% block title %}My rewards{% endblock %}{% block body %}
+{% extends "base.html" %}{% from "_rewards.html" import reward_cards, tier_cards %}
+{% block title %}My rewards{% endblock %}{% block body %}
+<div class="rw" style="max-width:1000px">
 <h1>Hi {{ me.name }}</h1>
-<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(280px,1fr))">
+{% if msg %}<div class="panel" style="border-left:4px solid #16a34a">{{ msg }}</div>{% endif %}
+{% if me.loyalty_on %}
+<div class="rwhero"><div class="rwcoin">&#9733;</div><div><h1>{{ me.points }} points to spend</h1>
+  <p>{{ me.tier }} tier · {{ me.tier_points }} points earned in the past 365 days</p></div><div class="rwcoin">&#9733;</div></div>
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:16px">
 <div class="panel">
-  <h2>Rewards</h2>
-  {% if me.loyalty_on %}
-  <p style="font-size:1.6em;margin:4px 0"><b>{{ me.points }}</b> points</p>
-  <p>{% if me.rewards %}You have <b>{{ me.rewards }}</b> reward{{ '' if me.rewards == 1 else 's' }} ready ({{ me.reward_value }} off each). Use them at checkout.
-  {% else %}{{ me.next_reward_in }} more points until your next {{ me.reward_value }} reward.{% endif %}</p>
-  {% else %}<p class="muted">Rewards are paused right now.</p>{% endif %}
-  <h3>Points history</h3>
-  {% for p in plog %}<div class="small row" style="justify-content:space-between"><span>{{ p['note'] }}</span><span>{{ '+' if p['points'] > 0 else '' }}{{ p['points'] }}</span></div>
-  {% else %}<p class="muted small">No points yet. Order while signed in to start earning.</p>{% endfor %}
+  <h2 style="margin-top:0">Your rewards</h2>
+  {% if me.rewards %}<p>You can use <b>one</b> of these at checkout. Pick it in your cart.</p>
+  {% else %}<p>{{ me.next_reward_in }} more points until your first {{ me.next_reward_value }} reward.</p>{% endif %}
+  {{ reward_cards(me.reward_options, me) }}
+  <h2>Tier status</h2>
+  {% if me.next_tier %}<p>{{ me.next_tier_in }} more points this year to reach <b>{{ me.next_tier }}</b>.</p>
+  <div class="rwbar"><i style="width:{{ me.tier_pct }}%"></i></div>{% else %}<p>You're at the top tier. Nice.</p>{% endif %}
+  {{ tier_cards(rules, me.tier) }}
 </div>
 <div class="panel">
-  <h2>Cards on file</h2>
+  <h2 style="margin-top:0">Ways to earn</h2>
+  <ul>
+    <li>{{ rules.per_dollar }} point for every $1 of food on online orders while signed in</li>
+    {% if rules.bonus_day and me.tier_bonus %}<li><b>{{ me.tier_bonus }}</b> on {{ rules.bonus_day }}s as {{ me.tier }}</li>{% endif %}
+    {% if rules.review_points %}<li>{{ rules.review_points }} points for reviewing a delivered order</li>{% endif %}
+    {% if rules.signup_points %}<li>{{ rules.signup_points }} points for joining (already added)</li>{% endif %}
+  </ul>
+  <p class="small muted">Phone orders don't earn points. Points are added when your order is delivered. <a href="/rewards">How rewards work</a></p>
+  <h2>Points activity</h2>
+  {% for p in plog %}<div class="small row" style="justify-content:space-between"><span>{{ p['note'] }} <span class="muted">{{ (p['created_at'] or '')[:10] }}</span></span><b style="color:{{ '#15803d' if p['points'] > 0 else '#b42318' }}">{{ '+' if p['points'] > 0 else '' }}{{ p['points'] }}</b></div>
+  {% else %}<p class="muted small">No points yet. Order while signed in to start earning.</p>{% endfor %}
+</div>
+</div>
+{% else %}<p class="panel muted">Rewards are paused right now. Points you already have are kept.</p>{% endif %}
+<div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(300px,1fr));margin-top:16px">
+<div class="panel" id="orders">
+  <h2 style="margin-top:0">Recent orders</h2>
+  {% for o in orders %}<div style="border-bottom:1px solid #eee;padding:8px 0">
+    <div class="small row" style="justify-content:space-between"><a href="/track/{{ o['code'] }}">{{ o['code'] }}</a>
+    <span>{{ o['rname'] or '' }}</span><span>{{ money(o['total_cents']) }}</span><span class="muted">{{ o['dispatch_status'] }}</span>
+    {% if o['pts'] %}<span class="pill green">+{{ o['pts'] }}</span>{% endif %}</div>
+    {% if o['dispatch_status'] == 'delivered' %}{% if o['stars'] %}<div class="small muted">You rated it {{ '★' * o['stars'] }}</div>{% else %}
+    <details class="small"><summary>Leave a review{% if rules.review_points and (o['placed_by'] or 'customer') == 'customer' and me.loyalty_on %} (+{{ rules.review_points }} points){% endif %}</summary>
+      <form method="post" action="/account/review"><input type="hidden" name="order_id" value="{{ o['id'] }}">
+        <div class="stars">{% for n in [5,4,3,2,1] %}<input type="radio" id="s{{ o['id'] }}_{{ n }}" name="stars" value="{{ n }}" required><label for="s{{ o['id'] }}_{{ n }}">&#9733;</label>{% endfor %}</div>
+        <textarea name="comment" maxlength="1000" placeholder="How was it? (optional)"></textarea>
+        <button class="btn small primary">Send review</button></form></details>{% endif %}{% endif %}
+  </div>{% else %}<p class="muted small">No orders yet.</p>{% endfor %}
+  <p><a class="btn primary" href="/">Order food</a> <a class="btn" href="/gift-cards">Gift cards</a></p>
+</div>
+<div class="panel">
+  <h2 style="margin-top:0">Cards on file</h2>
   <div id="cards">{% for c in me.cards %}<div class="row" style="justify-content:space-between"><span>{{ c.label }}{% if c.expiry %} <span class="muted small">exp {{ c.expiry }}</span>{% endif %}</span>
     <button class="btn tiny" onclick="delCard({{ c.id }})">Remove</button></div>
   {% else %}<p class="muted small">No cards saved. Tick "Save this card" at checkout and it will show here.</p>{% endfor %}</div>
@@ -26,12 +62,6 @@
   <button class="btn" onclick="saveMe()">Save</button> <span id="aMsg" class="small"></span>
   <p class="small"><a href="/account/logout">Sign out</a></p>
 </div>
-<div class="panel">
-  <h2>Recent orders</h2>
-  {% for o in orders %}<div class="small row" style="justify-content:space-between"><a href="/track/{{ o['code'] }}">{{ o['code'] }}</a>
-    <span>{{ o['rname'] or '' }}</span><span>{{ money(o['total_cents']) }}</span><span class="muted">{{ o['dispatch_status'] }}</span></div>
-  {% else %}<p class="muted small">No orders yet.</p>{% endfor %}
-  <p><a class="btn primary" href="/">Order food</a> <a class="btn" href="/gift-cards">Gift cards</a></p>
 </div>
 </div>
 {% endblock %}

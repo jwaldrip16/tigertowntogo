@@ -1,0 +1,15 @@
+{% macro reward_cards(opts, me=None, pick=False) %}
+<div class="rwopts">{% for o in opts %}{% set ok = (not me) or me.points >= o.points %}
+  {% if pick %}<button type="button" class="rwopt t{{ loop.index0 % 4 }} {{ '' if ok else 'off' }}" data-pts="{{ o.points }}" {{ '' if ok else 'disabled' }} onclick="pickReward(this)">{% else %}<div class="rwopt t{{ loop.index0 % 4 }} {{ '' if ok else 'off' }}">{% endif %}
+  <span class="l"><b>{{ o.points }}</b><small>POINTS</small></span><span class="r">{{ o.value }}</span>
+  {% if pick %}</button>{% else %}</div>{% endif %}{% endfor %}</div>
+{% endmacro %}
+{% macro tier_cards(rules, mine='') %}
+<div class="rwtiers">{% for t in rules.tiers %}
+  <div class="rwtier t{{ loop.index0 }} {{ 'mine' if mine == t.name else '' }}"><div class="badge">&#9733;</div><h3>{{ t.name|upper }}</h3>
+  <span>{{ 'Starting tier' if t.min == 0 else (t.min ~ '+ points') }}</span>{% if mine == t.name %}<small><b>You are here</b></small>{% endif %}</div>{% endfor %}</div>
+{% endmacro %}
+{% macro bonus_boxes(rules) %}{% if rules.bonus_day %}
+<div class="rwbonus">{% for t in rules.tiers %}{% if t.bonus_pct %}
+  <div class="rwbox t{{ loop.index0 }}"><h4>{{ t.name|upper }}</h4><ul><li>{{ t.bonus }} on {{ rules.bonus_day_short }}</li></ul></div>{% endif %}{% endfor %}</div>
+{% endif %}{% endmacro %}

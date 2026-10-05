@@ -1,0 +1,38 @@
+{% extends "base.html" %}{% from "_rewards.html" import reward_cards, tier_cards, bonus_boxes %}
+{% block title %}Online rewards{% endblock %}{% block body %}
+<div class="rw">
+<div class="rwhero"><div class="rwcoin">&#9733;</div><div><h1>Get Rewarded For Your Online Orders</h1>
+  <p>Earn {{ rules.per_dollar }} point for every $1 · {{ rules.tiers|length }} tier levels · Redeem at checkout</p></div><div class="rwcoin">&#9733;</div></div>
+{% if not rules.on %}<p class="panel">Rewards are paused right now. Points you already have are kept.</p>{% endif %}
+<h2>Getting started is easy</h2>
+<p>Create an ordering account from our online menu and sign in to place your orders to earn points, redeem rewards, and achieve higher tier status.</p>
+<h2>Earn Points</h2>
+<p>Earn {{ rules.per_dollar }} point for every $1 you spend on your online order and earn more points with bonuses.</p>
+<div class="rwpills"><span class="rwpill">{{ rules.per_dollar }} point on subtotal</span>
+  {% if rules.review_points %}<span class="rwpill">{{ rules.review_points }} points on review</span>{% endif %}
+  {% if rules.signup_points %}<span class="rwpill">{{ rules.signup_points }} points on signup</span>{% endif %}</div>
+<h2>Rewards</h2>
+<p>Rewards that you are eligible for will show up within your cart at checkout. Easily redeem by selecting one of your rewards to apply towards your order.</p>
+{{ reward_cards(rules.options) }}
+<h2>Tier Status</h2>
+<p>Your tier status is determined by points earned within the past 365 days. You'll earn {{ rules.per_dollar }} tier point for every $1 you spend. Earn more tier points with bonuses.</p>
+{{ tier_cards(rules, me.tier if me else '') }}
+{% if rules.bonus_day %}<h2>Bonus Points</h2>{{ bonus_boxes(rules) }}{% endif %}
+<div class="rwdash"><h2 style="margin-top:0;background:#fff;padding:8px">Your Dashboard</h2>
+  {% if me %}<p>You have <b>{{ me.points }}</b> points to spend and you're <b>{{ me.tier }}</b> ({{ me.tier_points }} points this year).</p>{% else %}
+  <p>From our ordering menu, click on the account icon to access your dashboard to view lifetime loyalty activity, points to spend, tier status, ways to earn, your benefits, and more.</p>{% endif %}
+  <a class="btn primary" href="{{ '/account' if me else '/account/login?next=/account' }}">View my dashboard</a></div>
+<h2 style="margin-top:34px;font-size:1.4em">FAQs</h2>
+<div class="rwfaq">
+<details open><summary>How do I sign up for loyalty?</summary><p>Signing up for loyalty is easy! Create an ordering account from our website ordering menu by clicking on the "account" link. You can also create an account by clicking the button below.</p>
+  <p><a class="btn small" href="/account/login?mode=signup&next=/account">Create account</a></p></details>
+<details open><summary>Can I earn points if I order through the phone?</summary><p>No, our loyalty program is only eligible for orders placed through our online ordering menu on our website.</p></details>
+<details open><summary>I forgot to login when I placed my order. Can I still earn points?</summary><p>To earn points for your order, you must login to your online ordering account. If you do not login to your order account, points for your order cannot be added to your account.</p></details>
+<details open><summary>How do I redeem my points for rewards?</summary><p>You will be able to redeem your points for rewards at checkout. All eligible rewards will be present within your cart. Click to select one of your eligible rewards to apply to your order. Once your order is placed, the points needed for your redeemed reward will be deducted.</p></details>
+<details open><summary>When do I get my points?</summary><p>Points are added once your order is delivered.</p></details>
+<details open><summary>What if I cancel my order?</summary><p>If you cancel an order, any points earned for that order will be deducted. If you applied a reward, the points deducted will be reverted back to your point bank.</p></details>
+<details open><summary>Can I apply a gift card and redeem a reward on a single order?</summary><p>Yes, you are able to use a gift card and redeem a reward on a single order.</p></details>
+<details open><summary>I have multiple rewards available, can I redeem more than one?</summary><p>No. You will only be able to apply one reward per order.</p></details>
+</div>
+</div>
+{% endblock %}

@@ -1,5 +1,6 @@
 {% extends "base.html" %}{% block body %}
 <div class="head"><h1>Restaurant settings</h1><div><a class="btn small" href="/dispatch/regions">Regions</a>
+  {% if is_owner_view %}<a class="btn small" href="/dispatch/import-tigertown">Import from TigerTownToGo</a>{% endif %}
   <a class="btn small" href="/dispatch">Back to board</a></div></div>
 {% if saved %}<p class="good">Hours saved.</p>{% endif %}
 {% if request.args.get('deleted') %}<p class="good">Restaurant removed.</p>{% endif %}
@@ -78,7 +79,7 @@
     <input type="number" name="prep_default" value="{{ d.r['prep_default'] }}" min="1" max="120"></div>
   <div class="row"><label>Phone</label><input name="phone" value="{{ d.r['phone'] }}"></div>
   <div class="photoedit"><label>Photo for the customer website</label>
-    {% if d.r['image'] %}<img class="edimg" src="/media/{{ d.r['image'] }}" alt="">{% else %}<div class="noimg">No photo yet</div>{% endif %}
+    {% if d.r['image'] %}<img class="edimg" src="{{ d.r['image'] if d.r['image'].startswith('http') else '/media/' ~ d.r['image'] }}" alt="">{% else %}<div class="noimg">No photo yet</div>{% endif %}
     <label class="btn small">{{ 'Replace photo' if d.r['image'] else 'Upload photo' }}
       <input type="file" accept="image/*" hidden onchange="restPhoto({{ d.r['id'] }}, this)"></label>
     {% if d.r['image'] %}<button type="button" class="btn small" onclick="restPhoto({{ d.r['id'] }}, null)">Remove photo</button>{% endif %}

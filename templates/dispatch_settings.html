@@ -12,6 +12,15 @@
   <span class="small muted" id="logoMsg"></span>
 </div>
 <script>
+async function setSiteImg(which, inp){
+  const fd = new FormData(); fd.append('which', which);
+  if (inp){ if (!inp.files.length) return; fd.append('photo', inp.files[0]); }
+  else { if (!confirm('Go back to the original photo?')) return; fd.append('op','reset'); }
+  document.getElementById('siteImgMsg').textContent = 'Saving...';
+  const res = await (await fetch('/api/dispatch/site-image', {method:'POST', body:fd})).json().catch(()=>({ok:false}));
+  if (!res.ok){ document.getElementById('siteImgMsg').textContent = res.error || 'Not saved.'; return; }
+  location.reload();
+}
 async function setLogo(inp){
   const fd = new FormData();
   if (inp){ if (!inp.files.length) return; fd.append('photo', inp.files[0]); }
@@ -36,8 +45,26 @@ async function setLogo(inp){
   <input type="hidden" name="loyalty_present" value="1">
   <label><input type="checkbox" name="loyalty_on" value="1" {{ 'checked' if s.get('loyalty_on','1') == '1' else '' }}> Rewards program on</label>
   <div class="row"><label>Points per $1 of food <input name="points_per_dollar" type="number" min="0" max="20" value="{{ s.get('points_per_dollar','1') }}" style="max-width:90px"></label>
-    <label>Points per reward <input name="reward_points" type="number" min="10" max="10000" value="{{ s.get('reward_points','100') }}" style="max-width:100px"></label>
-    <label>Reward value ($) <input name="reward_value" type="number" min="0.5" max="100" step="0.5" value="{{ '%.2f' % ((s.get('reward_value_cents','500')|int)/100) }}" style="max-width:100px"></label></div>
+    <label>Points for signing up <input name="signup_points" type="number" min="0" max="10000" value="{{ s.get('signup_points','50') }}" style="max-width:100px"></label>
+    <label>Points for a review <input name="review_points" type="number" min="0" max="10000" value="{{ s.get('review_points','25') }}" style="max-width:100px"></label></div>
+  <div class="muted small">Only online orders placed while signed in earn points. Phone and dispatch orders don't.</div>
+  <label>Rewards customers can pick at checkout (one per order)</label>
+  {% set ro = (s.get('reward_options') or '150:300,250:500,400:1000').split(',') %}
+  {% for i in range(1, 5) %}{% set parts = (ro[i-1] if ro|length >= i else '').split(':') %}
+  <div class="row"><label>Reward {{ i }}: points <input name="ro_points_{{ i }}" type="number" min="1" value="{{ parts[0] if parts|length == 2 else '' }}" style="max-width:100px"></label>
+    <label>$ off <input name="ro_value_{{ i }}" type="number" min="1" step="0.5" value="{{ '%g' % ((parts[1]|int)/100) if parts|length == 2 else '' }}" style="max-width:100px"></label></div>
+  {% endfor %}
+  <div class="muted small">Leave both boxes empty to remove a reward.</div>
+  <label>Tier status (points earned in the past 365 days)</label>
+  <div class="row"><label>VIP at <input name="tier_vip_points" type="number" min="1" value="{{ s.get('tier_vip_points','750') }}" style="max-width:100px"> points</label>
+    <label>Elite at <input name="tier_elite_points" type="number" min="2" value="{{ s.get('tier_elite_points','1500') }}" style="max-width:100px"> points</label></div>
+  <div class="row"><label>Bonus day <select name="bonus_weekday" style="max-width:150px">
+    {% for d in ['Monday','Tuesday','Wednesday','Thursday','Friday','Saturday','Sunday'] %}<option value="{{ loop.index0 }}" {{ 'selected' if s.get('bonus_weekday','1') == loop.index0|string else '' }}>{{ d }}</option>{% endfor %}
+    <option value="-1" {{ 'selected' if s.get('bonus_weekday','1') == '-1' else '' }}>No bonus day</option></select></label>
+    <label>Starter extra % <input name="bonus_starter_pct" type="number" min="0" max="1000" value="{{ s.get('bonus_starter_pct','50') }}" style="max-width:80px"></label>
+    <label>VIP extra % <input name="bonus_vip_pct" type="number" min="0" max="1000" value="{{ s.get('bonus_vip_pct','100') }}" style="max-width:80px"></label>
+    <label>Elite extra % <input name="bonus_elite_pct" type="number" min="0" max="1000" value="{{ s.get('bonus_elite_pct','200') }}" style="max-width:80px"></label></div>
+  <div class="muted small">50 = 50% more points, 100 = double points, 200 = triple points. <a href="/rewards" target="_blank">See the rewards page</a> · <a href="/dispatch/reviews">Customer reviews</a></div>
   <div class="row"><label>Gift card minimum ($) <input name="gift_min" type="number" min="1" max="500" value="{{ (s.get('gift_min_cents','1000')|int)//100 }}" style="max-width:90px"></label>
     <label>Gift card maximum ($) <input name="gift_max" type="number" min="5" max="2000" value="{{ (s.get('gift_max_cents','50000')|int)//100 }}" style="max-width:100px"></label></div>
   <label><input type="checkbox" name="confirm_call" value="1" {{ 'checked' if s.get('confirm_call','1') == '1' else '' }}> New customers' website orders: ask them to call dispatch to confirm before the order goes to the kitchen</label>
@@ -49,6 +76,30 @@ async function setLogo(inp){
   <div class="row"><label>X link <input name="social_x" value="{{ s.get('social_x','') }}"></label>
     <label>Facebook link <input name="social_facebook" value="{{ s.get('social_facebook','') }}"></label>
     <label>Instagram link <input name="social_instagram" value="{{ s.get('social_instagram','') }}"></label></div>
+  <h3 style="margin:14px 0 4px">Home page</h3>
+  <div class="muted small">Change any wording on the home page. Leave a box as it is, or clear it, to keep the standard wording. You can type {business} for your business name.</div>
+  <label>Announcement banner (shows across the top of the home page, leave blank for none)</label><input name="site_announce" maxlength="300" value="{{ site.site_announce }}" placeholder="Closed Thanksgiving Day. Happy holidays!">
+  <label>Line under the headline (optional)</label><input name="home_sub" maxlength="300" value="{{ site.home_sub }}">
+  <label>"How it works" title</label><input name="how_title" maxlength="60" value="{{ site.how_title }}">
+  {% for n in (1,2,3) %}
+  <label>Step {{ n }} title</label><input name="how{{ n }}_t" maxlength="60" value="{{ site['how%d_t' % n] }}">
+  <label>Step {{ n }} text</label><textarea name="how{{ n }}_p" rows="2" maxlength="300">{{ site['how%d_p' % n] }}</textarea>
+  {% endfor %}
+  <label>Restaurants section title</label><input name="rest_title" maxlength="60" value="{{ site.rest_title }}">
+  <label>Message when you're closed</label><textarea name="closed_msg" rows="2" maxlength="300">{{ site.closed_msg }}</textarea>
+  <label>"Restaurant not listed?" card text</label><textarea name="any_text" rows="2" maxlength="300">{{ site.any_text }}</textarea>
+  <label>Phone section title</label><input name="pocket_title" maxlength="80" value="{{ site.pocket_title }}">
+  <label>Phone section text</label><textarea name="pocket_text" rows="2" maxlength="400">{{ site.pocket_text }}</textarea>
+  <label>Home page photos</label>
+  <div class="row" style="gap:16px;align-items:flex-start">
+    <div><div class="small">Big top photo</div><img src="{{ site.hero_image }}" alt="" style="width:180px;height:100px;object-fit:cover;border-radius:8px;display:block;margin:4px 0">
+      <label class="btn tiny">Change<input type="file" accept="image/*" hidden onchange="setSiteImg('hero_image',this)"></label>
+      <button type="button" class="btn tiny" onclick="setSiteImg('hero_image',null)">Use original</button></div>
+    <div><div class="small">Phone photo</div><img src="{{ site.pocket_image }}" alt="" style="width:100px;height:100px;object-fit:cover;border-radius:8px;display:block;margin:4px 0">
+      <label class="btn tiny">Change<input type="file" accept="image/*" hidden onchange="setSiteImg('pocket_image',this)"></label>
+      <button type="button" class="btn tiny" onclick="setSiteImg('pocket_image',null)">Use original</button></div>
+  </div>
+  <div class="small muted" id="siteImgMsg">Photos save as soon as you pick them. A wide photo at least 1600 pixels across looks best up top.</div>
   <label>FAQ's</label>
   <textarea name="faq_text" rows="12" placeholder="Leave blank to use the standard FAQ's">{{ s.get('faq_text','') }}</textarea>
   <div class="muted small">Start each question with Q: and each answer with A:. You can type {business}, {phone}, {email} or {address} and the site fills them in. Leave it blank to use the standard FAQ's.</div>
@@ -122,6 +173,10 @@ async function setLogo(inp){
   <label>Auto assign to drivers (1 on, 0 off)</label>
   <input name="auto_assign" value="{{ s['auto_assign'] }}">
   <div class="muted small">Orders never go to the kitchen on their own, even after they are paid. Dispatch taps Send to kitchen on each one.</div>
+  <label>Assign a driver as soon as the order is sent to the kitchen (1 on, 0 off)</label>
+  <input name="assign_on_pending" value="{{ s['assign_on_pending'] if s['assign_on_pending'] is defined and s['assign_on_pending'] != None else '0' }}">
+  <div class="muted small">On: auto dispatch hands the order to a driver the moment you tap Send to kitchen, so they head over while the food cooks.
+    Off: the driver is assigned once the kitchen accepts and sets a prep time (or you mark a called-in order Ordering in process).</div>
   <label>Keep the driver app screen awake by default (1 on, 0 off)</label>
   <input name="keep_awake_driver" value="{{ s['keep_awake_driver'] if s['keep_awake_driver'] is defined and s['keep_awake_driver'] != None else '1' }}">
   <label>Keep the restaurant app screen awake by default (1 on, 0 off)</label>

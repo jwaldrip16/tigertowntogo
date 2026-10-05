@@ -43,7 +43,7 @@ function money(c){ return '$' + (c/100).toFixed(2); }
       <a href="/account">Accounts</a>
       <a href="/drive">Drive</a>
       <a href="/partner">Partner</a>
-      <a href="{{ '/account' if session.get('customer_id') else '/account/login?mode=signup' }}">Online rewards</a>
+      <a href="{{ '/account' if session.get('customer_id') else '/rewards' }}">Online rewards</a>
       <a href="/gift-cards">Gift cards</a>
       <a href="/faq">FAQ's</a>
     {% endif %}

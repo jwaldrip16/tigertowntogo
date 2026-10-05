@@ -1,6 +1,9 @@
 {% extends "base.html" %}{% block body %}
-<section class="hero fullbleed" style="background-image:linear-gradient(rgba(0,0,0,.38),rgba(0,0,0,.38)),url('/static/home-hero.jpg')">
+{% set S = site if site is defined and site else {} %}
+{% if S.site_announce %}<div class="siteannounce" style="background:#b44a22;color:#fff;text-align:center;padding:10px 14px;font-weight:600">{{ S.site_announce }}</div>{% endif %}
+<section class="hero fullbleed" style="background-image:linear-gradient(rgba(0,0,0,.38),rgba(0,0,0,.38)),url('{{ S.hero_image or '/static/home-hero.jpg' }}')">
   <h1>{{ home_headline or 'Delivering the area\'s finest restaurants to your door!' }}</h1>
+  {% if S.home_sub %}<p class="herosub" style="color:#fff;font-size:1.1em;margin:-4px 0 10px;text-align:center">{{ S.home_sub }}</p>{% endif %}
   <div class="heromode"><span class="on">Delivery</span></div>
   <form class="herosearch" onsubmit="homeSearch();return false">
     <input id="homeAddr" placeholder="Enter your delivery address" autocomplete="street-address">
@@ -12,14 +15,14 @@
 </section>
 
 <section class="how">
-  <h2>How it works</h2>
+  <h2>{{ S.how_title or 'How it works' }}</h2>
   <div class="howgrid">
     <div><div class="howicon"><svg viewBox="0 0 24 24" width="30" height="30" fill="#fff"><path d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg></div>
-      <h3>Tell us where you are</h3><p>Type your delivery address above and we show you who delivers to you and what the delivery fee is.</p></div>
+      <h3>{{ S.how1_t or 'Tell us where you are' }}</h3><p>{{ S.how1_p or 'Type your delivery address above and we show you who delivers to you and what the delivery fee is.' }}</p></div>
     <div><div class="howicon"><svg viewBox="0 0 24 24" width="30" height="30" fill="#fff"><path d="M7 2v9a2 2 0 0 1-1.5 1.94V22h-1v-9.06A2 2 0 0 1 3 11V2h1v6h1V2h1v6h1V2zm9 0c2 0 3.5 2.5 3.5 6 0 2.4-1 4-2.5 4.6V22h-1V2z"/></svg></div>
-      <h3>Fill your basket</h3><p>Pick a restaurant below and tell us what you'd like. Order now or schedule it for later.</p></div>
+      <h3>{{ S.how2_t or 'Fill your basket' }}</h3><p>{{ S.how2_p or 'Pick a restaurant below and tell us what you\'d like. Order now or schedule it for later.' }}</p></div>
     <div><div class="howicon"><svg viewBox="0 0 24 24" width="30" height="30" fill="#fff"><path d="M7 18a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm10 0a2 2 0 1 0 0 4 2 2 0 0 0 0-4zM5.2 4H2V2h4.6l.9 2H21l-3.4 8H8.1l-.9 2H19v2H4l2.2-4.4z"/></svg></div>
-      <h3>Sit back and relax</h3><p>Check out, and you'll usually have your food in 30 to 60 minutes. Track your driver the whole way.</p></div>
+      <h3>{{ S.how3_t or 'Sit back and relax' }}</h3><p>{{ S.how3_p or 'Check out, and you\'ll usually have your food in 30 to 60 minutes. Track your driver the whole way.' }}</p></div>
   </div>
 </section>
 
@@ -29,8 +32,8 @@
     <button class="btn" onclick="goTrack()">Track it</button></div>
   <div id="recent"></div>
 </div>
-<h2 class="secttitle">Restaurants</h2>
-{% if not biz_open %}<div class="panel" style="border-left:4px solid #b44a22"><b>We are closed right now.</b> You can still place a future order: pick a restaurant and choose Schedule for later.</div>{% endif %}
+<h2 class="secttitle">{{ S.rest_title or 'Restaurants' }}</h2>
+{% if not biz_open %}<div class="panel" style="border-left:4px solid #b44a22">{% if S.closed_msg %}{{ S.closed_msg }}{% else %}<b>We are closed right now.</b> You can still place a future order: pick a restaurant and choose Schedule for later.{% endif %}</div>{% endif %}
 {% if hours_text %}<p class="muted small" style="text-align:center">Delivery hours{% if sel_region_name %} in {{ sel_region_name }}{% endif %}: {{ hours_text }}{% if biz_phone %} &middot; Call <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>{% endif %}</p>{% endif %}
 {% if closed_text %}<p class="muted small" style="text-align:center">{{ closed_text }}</p>{% endif %}
 {% if regions|length > 1 %}
@@ -47,7 +50,8 @@
 <div class="grid" id="restGrid">
   {% for c in cards %}
   <a class="card {{ 'closed' if not c.open else '' }}" data-slug="{{ c.r['slug'] }}" href="/r/{{ c.r['slug'] }}">
-    {% if c.r['image'] %}<img class="cardimg" src="/media/{{ c.r['image'] }}" alt="" loading="lazy">{% endif %}
+    {% if c.r['image'] %}<img class="cardimg" src="{{ c.r['image'] if c.r['image'].startswith('http') else '/media/' ~ c.r['image'] }}" alt="" loading="lazy">{% endif %}
+    {% if c.r['logo'] %}<img class="cardlogo" src="{{ c.r['logo'] }}" alt="" loading="lazy">{% endif %}
     <h3>{{ c.r['name'] }}</h3>
     <p class="muted">{{ c.r['address'] }}</p>
     <p class="muted">{{ c.hours }}</p>
@@ -59,8 +63,7 @@
   {% if any_on %}
   <a class="card anycard {{ '' if any_open else 'closed' }}" href="/r/oneoff">
     <h3>Restaurant not listed?</h3>
-    <p class="muted">Order from any restaurant in the area. Tell us the place, the items, and the prices,
-      and your driver picks it up.</p>
+    <p class="muted">{{ S.any_text or 'Order from any restaurant in the area. Tell us the place, the items, and the prices, and your driver picks it up.' }}</p>
     {% if any_rest_label() %}<p class="muted">Available {{ any_rest_label() }}</p>{% endif %}
     <span class="pill {{ 'green' if any_open else 'grey' }}">{{ 'Order from anywhere' if any_open else 'Closed' }}</span>
   </a>
@@ -69,12 +72,12 @@
 </section>
 
 <section class="pocket">
-  <div class="phone"><div class="phonescreen" style="background-image:url('/static/home-burger.jpg')"><img src="{{ logo_url }}" alt=""></div></div>
+  <div class="phone"><div class="phonescreen" style="background-image:url('{{ S.pocket_image or '/static/home-burger.jpg' }}')"><img src="{{ logo_url }}" alt=""></div></div>
   <div class="pockettext">
-    <h2>From your pocket to your front porch</h2>
-    <p>Order from your phone in a few taps. Add {{ biz_name }} to your home screen and it opens like an app.</p>
+    <h2>{{ S.pocket_title or 'From your pocket to your front porch' }}</h2>
+    <p>{% if S.pocket_text %}{{ S.pocket_text }}{% else %}Order from your phone in a few taps. Add {{ biz_name }} to your home screen and it opens like an app.{% endif %}</p>
     <p class="small"><b>iPhone:</b> tap Share, then Add to Home Screen.<br><b>Android:</b> tap the &#8942; menu, then Add to Home screen.</p>
-    <p><a class="btn primary" href="/account/login?mode=signup">Join online rewards</a> <a class="btn" href="/gift-cards">Gift cards</a></p>
+    <p><a class="btn primary" href="/rewards">Online rewards</a> <a class="btn" href="/gift-cards">Gift cards</a></p>
   </div>
 </section>
 {% endblock %}

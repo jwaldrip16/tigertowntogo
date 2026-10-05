@@ -1,6 +1,7 @@
 {% extends "base.html" %}{% block body %}
 <a class="back" href="/dispatch">Back to board</a>
 <h1>{% if src %}New order from {{ src['code'] }}{% else %}Create an order{% endif %}</h1>
+{% for m in get_flashed_messages() %}<div class="panel" style="border-left:4px solid #b42318;color:#b42318">{{ m }}</div>{% endfor %}
 {% if src %}
 <div class="issuebar">Everything below is copied from {{ src['code'] }}. Change anything you need,
   say what went wrong, then send it to the pending queue.</div>
@@ -315,7 +316,7 @@ async function placeOrder(){
     house_account: document.getElementById('houseName').value,
     gift_code: document.getElementById('giftCode').value.trim(),
     save_customer: document.getElementById('saveCust').checked,
-    redeem_rewards: parseInt((document.getElementById('useRewards')||{}).value||'0',10) || 0,
+    redeem_reward: parseInt((document.getElementById('useReward')||{}).value||'0',10) || 0,
     source: 'call_in'}));
   if(!res.ok){ alert(res.error); return; }
   if(res.credit && res.credit.message) alert(res.code + ': ' + res.credit.message + (res.credit.paid ? ' Nothing left to pay.' : ''));
@@ -412,13 +413,13 @@ async function rewardsLookup(){
   const r = await jget('/api/dispatch/customer-lookup?phone='+encodeURIComponent(ph));
   if(!r.ok || !r.found){ box.textContent = 'Not on the customer list yet.'; return; }
   const c = r.customer;
-  let h = (c.existing ? '<span class="pill green">Existing customer</span> ' : '') + '<b>'+c.name+'</b>'+(c.loyalty_on ? ', '+c.points+' points. This order earns points.' : '');
+  let h = (c.existing ? '<span class="pill green">Existing customer</span> ' : '') + '<b>'+c.name+'</b>'+(c.loyalty_on ? ', '+c.points+' points ('+c.tier+'). Phone orders don\'t earn points.' : '');
   if(c.address && !document.getElementById('address').value) document.getElementById('address').value = c.address;
   if(c.loyalty_on && c.rewards > 0){
-    h += ' <select id="useRewards" style="max-width:200px"><option value="0">Don\'t use rewards</option>';
-    for(let i=1;i<=c.rewards;i++) h += '<option value="'+i+'">Use '+i+' ('+c.reward_value+' each)</option>';
-    h += '</select>';
+    h += ' <select id="useReward" style="max-width:240px"><option value="0">Don\'t use a reward</option>' +
+      c.reward_options.filter(o=>o.ok).map(o=>'<option value="'+o.points+'">Use '+o.points+' points for '+o.value+' off</option>').join('') + '</select>';
   }
+
   box.innerHTML = h;
   if(!document.getElementById('name').value) document.getElementById('name').value = c.name;
 }

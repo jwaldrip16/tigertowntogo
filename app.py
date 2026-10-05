@@ -2,7 +2,7 @@
 import urllib.error
 import base64, difflib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
 import dbx
-from flask import Flask, g, request, session, redirect, url_for, render_template, jsonify, send_from_directory
+from flask import Flask, g, request, session, redirect, url_for, render_template, jsonify, send_from_directory, flash, get_flashed_messages
 import presets
 
 # ---------------------------------------------------------------- local time
@@ -198,6 +198,22 @@ def close_db(exc):
     if d is not None:
         d.close()
 
+REORDER_WINDOW_MIN = 15
+
+def reorder_closed(o):
+    """New orders can be made from a delivered order only until 15 minutes after it was delivered."""
+    try:
+        if o["dispatch_status"] != "delivered" or not o["delivered_at"]:
+            return False
+        at = dt.datetime.fromisoformat(str(o["delivered_at"]).replace(" ", "T")[:19])
+        return dt.datetime.now() - at > dt.timedelta(minutes=REORDER_WINDOW_MIN)
+    except Exception:
+        return False
+
+def reorder_closed_msg(o):
+    return ("It's been more than %d minutes since %s was delivered, so you can't make a new order from it. "
+            "Create a new order instead." % (REORDER_WINDOW_MIN, o["code"]))
+
 def now():
     return dt.datetime.now().isoformat(timespec="seconds")
 
@@ -234,13 +250,15 @@ def init_db():
                  ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
                  ("loyalty_on", "1"), ("points_per_dollar", "1"), ("reward_points", "100"),
                  ("reward_value_cents", "500"), ("confirm_call", "1"),
+                 ("signup_points", "50"), ("review_points", "25"), ("reward_options", "150:300,250:500,400:1000"),
+                 ("tier_vip_points", "750"), ("tier_elite_points", "1500"), ("bonus_weekday", "1"),
+                 ("bonus_starter_pct", "50"), ("bonus_vip_pct", "100"), ("bonus_elite_pct", "200"),
                  ("gift_min_cents", "1000"), ("gift_max_cents", "50000"),
                  ("business_name", "Fleet Delivery"),
                  ("business_address", "216 S 8th St, Opelika, AL 36801"),
                  ("order_tokens", "Online,App,Phone call,Third party"),
                  ]:
         con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
-    con.execute("UPDATE settings SET value='0' WHERE key='assign_on_pending'")
     # Business now starts Closed. Existing databases are closed once, then dispatch opens it.
     con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('order_keep_days','0')")
     con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES('allow_cash','0')")
@@ -339,6 +357,10 @@ def init_db():
     ensure_column(con, "menu_items", "avail_start", "TEXT")
     ensure_column(con, "menu_items", "avail_end", "TEXT")
     ensure_column(con, "restaurants", "image", "TEXT")
+    ensure_column(con, "restaurants", "logo", "TEXT")
+    ensure_column(con, "restaurants", "zup_id", "TEXT")
+    ensure_column(con, "restaurants", "eta_min", "INTEGER")
+    ensure_column(con, "menu_items", "zup_id", "TEXT")
     ensure_column(con, "option_groups", "max_each", "INTEGER NOT NULL DEFAULT 1")
     ensure_column(con, "orders", "payment_status", "TEXT NOT NULL DEFAULT 'unpaid'")
     ensure_column(con, "orders", "pay_method", "TEXT")
@@ -397,6 +419,10 @@ def init_db():
                    ("multi_with", "TEXT"), ("cust_comments", "INTEGER NOT NULL DEFAULT 0"),
                    ("credit_cents", "INTEGER NOT NULL DEFAULT 0")):
         ensure_column(con, "orders", _c, _t)
+    ensure_column(con, "orders", "points_reversed", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(con, "points_log", "kind", "TEXT")
+    con.execute("""CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER UNIQUE,
+        customer_id INTEGER, restaurant_id INTEGER, stars INTEGER NOT NULL, comment TEXT, created_at TEXT)""")
     con.execute("CREATE TABLE IF NOT EXISTS revgeo (k TEXT PRIMARY KEY, address TEXT, created_at TEXT)")
     con.execute("""CREATE TABLE IF NOT EXISTS regions (id INTEGER PRIMARY KEY AUTOINCREMENT,
                    name TEXT UNIQUE NOT NULL, sort INTEGER DEFAULT 0, created_at TEXT)""")
@@ -410,6 +436,7 @@ def init_db():
     ensure_column(con, "regions", "paused_at", "TEXT")
     ensure_column(con, "regions", "hours", "TEXT")          # blank = use the business hours
     ensure_column(con, "regions", "closed_dates", "TEXT")   # "2026-11-26,2026-12-25"
+    ensure_column(con, "regions", "closed_hours", "TEXT")   # {"2026-11-26": ["15:00","23:59"]} closed only that window
     ensure_column(con, "regions", "phone", "TEXT")          # blank = the business dispatch number
     ensure_column(con, "regions", "min_order_cents", "INTEGER")   # blank = no minimum
     ensure_column(con, "regions", "max_miles", "REAL")            # blank = no radius limit
@@ -1484,7 +1511,10 @@ def recompute_queue():
             status, reason = "held", "address needs dispatch approval"
         elif o["region_id"] and o["region_id"] in paused:
             status, reason = "held", rnames.get(o["region_id"], "this region") + " is paused by dispatch"
-        elif o["kitchen_status"] not in stages:
+        elif o["kitchen_status"] not in stages and not (
+                o["kitchen_status"] == "pending"
+                and ("manual_state" in o.keys() and o["manual_state"] == "ordering")):
+            # called-in order: "Ordering in process" makes it ready for a driver
             status, reason = "held", "waiting on kitchen"
         elif not auto_on:
             status, reason = "queued", "auto dispatch off, assign by hand"
@@ -1663,7 +1693,8 @@ def auto_assign():
                            WHERE driver_id IS NULL AND redo_driver_id IS NULL
                              AND dispatch_status IN ('queued','held')
                              AND COALESCE(region_id,0) NOT IN (SELECT id FROM regions WHERE COALESCE(paused,0)=1)
-                             AND kitchen_status IN (""" + stages + """)
+                             AND (kitchen_status IN (""" + stages + """)
+                                  OR (kitchen_status='pending' AND manual_state='ordering'))
                            ORDER BY created_at ASC""").fetchall()
         pick = None
         for cand in waiting:
@@ -1927,6 +1958,8 @@ def new_code():
     src_id = payload.get("from_order_id")
     if src_id:
         src = db().execute("SELECT * FROM orders WHERE id=?", (src_id,)).fetchone()
+        if src and reorder_closed(src):
+            return jsonify({"ok": False, "error": reorder_closed_msg(src)}), 400
         if src:
             from_code = src["code"]
             if issue_key and issue_key not in REDO_REASONS:
@@ -1945,6 +1978,8 @@ def new_code():
     src_id = payload.get("from_order_id")
     if src_id:
         src = db().execute("SELECT * FROM orders WHERE id=?", (src_id,)).fetchone()
+        if src and reorder_closed(src):
+            return jsonify({"ok": False, "error": reorder_closed_msg(src)}), 400
         if src:
             from_code = src["code"]
             if issue_key and issue_key not in REDO_REASONS:
@@ -2212,12 +2247,14 @@ def order_dict(o):
         "prep_minutes": o["prep_minutes"], "timer_seconds": eta,
         "placed_by": o["placed_by"], "created_at": o["created_at"],
         "delivered_at": o["delivered_at"],
+        "reorder_ok": not reorder_closed(o),
         "queue_position": queue_position(o["id"]),
         "uses_app": bool(r["uses_app"]) if r is not None and "uses_app" in r.keys() else True,
         "order_method": order_method(r),
         "order_url": ((r["order_url"] or "") if r is not None and "order_url" in r.keys() else ""),
         "manual_state": (o["manual_state"] or "") if "manual_state" in o.keys() else "",
         "manual_by": (o["manual_by"] or "") if "manual_by" in o.keys() else "",
+        "manual_time": (clock(o["manual_at"]) if "manual_at" in o.keys() and o["manual_at"] else ""),
         "pp": pp_info(o),
     }
 
@@ -3455,6 +3492,8 @@ def checkout():
     src_id = payload.get("from_order_id")
     if src_id:
         src = db().execute("SELECT * FROM orders WHERE id=?", (src_id,)).fetchone()
+        if src and reorder_closed(src):
+            return jsonify({"ok": False, "error": reorder_closed_msg(src)}), 400
         if src:
             from_code = src["code"]
             if issue_key and issue_key not in REDO_REASONS:
@@ -5075,6 +5114,9 @@ def dispatch_new_order():
     fid = request.args.get("from")
     if fid:
         o = db().execute("SELECT * FROM orders WHERE id=?", (fid,)).fetchone()
+        if o and reorder_closed(o):
+            flash(reorder_closed_msg(o))
+            return redirect(url_for("dispatch_new_order"))
         if o:
             src = {"id": o["id"], "code": o["code"], "restaurant_id": o["restaurant_id"],
                    "customer_name": o["customer_name"], "customer_phone": o["customer_phone"],
@@ -7012,7 +7054,8 @@ def api_region_hours_get():
     return jsonify({"ok": True, "region": r["name"], "own": own, "can_edit": _can_edit_region(rid),
                     "rows": business_hours_rows(rid) if own else business_hours_rows(),
                     "business_label": business_hours_label() or "no hours limit",
-                    "closed_dates": region_closed_dates(rid), "days": BH_DAYS})
+                    "closed_dates": region_closed_list(rid), "closed_hours": region_closed_hours(rid),
+                    "days": BH_DAYS})
 
 
 @app.post("/api/dispatch/region-hours")
@@ -7064,11 +7107,23 @@ def api_region_hours_save():
         dates.add(d.isoformat())
     if len(dates) > 60:
         return jsonify({"ok": False, "error": "Keep it to 60 closed dates or fewer."}), 400
-    db().execute("UPDATE regions SET hours=?, closed_dates=? WHERE id=?", (hours_json, ",".join(sorted(dates)), rid))
+    part = {}
+    for d, v in (b.get("closed_hours") or {}).items():
+        d = str(d)[:10]
+        if d not in dates or not isinstance(v, (list, tuple)) or len(v) != 2:
+            continue
+        a, c = str(v[0] or "").strip()[:5], str(v[1] or "").strip()[:5]
+        if _hm(a) is None or _hm(c) is None:
+            return jsonify({"ok": False, "error": "Give " + d + " a from and a to time, or make it all day."}), 400
+        if _hm(c) <= _hm(a):
+            return jsonify({"ok": False, "error": "On " + d + " the closed-until time has to be after the from time."}), 400
+        part[d] = [a, c]
+    db().execute("UPDATE regions SET hours=?, closed_dates=?, closed_hours=? WHERE id=?",
+                 (hours_json, ",".join(sorted(dates)), json.dumps(part), rid))
     db().commit()
     who = session.get("dispatcher_name", "dispatch")
     log("region_hours", r["name"] + ": " + ("own hours " + business_hours_label(rid) if hours_json else "business hours") +
-        ("; closed " + ", ".join(sorted(dates)) if dates else "") + " by " + who)
+        ("; " + closed_dates_label(rid, 60) if dates else "") + " by " + who)
     return jsonify({"ok": True, "label": business_hours_label(rid) or "no hours limit",
                     "closed": closed_dates_label(rid, 60)})
 
@@ -7697,7 +7752,7 @@ def dispatch_restaurants():
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
     data = [{"r": r, "hours": json.loads(r["hours"]), "open": is_open(r), "method": order_method(r)} for r in rs]
     stamp_regions()
-    return render_template("dispatch_restaurants.html", data=data, week=WEEK, saved=saved,
+    return render_template("dispatch_restaurants.html", is_owner_view=is_owner(session.get("dispatcher_id")), data=data, week=WEEK, saved=saved,
                            regions=[{"id": g["id"], "name": g["name"]} for g in all_regions()])
 
 @app.route("/dispatch/restaurants/delete", methods=["POST"])
@@ -7807,6 +7862,12 @@ def dispatch_settings():
                 _g = ""
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('gps_help_text',?)", (_g,))
         if "site_present" in request.form:
+            for _k, _d, _n in SITE_TEXT:
+                if _k in request.form:
+                    _v = (request.form.get(_k) or "").strip()[:_n]
+                    if _v == _d:
+                        _v = ""
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, _v))
             for _k, _n in (("business_email", 120), ("home_headline", 120), ("social_x", 200),
                            ("social_facebook", 200), ("social_instagram", 200), ("faq_text", 12000)):
                 _v = (request.form.get(_k) or "").strip()[:_n]
@@ -7822,9 +7883,25 @@ def dispatch_settings():
                 return v if lo <= v <= hi else None
             _vals = {"loyalty_on": "1" if request.form.get("loyalty_on") else "0",
                      "confirm_call": "1" if request.form.get("confirm_call") else "0"}
+            _ro = []
+            for _i in (1, 2, 3, 4):
+                _p, _d = _num("ro_points_%d" % _i, 1, 100000), _num("ro_value_%d" % _i, 1, 100000, 100)
+                if _p and _d:
+                    _ro.append("%d:%d" % (_p, _d))
+            if _ro:
+                _vals["reward_options"] = ",".join(_ro)
+            if "bonus_weekday" in request.form:
+                _bw = _num("bonus_weekday", -1, 6)
+                if _bw is not None:
+                    _vals["bonus_weekday"] = str(_bw)
             for _k, _sk, _lo, _hi, _m in (("points_per_dollar", "points_per_dollar", 0, 20, 1),
-                                          ("reward_points", "reward_points", 10, 10000, 1),
-                                          ("reward_value", "reward_value_cents", 50, 10000, 100),
+                                          ("signup_points", "signup_points", 0, 10000, 1),
+                                          ("review_points", "review_points", 0, 10000, 1),
+                                          ("tier_vip_points", "tier_vip_points", 1, 1000000, 1),
+                                          ("tier_elite_points", "tier_elite_points", 2, 1000000, 1),
+                                          ("bonus_starter_pct", "bonus_starter_pct", 0, 1000, 1),
+                                          ("bonus_vip_pct", "bonus_vip_pct", 0, 1000, 1),
+                                          ("bonus_elite_pct", "bonus_elite_pct", 0, 1000, 1),
                                           ("gift_min", "gift_min_cents", 100, 50000, 100),
                                           ("gift_max", "gift_max_cents", 500, 200000, 100)):
                 _v = _num(_k, _lo, _hi, _m)
@@ -7882,6 +7959,9 @@ def dispatch_settings():
             if key in request.form:
                 db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
                              (key, "1" if str(request.form.get(key)).strip() == "1" else "0"))
+        if "assign_on_pending" in request.form:
+            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('assign_on_pending',?)",
+                         ("1" if str(request.form.get("assign_on_pending")).strip() == "1" else "0",))
         if "stack_by_location" in request.form:
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('stack_by_location',?)",
                          ("1" if str(request.form.get("stack_by_location")).strip() == "1" else "0",))
@@ -7985,7 +8065,7 @@ def dispatch_settings():
         if errs:
             db().commit()
             rows = db().execute("SELECT * FROM settings").fetchall()
-            return render_template("dispatch_settings.html", s={r["key"]: r["value"] for r in rows},
+            return render_template("dispatch_settings.html", site=site_text(raw=True), s={r["key"]: r["value"] for r in rows},
                                    saved=False, errors=errs, bh=business_hours_rows(),
                                    bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
         if "order_tokens" in request.form:
@@ -7994,7 +8074,7 @@ def dispatch_settings():
         db().commit()
         saved = True
     rows = db().execute("SELECT * FROM settings").fetchall()
-    return render_template("dispatch_settings.html", s={r["key"]: r["value"] for r in rows}, saved=saved,
+    return render_template("dispatch_settings.html", site=site_text(raw=True), s={r["key"]: r["value"] for r in rows}, saved=saved,
                            bh=business_hours_rows(), bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
 
 # ---------------------------------------------------------------- chat
@@ -8333,6 +8413,47 @@ def _route_google(a, b):
     return {"coords": coords, "steps": steps, "distance_m": leg["distance"]["value"],
             "duration_s": dur, "source": "google"}
 
+
+@app.get("/api/driver/geocode")
+def api_driver_geocode():
+    """Look up a typed address for the driver app's built-in navigation."""
+    if not session.get("driver_id") and not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    q = " ".join((request.args.get("q") or "").split())[:200]
+    if len(q) < 3:
+        return jsonify({"ok": False, "error": "Type an address first."}), 400
+    near = _ll(request.args.get("near"))
+    def far(res):
+        if not near or not res.get("ok"):
+            return False
+        return hav_m(near, (res["lat"], res["lng"])) > 160000
+    tries = [q]
+    biz = (setting("business_address", str) or "").split(",")
+    if len(biz) >= 3:
+        area = ",".join(biz[-2:]).strip()
+        tries.append(q + ", " + area)
+    best = None
+    for t in tries:
+        try:
+            res = geocode(t)
+        except Exception:
+            res = {"ok": False}
+        if res.get("ok") and not far(res):
+            best = res
+            break
+        if res.get("ok") and best is None:
+            best = res
+    if not best or not best.get("ok"):
+        return jsonify({"ok": False, "error": "Couldn't find that address. Add the city or zip and try again."}), 404
+    return jsonify({"ok": True, "lat": best["lat"], "lng": best["lng"], "formatted": best["formatted"]})
+
+def hav_m(a, b):
+    import math
+    R = 6371000.0
+    t = math.pi / 180
+    dl, dn = (b[0] - a[0]) * t, (b[1] - a[1]) * t
+    x = math.sin(dl / 2) ** 2 + math.cos(a[0] * t) * math.cos(b[0] * t) * math.sin(dn / 2) ** 2
+    return 2 * R * math.asin(math.sqrt(x))
 
 @app.get("/api/driver/route")
 def api_driver_route():
@@ -9077,7 +9198,11 @@ PHOTO_MAX_BYTES = 10 * 1024 * 1024
 
 
 def media_url(name):
-    return ("/media/" + name) if name else ""
+    if not name:
+        return ""
+    if name.startswith("http://") or name.startswith("https://"):
+        return name
+    return "/media/" + name
 
 
 def drop_media(name):
@@ -9214,6 +9339,72 @@ def api_load_preset():
 # ---------------- logo ----------------
 DEFAULT_LOGO = "/static/brand/logo-default.png"
 
+# Home page text dispatch can edit in Settings > Customer website. Blank goes back to the default.
+SITE_TEXT = (
+    ("site_announce", "", 300),
+    ("home_sub", "", 300),
+    ("how_title", "How it works", 60),
+    ("how1_t", "Tell us where you are", 60),
+    ("how1_p", "Type your delivery address above and we show you who delivers to you and what the delivery fee is.", 300),
+    ("how2_t", "Fill your basket", 60),
+    ("how2_p", "Pick a restaurant below and tell us what you'd like. Order now or schedule it for later.", 300),
+    ("how3_t", "Sit back and relax", 60),
+    ("how3_p", "Check out, and you'll usually have your food in 30 to 60 minutes. Track your driver the whole way.", 300),
+    ("rest_title", "Restaurants", 60),
+    ("closed_msg", "We are closed right now. You can still place a future order: pick a restaurant and choose Schedule for later.", 300),
+    ("any_text", "Order from any restaurant in the area. Tell us the place, the items, and the prices, and your driver picks it up.", 300),
+    ("pocket_title", "From your pocket to your front porch", 80),
+    ("pocket_text", "Order from your phone in a few taps. Add {business} to your home screen and it opens like an app.", 400),
+)
+SITE_IMAGES = {"hero_image": "/static/home-hero.jpg", "pocket_image": "/static/home-burger.jpg"}
+
+
+def site_text(raw=False):
+    out = {}
+    biz_name = (setting("business_name", str) or "Fleet Delivery").strip() or "Fleet Delivery"
+    for k, d, _n in SITE_TEXT:
+        v = (setting(k, str) or "").strip() or d
+        out[k] = v if raw else v.replace("{business}", biz_name)
+    for k, d in SITE_IMAGES.items():
+        name = (setting(k, str) or "").strip()
+        out[k] = media_url(name) if name and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(name))) else d
+    return out
+
+
+@app.post("/api/dispatch/site-image")
+def api_site_image():
+    """Change (or reset) the home page's big top photo or the phone photo."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    key = request.form.get("which") or ""
+    if key not in SITE_IMAGES:
+        return jsonify({"ok": False, "error": "Unknown picture."}), 400
+    old = (setting(key, str) or "").strip()
+    if request.form.get("op") == "reset":
+        drop_media(old)
+        db().execute("DELETE FROM settings WHERE key=?", (key,))
+        db().commit()
+        return jsonify({"ok": True, "url": SITE_IMAGES[key]})
+    fs = request.files.get("photo")
+    if not fs:
+        return jsonify({"ok": False, "error": "Choose a picture to upload."}), 400
+    raw = fs.read(PHOTO_MAX_BYTES + 1)
+    if len(raw) > PHOTO_MAX_BYTES:
+        return jsonify({"ok": False, "error": "That picture is over 10 MB. Pick a smaller one."}), 400
+    try:
+        from PIL import Image
+        import io
+        im = Image.open(io.BytesIO(raw)).convert("RGB")
+        im.thumbnail((2000, 2000))
+        name = secrets.token_hex(10) + ".jpg"
+        im.save(os.path.join(UPLOAD_DIR, name), "JPEG", quality=85, optimize=True)
+    except Exception:
+        return jsonify({"ok": False, "error": "That picture could not be read. Try a PNG or JPG."}), 400
+    drop_media(old)
+    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, name))
+    db().commit()
+    return jsonify({"ok": True, "url": media_url(name)})
+
 
 def logo_url():
     name = (setting("logo_image", str) or "").strip()
@@ -9315,6 +9506,127 @@ def api_menu(rid):
     return jsonify({"ok": True, "items": menu_payload(rid)})
 
 
+
+# ---------------------------------------------------------------- TigerTownToGo (Zuppler) import
+TIGERTOWN_FILE = os.path.join(APP_DIR, "data", "tigertown_import.json")
+
+def tigertown_data():
+    try:
+        with open(TIGERTOWN_FILE) as f:
+            return json.load(f)
+    except Exception:
+        return None
+
+def _norm_name(n):
+    return "".join(ch for ch in (n or "").lower() if ch.isalnum())
+
+def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_id=None):
+    """Bring restaurants, photos, logos, hours, menus, sizes and add-ons from the old TigerTownToGo site.
+    A restaurant already here with the same name is updated instead of duplicated."""
+    data = tigertown_data()
+    if not data:
+        return {"ok": False, "error": "The TigerTownToGo menu file is missing from this upload."}
+    con = db()
+    have = {}
+    for r in con.execute("SELECT * FROM restaurants").fetchall():
+        have[_norm_name(r["name"])] = r
+        if r["zup_id"]:
+            have["z" + str(r["zup_id"])] = r
+    made = updated = items = 0
+    skipped = []
+    for z in data["restaurants"]:
+        if pick_ids is not None and str(z["zid"]) not in pick_ids:
+            continue
+        low = z["name"].lower()
+        if skip_paused and (z.get("paused") or "(old)" in low or " dnd" in low):
+            skipped.append(z["name"])
+            continue
+        hours = json.dumps(z["hours"])
+        cur = have.get("z" + str(z["zid"])) or have.get(_norm_name(z["name"]))
+        if cur:
+            rid = cur["id"]
+            con.execute("""UPDATE restaurants SET zup_id=?, cuisine=COALESCE(NULLIF(cuisine,''),?),
+                           image=CASE WHEN image IS NULL OR image='' THEN ? ELSE image END,
+                           logo=?, address=CASE WHEN address IS NULL OR address='' THEN ? ELSE address END,
+                           lat=COALESCE(lat,?), lng=COALESCE(lng,?), hours=?, eta_min=?,
+                           min_order_cents=COALESCE(min_order_cents,?) WHERE id=?""",
+                        (str(z["zid"]), z["cuisine"], z["photo"], z["logo"], z["address"], z["lat"], z["lng"],
+                         hours, z.get("eta_min"), z.get("min_order_cents") or None, rid))
+            updated += 1
+        else:
+            base = "".join(ch if ch.isalnum() else "-" for ch in z["name"].lower()).strip("-")
+            base = "-".join(x for x in base.split("-") if x) or "restaurant"
+            slug, n = base, 2
+            while con.execute("SELECT 1 FROM restaurants WHERE slug=?", (slug,)).fetchone():
+                slug = "%s-%d" % (base, n); n += 1
+            pin = "%04d" % secrets.randbelow(10000)
+            cur2 = con.execute("""INSERT INTO restaurants(name,slug,pin,address,phone,lat,lng,hours,prep_default,
+                                   image,logo,cuisine,zup_id,eta_min,min_order_cents,region_id)
+                                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                               (z["name"], slug, pin, z["address"] or "Auburn, AL", "", z["lat"], z["lng"], hours,
+                                int(z.get("prep") or 15), z["photo"], z["logo"], z["cuisine"], str(z["zid"]),
+                                z.get("eta_min"), z.get("min_order_cents") or None, region_id))
+            rid = cur2.lastrowid
+            made += 1
+        if replace_menu:
+            old = [r["id"] for r in con.execute("SELECT id FROM menu_items WHERE restaurant_id=?", (rid,)).fetchall()]
+            if old:
+                marks = ",".join("?" * len(old))
+                gids = [r["id"] for r in con.execute("SELECT id FROM option_groups WHERE item_id IN (%s)" % marks, old).fetchall()]
+                if gids:
+                    con.execute("DELETE FROM options WHERE group_id IN (%s)" % ",".join("?" * len(gids)), gids)
+                con.execute("DELETE FROM option_groups WHERE item_id IN (%s)" % marks, old)
+                con.execute("DELETE FROM menu_items WHERE restaurant_id=?", (rid,))
+        for it in z["items"]:
+            c = con.execute("""INSERT INTO menu_items(restaurant_id,name,description,price_cents,active,section,sort,image,menu_tab,zup_id)
+                               VALUES(?,?,?,?,1,?,?,?,?,?)""",
+                            (rid, it["name"][:120], it["description"][:1000], int(it["price_cents"]), it["section"][:80],
+                             int(it["sort"]), it["image"], it["tab"][:60], str(it["zid"])))
+            iid = c.lastrowid
+            items += 1
+            for gi, g in enumerate(it["groups"]):
+                gc = con.execute("INSERT INTO option_groups(item_id,name,min_select,max_select,sort) VALUES(?,?,?,?,?)",
+                                 (iid, g["name"][:80], int(g["min"]), int(g["max"]), gi))
+                gid = gc.lastrowid
+                con.executemany("INSERT INTO options(group_id,name,price_delta_cents,sort) VALUES(?,?,?,?)",
+                                [(gid, o["name"][:80], int(o["delta"]), oi) for oi, o in enumerate(g["options"])])
+    con.commit()
+    return {"ok": True, "created": made, "updated": updated, "items": items, "skipped": skipped}
+
+
+@app.route("/dispatch/import-tigertown", methods=["GET", "POST"])
+def dispatch_import_tigertown():
+    me = session.get("dispatcher_id")
+    if not me:
+        return redirect("/dispatch/login")
+    if not is_owner(me):
+        return "Only an owner can import restaurants.", 403
+    data = tigertown_data()
+    result = None
+    if request.method == "POST":
+        picks = request.form.getlist("pick")
+        rg = request.form.get("region_id") or ""
+        result = tigertown_import(pick_ids=set(picks) if picks else set(),
+                                  skip_paused=False, replace_menu=True,
+                                  region_id=int(rg) if rg.isdigit() else None)
+    rows = []
+    if data:
+        here = {}
+        for r in db().execute("SELECT id,name,zup_id FROM restaurants").fetchall():
+            here[_norm_name(r["name"])] = r
+            if r["zup_id"]:
+                here["z" + str(r["zup_id"])] = r
+        for z in data["restaurants"]:
+            low = z["name"].lower()
+            m = here.get("z" + str(z["zid"])) or here.get(_norm_name(z["name"]))
+            rows.append({"zid": z["zid"], "name": z["name"], "cuisine": z["cuisine"], "address": z["address"],
+                         "photo": z["photo"], "logo": z["logo"], "items": len(z["items"]),
+                         "pics": sum(1 for i in z["items"] if i["image"]),
+                         "paused": bool(z.get("paused") or "(old)" in low or " dnd" in low),
+                         "here": bool(m)})
+    return render_template("dispatch_import.html", rows=rows, result=result, regions=all_regions(),
+                           pulled=(data or {}).get("pulled", ""))
+
 @app.get("/healthz")
 def healthz():
     return jsonify({"ok": True, "time": now()})
@@ -9345,6 +9657,8 @@ def inject_portal():
                "biz_tel": tel_digits(_d),
                "tax_bp": setting("tax_rate_bp") or 0, "service_bp": setting("service_fee_bp") or 0,
                "logo_url": logo_url()}
+        if request.path == "/":
+            biz["site"] = site_text()
         _cp = current_portal()
         if not _cp:
             biz.update({"biz_email": (setting("business_email", str) or "").strip(),
@@ -9622,13 +9936,49 @@ def region_own_hours(rid):
     return h if isinstance(h, dict) else {}
 
 
-def region_closed_dates(rid):
-    """Dates a region is closed all day, like holidays. Past dates drop off."""
+def region_closed_list(rid):
+    """Every closed date on the region (all day or set hours). Past dates drop off."""
     r = _region(rid)
     if not r:
         return []
     today = dt.date.today().isoformat()
     return sorted({d for d in (r["closed_dates"] or "").split(",") if d and d >= today})
+
+
+def region_closed_hours(rid):
+    """{"2026-11-26": ["15:00", "23:59"]}: dates the region is closed only for set hours."""
+    r = _region(rid)
+    if not r or "closed_hours" not in r.keys():
+        return {}
+    try:
+        h = json.loads(r["closed_hours"] or "{}")
+    except Exception:
+        h = {}
+    if not isinstance(h, dict):
+        return {}
+    keep = set(region_closed_list(rid))
+    return {d: v for d, v in h.items() if d in keep and isinstance(v, list) and len(v) == 2
+            and _hm(v[0]) is not None and _hm(v[1]) is not None}
+
+
+def region_closed_dates(rid):
+    """Dates a region is closed all day, like holidays. Past dates drop off."""
+    part = region_closed_hours(rid)
+    return [d for d in region_closed_list(rid) if d not in part]
+
+
+def region_closed_now(rid, when):
+    """Inside one of the region's set closed hours for that date?"""
+    if not rid:
+        return False
+    span = region_closed_hours(rid).get(when.date().isoformat())
+    if not span:
+        return False
+    m = when.hour * 60 + when.minute
+    a, b = _hm(span[0]), _hm(span[1])
+    if b == 23 * 60 + 59:
+        b = 1440
+    return a <= m < b
 
 
 def business_hours(rid=None):
@@ -9648,6 +9998,8 @@ def business_in_hours(when=None, rid=None):
     """Inside operating hours (the region's when it has its own) and not on one of the
     region's closed dates? True when no hours are set and no closed date applies."""
     when = when or dt.datetime.now()
+    if region_closed_now(rid, when):
+        return False
     closed = set(region_closed_dates(rid)) if rid else set()
     h = business_hours(rid)
     if not h:
@@ -9698,10 +10050,17 @@ def business_hours_label(rid=None):
 
 def closed_dates_label(rid, limit=3):
     """'Closed Thu Nov 26, Fri Dec 25' for the next few closed dates."""
-    ds = region_closed_dates(rid)[:limit]
+    ds = region_closed_list(rid)[:limit]
     if not ds:
         return ""
-    return "Closed " + ", ".join(dt.date.fromisoformat(d).strftime("%a %b %-d") for d in ds)
+    part = region_closed_hours(rid)
+    def one(d):
+        t = dt.date.fromisoformat(d).strftime("%a %b %-d")
+        if d in part:
+            a, b = part[d]
+            t += " " + _ampm(a) + " - " + ("close" if b == "23:59" else _ampm(b))
+        return t
+    return "Closed " + ", ".join(one(d) for d in ds)
 
 
 app.jinja_env.globals["closed_dates_label"] = closed_dates_label
@@ -9839,14 +10198,70 @@ def current_customer():
 def loyalty_on():
     return bool(setting("loyalty_on"))
 
+TIER_NAMES = ("Starter", "VIP", "Elite")
+WEEKDAYS = ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday")
+EARN_KINDS = ("earn", "bonus", "signup", "review", "reverse")
+
+def _sint(key, dflt):
+    try:
+        v = setting(key)
+        return dflt if v is None else int(v)
+    except (TypeError, ValueError):
+        return dflt
+
+def reward_options():
+    """The rewards a customer can pick at checkout, cheapest first: [{points, cents, value}]."""
+    out = []
+    for part in str(setting("reward_options", str) or "150:300,250:500,400:1000").split(","):
+        try:
+            a, b = part.split(":")
+            pts, cents = int(a), int(b)
+        except ValueError:
+            continue
+        if pts > 0 and cents > 0:
+            out.append({"points": pts, "cents": cents, "value": money(cents)})
+    return sorted(out, key=lambda x: x["points"])
+
+def tier_rules():
+    vip, elite = max(1, _sint("tier_vip_points", 750)), max(2, _sint("tier_elite_points", 1500))
+    return [{"name": "Starter", "min": 0, "bonus_pct": max(0, _sint("bonus_starter_pct", 50))},
+            {"name": "VIP", "min": vip, "bonus_pct": max(0, _sint("bonus_vip_pct", 100))},
+            {"name": "Elite", "min": max(elite, vip + 1), "bonus_pct": max(0, _sint("bonus_elite_pct", 200))}]
+
+def bonus_label(pct):
+    return {50: "50% more points", 100: "double points", 200: "triple points", 300: "4x points"}.get(int(pct), str(int(pct)) + "% more points")
+
 def reward_rules():
-    return {"on": loyalty_on(), "per_dollar": max(0, setting("points_per_dollar") or 0),
-            "points": max(1, setting("reward_points") or 100),
-            "value_cents": max(0, setting("reward_value_cents") or 0)}
+    opts = reward_options()
+    wd = _sint("bonus_weekday", 1)
+    tiers = tier_rules()
+    for t in tiers:
+        t["bonus"] = bonus_label(t["bonus_pct"]) if t["bonus_pct"] else ""
+    return {"on": loyalty_on(), "per_dollar": max(0, _sint("points_per_dollar", 1)),
+            "signup_points": max(0, _sint("signup_points", 50)), "review_points": max(0, _sint("review_points", 25)),
+            "options": opts, "tiers": tiers, "bonus_weekday": wd if 0 <= wd <= 6 else -1,
+            "bonus_day": WEEKDAYS[wd] if 0 <= wd <= 6 else "", "bonus_day_short": WEEKDAYS[wd][:3] if 0 <= wd <= 6 else "",
+            # kept for older pages: the smallest reward
+            "points": opts[0]["points"] if opts else 100, "value_cents": opts[0]["cents"] if opts else 0}
+
+def tier_points(cid):
+    """Points earned in the past 365 days (spending points doesn't lower it)."""
+    since = (dt.datetime.now() - dt.timedelta(days=365)).isoformat(timespec="seconds")
+    r = db().execute("SELECT COALESCE(SUM(points),0) AS n FROM points_log WHERE customer_id=? AND created_at>=? AND kind IN "
+                     "('earn','bonus','signup','review','reverse')", (cid, since)).fetchone()
+    return max(0, int(r["n"] or 0))
+
+def tier_for(tp):
+    cur = tier_rules()[0]
+    for t in tier_rules():
+        if tp >= t["min"]:
+            cur = t
+    return cur
 
 def rewards_available(points):
-    rr = reward_rules()
-    return (int(points or 0) // rr["points"]) if rr["on"] and rr["value_cents"] > 0 else 0
+    if not loyalty_on():
+        return 0
+    return len([o for o in reward_options() if int(points or 0) >= o["points"]])
 
 def customer_public(c):
     if not c:
@@ -9855,11 +10270,21 @@ def customer_public(c):
     cards = db().execute("SELECT id, brand, last4, expiry FROM saved_cards WHERE customer_id=? ORDER BY id DESC",
                          (c["id"],)).fetchall()
     pts = int(c["points"] or 0)
+    tp = tier_points(c["id"])
+    tier = tier_for(tp)
+    nxt = next((t for t in rr["tiers"] if t["min"] > tp), None)
+    opts = [dict(o, ok=pts >= o["points"]) for o in rr["options"]]
+    nxt_reward = next((o for o in rr["options"] if o["points"] > pts), None)
     return {"id": c["id"], "name": c["name"] or "", "phone": nice_phone(c["phone"]), "email": c["email"] or "",
             "address": c["address"] or "", "existing": bool(c["verified"]),
-            "points": pts, "rewards": rewards_available(pts), "reward_value": money(rr["value_cents"]),
+            "points": pts, "rewards": len([o for o in opts if o["ok"]]) if rr["on"] else 0,
+            "reward_options": opts, "reward_value": money(rr["value_cents"]),
             "reward_points": rr["points"], "loyalty_on": rr["on"],
-            "next_reward_in": (rr["points"] - (pts % rr["points"])) if rr["on"] else 0,
+            "next_reward_in": (nxt_reward["points"] - pts) if (rr["on"] and nxt_reward) else 0,
+            "next_reward_value": nxt_reward["value"] if nxt_reward else "",
+            "tier": tier["name"], "tier_points": tp, "tier_bonus": tier.get("bonus") or bonus_label(tier["bonus_pct"]),
+            "next_tier": nxt["name"] if nxt else "", "next_tier_in": (nxt["min"] - tp) if nxt else 0,
+            "tier_pct": 100 if not nxt else int(100 * (tp - tier["min"]) / max(1, nxt["min"] - tier["min"])),
             "cards": [{"id": x["id"], "label": (x["brand"] or "Card").title() + " ending " + (x["last4"] or "????"),
                        "expiry": x["expiry"] or ""} for x in cards]}
 
@@ -9905,9 +10330,9 @@ def gift_move(g, cents, note, order_id=None, by=""):
                  (nb, ("void" if g["status"] == "void" else ("used" if nb <= 0 else "active")), g["id"]))
     return nb
 
-def points_move(cid, pts, note, order_id=None):
-    db().execute("INSERT INTO points_log (customer_id, order_id, points, note, created_at) VALUES (?,?,?,?,?)",
-                 (cid, order_id, int(pts), note[:160], now()))
+def points_move(cid, pts, note, order_id=None, kind="adjust"):
+    db().execute("INSERT INTO points_log (customer_id, order_id, points, note, created_at, kind) VALUES (?,?,?,?,?,?)",
+                 (cid, order_id, int(pts), note[:160], now(), kind))
     db().execute("UPDATE customers SET points=MAX(0, points+?) WHERE id=?", (int(pts), cid))
 
 def checkout_credits(payload, placed_by, dg, subtotal, total):
@@ -9935,16 +10360,27 @@ def checkout_credits(payload, placed_by, dg, subtotal, total):
         out["customer_id"] = cust["id"]
     left = int(total)
     # rewards first (only against food), then the gift card
-    want = int(payload.get("redeem_rewards") or 0)
-    if want > 0:
+    # one reward per order: the customer picks one option by its points (150, 250, 400...)
+    try:
+        want = int(payload.get("redeem_reward") or 0)
+    except (TypeError, ValueError):
+        want = 0
+    if not want and payload.get("redeem_rewards"):
+        _ok = [o for o in reward_options() if cust and int(cust["points"] or 0) >= o["points"]]
+        want = _ok[-1]["points"] if _ok else -1
+    if want:
         if not cust:
-            return dict(out, error="Sign in to your rewards account to use rewards.")
-        rr = reward_rules()
-        have = rewards_available(cust["points"])
-        if want > have:
-            return dict(out, error="You have " + str(have) + " reward" + ("" if have == 1 else "s") + " available.")
-        cents = min(want * rr["value_cents"], int(subtotal), left)
-        out["reward_cents"], out["reward_points"] = cents, want * rr["points"]
+            return dict(out, error="Sign in to your rewards account to use a reward.")
+        if not loyalty_on():
+            return dict(out, error="Rewards are turned off right now.")
+        opt = next((o for o in reward_options() if o["points"] == want), None)
+        if not opt:
+            return dict(out, error="Pick one of the rewards shown.")
+        if int(cust["points"] or 0) < opt["points"]:
+            return dict(out, error="You need " + str(opt["points"]) + " points for that reward. You have "
+                        + str(int(cust["points"] or 0)) + ".")
+        cents = min(opt["cents"], int(subtotal), left)
+        out["reward_cents"], out["reward_points"] = cents, opt["points"]
         left -= cents
     if (payload.get("gift_code") or "").strip():
         g = gift_find(payload.get("gift_code"))
@@ -9990,8 +10426,8 @@ def apply_checkout_credits(oid, code, cr, placed_by):
         nb = gift_move(g, -cr["gift_cents"], "Order " + code, oid, who)
         note["gift"] = money(cr["gift_cents"]) + " from gift card (" + money(nb) + " left)"
     if cr["reward_points"]:
-        points_move(cr["customer_id"], -cr["reward_points"], "Rewards used on " + code, oid)
-        note["rewards"] = money(cr["reward_cents"]) + " in rewards"
+        points_move(cr["customer_id"], -cr["reward_points"], "Reward used on " + code, oid, "redeem")
+        note["rewards"] = money(cr["reward_cents"]) + " reward"
     _o0 = db().execute("SELECT customer_phone, address FROM orders WHERE id=?", (oid,)).fetchone()
     if placed_by == "customer" and cr["customer_id"] and _o0:
         db().execute("UPDATE customers SET address=? WHERE id=?", (_o0["address"], cr["customer_id"]))
@@ -10064,16 +10500,43 @@ def pp_charge_saved(o, sc):
     mark_paid(o, "card_paypal", auth["id"], cents)
     return True, (sc["brand"] or "Card").title() + " ending " + (sc["last4"] or "") + " charged after delivery."
 
+def order_points(o):
+    """Points an online order earns: 1 per $1 of food (after the reward), plus the tier bonus on the bonus day."""
+    rr = reward_rules()
+    base = max(0, (int(o["subtotal_cents"] or 0) - int(o["reward_cents"] or 0)) // 100 * rr["per_dollar"])
+    bonus, label = 0, ""
+    try:
+        when = dt.datetime.fromisoformat(str(o["created_at"])[:19])
+    except Exception:
+        when = dt.datetime.now()
+    if base and rr["bonus_weekday"] >= 0 and when.weekday() == rr["bonus_weekday"]:
+        t = tier_for(tier_points(o["customer_id"]))
+        if t["bonus_pct"]:
+            bonus = base * t["bonus_pct"] // 100
+            label = rr["bonus_day"] + " " + t["name"] + " bonus (" + bonus_label(t["bonus_pct"]) + ")"
+    return base, bonus, label
+
 def credit_sweep():
-    """Give rewards points for delivered orders; put gift card money and points back on cancelled orders."""
+    """Give points for delivered online orders; take them back and return gift card money and redeemed points
+    on cancelled orders."""
     if loyalty_on():
-        rr = reward_rules()
         for o in db().execute("""SELECT * FROM orders WHERE dispatch_status='delivered' AND customer_id IS NOT NULL
                                  AND points_awarded IS NULL""").fetchall():
-            pts = (int(o["subtotal_cents"] or 0) - int(o["reward_cents"] or 0)) // 100 * rr["per_dollar"]
-            db().execute("UPDATE orders SET points_awarded=? WHERE id=?", (max(0, pts), o["id"]))
-            if pts > 0:
-                points_move(o["customer_id"], pts, "Earned on " + o["code"], o["id"])
+            if (o["placed_by"] or "customer") != "customer":
+                # phone, dispatch and in-store orders don't earn points
+                db().execute("UPDATE orders SET points_awarded=0 WHERE id=?", (o["id"],))
+                continue
+            base, bonus, label = order_points(o)
+            db().execute("UPDATE orders SET points_awarded=? WHERE id=?", (base + bonus, o["id"]))
+            if base > 0:
+                points_move(o["customer_id"], base, "Earned on " + o["code"], o["id"], "earn")
+            if bonus > 0:
+                points_move(o["customer_id"], bonus, label + ", " + o["code"], o["id"], "bonus")
+    for o in db().execute("""SELECT * FROM orders WHERE dispatch_status='cancelled' AND customer_id IS NOT NULL
+                             AND COALESCE(points_awarded,0)>0 AND COALESCE(points_reversed,0)=0""").fetchall():
+        points_move(o["customer_id"], -int(o["points_awarded"]), "Points taken back, " + o["code"] + " cancelled",
+                    o["id"], "reverse")
+        db().execute("UPDATE orders SET points_reversed=1 WHERE id=?", (o["id"],))
     for o in db().execute("""SELECT * FROM orders WHERE dispatch_status='cancelled' AND credits_settled=0
                              AND (gift_cents>0 OR reward_points>0)""").fetchall():
         if o["gift_cents"] and o["gift_card_id"]:
@@ -10081,9 +10544,18 @@ def credit_sweep():
             if g:
                 gift_move(g, o["gift_cents"], "Returned, " + o["code"] + " cancelled", o["id"], "system")
         if o["reward_points"] and o["customer_id"]:
-            points_move(o["customer_id"], o["reward_points"], "Returned, " + o["code"] + " cancelled", o["id"])
+            points_move(o["customer_id"], o["reward_points"], "Reward points returned, " + o["code"] + " cancelled",
+                        o["id"], "return")
         db().execute("UPDATE orders SET credits_settled=1 WHERE id=?", (o["id"],))
     db().commit()
+
+def give_signup_points(cid):
+    rr = reward_rules()
+    if not rr["on"] or rr["signup_points"] <= 0:
+        return
+    if db().execute("SELECT 1 FROM points_log WHERE customer_id=? AND kind='signup'", (cid,)).fetchone():
+        return
+    points_move(cid, rr["signup_points"], "Welcome bonus for joining", None, "signup")
 
 
 # ---- customer account pages
@@ -10117,6 +10589,7 @@ def account_login():
                 c0 = db().execute("SELECT * FROM customers WHERE phone=?", (ph,)).fetchone()
                 db().execute("""UPDATE customers SET name=COALESCE(NULLIF(name,''), ?), email=COALESCE(NULLIF(?,''), email),
                                 pw_hash=?, last_login_at=? WHERE id=?""", (name, email, generate_password_hash(pw), now(), c0["id"]))
+                give_signup_points(c0["id"])
                 db().commit()
                 session["customer_id"] = c0["id"]
                 session.pop("cust_fails", None)
@@ -10124,6 +10597,7 @@ def account_login():
             else:
                 cur = db().execute("""INSERT INTO customers (name, phone, email, pw_hash, created_at, last_login_at)
                                       VALUES (?,?,?,?,?,?)""", (name, ph, email, generate_password_hash(pw), now(), now()))
+                give_signup_points(cur.lastrowid)
                 db().commit()
                 session["customer_id"] = cur.lastrowid
                 session.pop("cust_fails", None)
@@ -10151,11 +10625,58 @@ def account_page():
     c = current_customer()
     if not c:
         return redirect("/account/login?next=/account")
-    orders = db().execute("""SELECT o.code, o.created_at, o.total_cents, o.dispatch_status, r.name AS rname
+    credit_sweep()
+    orders = db().execute("""SELECT o.id, o.code, o.created_at, o.total_cents, o.dispatch_status, o.placed_by,
+                                    COALESCE(o.points_awarded,0) AS pts, r.name AS rname,
+                                    (SELECT stars FROM reviews v WHERE v.order_id=o.id) AS stars
                              FROM orders o LEFT JOIN restaurants r ON r.id=o.restaurant_id
                              WHERE o.customer_id=? ORDER BY o.id DESC LIMIT 15""", (c["id"],)).fetchall()
-    log_rows = db().execute("SELECT * FROM points_log WHERE customer_id=? ORDER BY id DESC LIMIT 20", (c["id"],)).fetchall()
-    return render_template("account.html", me=customer_public(c), orders=orders, plog=log_rows, money=money)
+    log_rows = db().execute("SELECT * FROM points_log WHERE customer_id=? ORDER BY id DESC LIMIT 25", (c["id"],)).fetchall()
+    return render_template("account.html", me=customer_public(c), orders=orders, plog=log_rows, money=money,
+                           rules=reward_rules(), msg=request.args.get("msg", ""))
+
+@app.post("/account/review")
+def account_review():
+    """A customer reviews one of their delivered orders (once per order) and gets the review points."""
+    c = current_customer()
+    if not c:
+        return redirect("/account/login?next=/account")
+    try:
+        oid, stars = int(request.form.get("order_id") or 0), int(request.form.get("stars") or 0)
+    except ValueError:
+        oid, stars = 0, 0
+    comment = (request.form.get("comment") or "").strip()[:1000]
+    o = db().execute("SELECT * FROM orders WHERE id=? AND customer_id=?", (oid, c["id"])).fetchone()
+    if not o or o["dispatch_status"] != "delivered":
+        return redirect("/account?msg=You+can+review+delivered+orders+only.#orders")
+    if not 1 <= stars <= 5:
+        return redirect("/account?msg=Pick+1+to+5+stars.#orders")
+    if db().execute("SELECT 1 FROM reviews WHERE order_id=?", (oid,)).fetchone():
+        return redirect("/account?msg=You+already+reviewed+that+order.#orders")
+    db().execute("INSERT INTO reviews (order_id, customer_id, restaurant_id, stars, comment, created_at) VALUES (?,?,?,?,?,?)",
+                 (oid, c["id"], o["restaurant_id"], stars, comment, now()))
+    rr = reward_rules()
+    got = ""
+    if rr["on"] and rr["review_points"] > 0 and (o["placed_by"] or "customer") == "customer":
+        points_move(c["id"], rr["review_points"], "Review of " + o["code"], oid, "review")
+        got = "+" + str(rr["review_points"]) + "+points."
+    db().commit()
+    return redirect("/account?msg=Thanks+for+the+review!+" + got + "#orders")
+
+@app.get("/rewards")
+def rewards_page():
+    rr = reward_rules()
+    return render_template("rewards.html", rules=rr, me=customer_public(current_customer()))
+
+@app.get("/dispatch/reviews")
+def dispatch_reviews():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    rows = db().execute("""SELECT v.*, o.code, r.name AS rname, c.name AS cname, c.phone AS cphone
+                           FROM reviews v LEFT JOIN orders o ON o.id=v.order_id
+                           LEFT JOIN restaurants r ON r.id=v.restaurant_id LEFT JOIN customers c ON c.id=v.customer_id
+                           ORDER BY v.id DESC LIMIT 300""").fetchall()
+    return render_template("dispatch_reviews.html", rows=rows, nice_phone=nice_phone)
 
 @app.get("/api/account/me")
 def api_account_me():

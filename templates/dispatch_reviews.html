@@ -1,0 +1,11 @@
+{% extends "base.html" %}{% block title %}Customer reviews{% endblock %}{% block body %}
+<a class="back" href="/dispatch">Back to board</a>
+<h1>Customer reviews</h1>
+{% set n = rows|length %}{% if n %}<p class="muted">{{ n }} review{{ '' if n == 1 else 's' }} · average {{ '%.1f' % ((rows|sum(attribute='stars'))/n) }} stars</p>{% endif %}
+{% for v in rows %}<div class="panel" style="margin-bottom:10px">
+  <div class="row" style="justify-content:space-between"><b style="color:#f59e0b;font-size:1.2em">{{ '★' * v['stars'] }}<span style="color:#d1d5db">{{ '★' * (5 - v['stars']) }}</span></b>
+  <span class="muted small">{{ (v['created_at'] or '').replace('T',' ')[:16] }}</span></div>
+  <div class="small">{{ v['code'] or '' }} · {{ v['rname'] or '' }} · {{ v['cname'] or '' }} {{ nice_phone(v['cphone']) if v['cphone'] else '' }}</div>
+  {% if v['comment'] %}<p>{{ v['comment'] }}</p>{% endif %}
+</div>{% else %}<p class="muted">No reviews yet. Customers can review delivered orders from their account page.</p>{% endfor %}
+{% endblock %}

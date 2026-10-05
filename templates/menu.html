@@ -6,7 +6,8 @@
   {% if any_rest_label() %}Available {{ any_rest_label() }}.{% endif %}
   <span class="pill {{ 'green' if open else 'grey' }}">{{ 'Open' if open else 'Closed' }}</span></p>
 {% else %}
-{% if r['image'] %}<img class="hero" src="/media/{{ r['image'] }}" alt="{{ r['name'] }}">{% endif %}
+{% if r['logo'] %}<img class="herologo" src="{{ r['logo'] }}" alt="">{% endif %}
+{% if r['image'] %}<img class="hero" src="{{ r['image'] if r['image'].startswith('http') else '/media/' ~ r['image'] }}" alt="{{ r['name'] }}">{% endif %}
 <h1>{{ r['name'] }}</h1>
 <p class="muted">{{ r['address'] }} &middot; {{ hours }} &middot;
   <span class="pill {{ 'green' if open else 'grey' }}">{{ 'Open' if open else 'Closed' }}</span></p>
@@ -378,7 +379,7 @@ async function placeOrder(){
     multi_with: ((document.getElementById('multiOn')||{}).checked ? MULTI.code : ''),
     scheduled_for: document.getElementById('whenMode').value === 'later' ? document.getElementById('whenTime').value : '',
     gift_code: document.getElementById('giftCode').value.trim(),
-    redeem_rewards: parseInt((document.getElementById('useRewards')||{}).value||'0',10) || 0,
+    redeem_reward: parseInt((document.getElementById('useReward')||{}).value||'0',10) || 0,
     saved_card_id: (document.getElementById('savedCard')||{}).value || null,
     save_card: !!(document.getElementById('saveCard')||{}).checked}));
   if(!res.ok){ alert(res.error); return; }
@@ -393,12 +394,21 @@ async function placeOrder(){
   if(res.message) alert(res.message);
   window.location = '/track/' + res.code;
 }
+function pickReward(btn){
+  const inp = document.getElementById('useReward'); if(!inp) return;
+  const on = btn.classList.contains('sel');
+  document.querySelectorAll('.rwopt.sel').forEach(b=>b.classList.remove('sel'));
+  if(on){ inp.value = '0'; } else { btn.classList.add('sel'); inp.value = btn.dataset.pts; }
+  const m = document.getElementById('rewardMsg');
+  if(m) m.textContent = on ? '' : 'Reward added. It comes off your food total when you place the order.';
+  try{ if(typeof drawCart === 'function') drawCart(); }catch(e){}
+}
 async function drawAcct(){
   const box = document.getElementById('acctBox');
   let a; try { a = await jget('/api/account/me'); } catch(e){ box.textContent=''; return; }
   const back = encodeURIComponent(location.pathname);
   if(!a.me){
-    box.innerHTML = a.rules.on ? ('<a href="/account/login?next='+back+'">Sign in</a> or <a href="/account/login?mode=signup&next='+back+'">make an account</a> to earn rewards ('+a.rules.points+' points = '+a.reward_value+' off) and keep a card on file.') : '';
+    box.innerHTML = a.rules.on ? ('<a href="/account/login?next='+back+'">Sign in</a> or <a href="/account/login?mode=signup&next='+back+'">make an account</a> to earn '+a.rules.per_dollar+' point per $1 plus '+a.rules.signup_points+' bonus points for joining (<a href="/rewards" target="_blank">how rewards work</a>) and keep a card on file.') : '';
     return;
   }
   const me = a.me;
@@ -406,10 +416,16 @@ async function drawAcct(){
   if(!document.getElementById('phone').value) document.getElementById('phone').value = me.phone;
   if(!document.getElementById('address').value && me.address){ document.getElementById('address').value = me.address; try{ validate(); }catch(e){} }
   let h = 'Signed in as <b>'+me.name+'</b>'+(me.loyalty_on?' · '+me.points+' points':'')+' · <a href="/account/logout">Sign out</a>';
-  if(me.loyalty_on && me.rewards > 0){
-    h += '<div class="row">Use rewards <select id="useRewards" style="max-width:200px"><option value="0">None</option>';
-    for(let i=1;i<=me.rewards;i++) h += '<option value="'+i+'">'+i+' ('+money(i*a.rules.value_cents)+' off)</option>';
-    h += '</select></div>';
+  if(me.loyalty_on){
+    h += ' · '+me.tier;
+    if(me.rewards > 0){
+      h += '<div style="margin:8px 0"><b>Use a reward</b> <span class="muted small">(one per order, tap again to remove)</span><div class="rwopts" style="margin-top:6px">' +
+        me.reward_options.map((o,i)=>'<button type="button" class="rwopt t'+(i%4)+(o.ok?'':' off')+'" data-pts="'+o.points+'" '+(o.ok?'':'disabled')+
+          ' onclick="pickReward(this)"><span class="l"><b>'+o.points+'</b><small>POINTS</small></span><span class="r">'+o.value+'</span></button>').join('') +
+        '</div><input type="hidden" id="useReward" value="0"><div id="rewardMsg" class="small" style="color:#15803d"></div></div>';
+    } else if(me.next_reward_in){
+      h += '<div class="small muted">'+me.next_reward_in+' more points until a '+me.next_reward_value+' reward.</div>';
+    }
   }
   if(a.cards_on){
     if(me.cards.length){
