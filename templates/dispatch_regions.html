@@ -41,7 +41,7 @@ let HR = null;
 async function hoursRegion(id){
   const r = await jget('/api/dispatch/region-hours?region_id='+id);
   if (!r.ok){ alert(r.error || 'Could not load the hours.'); return; }
-  HR = {id:id, dates:r.closed_dates.slice()};
+  HR = {id:id, dates:r.closed_dates.slice(), hours:Object.assign({}, r.closed_hours||{})};
   const old = document.getElementById('hrModal'); if (old) old.remove();
   const box = document.createElement('div'); box.id = 'hrModal';
   box.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;overflow:auto';
@@ -57,9 +57,13 @@ async function hoursRegion(id){
       '<td><label class="small"><input type="checkbox" id="hrx'+x.k+'"'+(x.closed?' checked':'')+dis+'> Closed</label></td></tr>').join('') + '</table>' +
     '<div class="muted small" style="margin:2px 0 10px">A close time earlier than the open time runs past midnight.</div>' +
     '<h4 style="margin:10px 0 4px">Closed dates</h4>' +
-    '<div class="muted small">Holidays or days this region is closed all day. Customers can\'t order or schedule for these days.</div>' +
+    '<div class="muted small">Holidays or days this region is closed. Pick All day, or uncheck it and set the hours it\'s closed (like 3:00 PM to close). Customers can\'t order or schedule during those times.</div>' +
     '<div id="hrDates" style="margin:6px 0"></div>' +
-    (r.can_edit ? '<div class="row"><input type="date" id="hrNewDate" min="'+new Date().toLocaleDateString('en-CA')+'"> <button class="btn tiny" onclick="hrAddDate()">Add date</button></div>' : '') +
+    (r.can_edit ? '<div class="row"><input type="date" id="hrNewDate" min="'+new Date().toLocaleDateString('en-CA')+'">' +
+      ' <label class="small"><input type="checkbox" id="hrAllDay" checked onchange="hrAllToggle()"> All day</label></div>' +
+      '<div class="row" id="hrPart" style="display:none;margin-top:4px"><span class="small">Closed from</span> <input type="time" id="hrFrom" value="15:00">' +
+      ' <span class="small">to</span> <input type="time" id="hrTo" value="23:59"> <span class="muted small">(11:59 PM = rest of the day)</span></div>' +
+      '<div class="row" style="margin-top:4px"><button class="btn tiny" onclick="hrAddDate()">Add date</button></div>' : '') +
     '<div class="small" id="hrErr" style="color:#b42318;min-height:1em;margin-top:6px"></div>' +
     '<div class="btnrow" style="margin-top:10px">' + (r.can_edit ? '<button class="btn primary" onclick="hrSave()">Save</button> ' : '<span class="muted small">You can only change hours for regions you are assigned to.</span> ') +
     '<button class="btn tiny" onclick="document.getElementById(\'hrModal\').remove()">Close</button></div></div>';
@@ -72,20 +76,29 @@ function hrToggle(){
   document.getElementById('hrDays').style.opacity = own ? '1' : '.45';
   document.querySelectorAll('#hrDays input').forEach(i => i.disabled = !own || !HR.can);
 }
+function hrAllToggle(){ document.getElementById('hrPart').style.display = document.getElementById('hrAllDay').checked ? 'none' : ''; }
+function hrT(v){ if (v === '23:59') return 'close'; const [H,M] = v.split(':').map(Number); return ((H%12)||12)+':'+String(M).padStart(2,'0')+' '+(H<12?'AM':'PM'); }
 function hrNice(d){ const x = new Date(d+'T12:00:00'); return x.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'}); }
 function hrDrawDates(){
   const box = document.getElementById('hrDates');
-  box.innerHTML = HR.dates.length ? HR.dates.sort().map(d => '<span class="rgchip">'+hrNice(d)+
+  box.innerHTML = HR.dates.length ? HR.dates.sort().map(d => '<span class="rgchip">'+hrNice(d)+(HR.hours[d] ? ', closed '+hrT(HR.hours[d][0])+' - '+hrT(HR.hours[d][1]) : ', all day')+
     (HR.can ? ' <button class="rgx" title="Remove" onclick="hrDelDate(\''+d+'\')">&times;</button>' : '')+'</span>').join(' ')
     : '<span class="muted small">No closed dates.</span>';
 }
 function hrAddDate(){
   const v = document.getElementById('hrNewDate').value;
   if (!v){ document.getElementById('hrErr').textContent = 'Pick a date first.'; return; }
+  const all = document.getElementById('hrAllDay').checked;
+  if (!all){
+    const a = document.getElementById('hrFrom').value, b = document.getElementById('hrTo').value;
+    if (!a || !b){ document.getElementById('hrErr').textContent = 'Set the from and to times, or check All day.'; return; }
+    if (b <= a){ document.getElementById('hrErr').textContent = 'The to time has to be after the from time.'; return; }
+    HR.hours[v] = [a, b];
+  } else { delete HR.hours[v]; }
   if (!HR.dates.includes(v)) HR.dates.push(v);
   document.getElementById('hrErr').textContent = ''; hrDrawDates();
 }
-function hrDelDate(d){ HR.dates = HR.dates.filter(x => x !== d); hrDrawDates(); }
+function hrDelDate(d){ HR.dates = HR.dates.filter(x => x !== d); delete HR.hours[d]; hrDrawDates(); }
 async function hrSave(){
   const own = (document.querySelector('input[name=hrOwn]:checked')||{}).value === '1';
   const hours = {};
@@ -93,7 +106,7 @@ async function hrSave(){
     hours[k] = {open: document.getElementById('hro'+k).value, close: document.getElementById('hrc'+k).value,
                 closed: document.getElementById('hrx'+k).checked};
   }
-  const r = await jpost('/api/dispatch/region-hours', {region_id: HR.id, own: own, hours: hours, closed_dates: HR.dates});
+  const r = await jpost('/api/dispatch/region-hours', {region_id: HR.id, own: own, hours: hours, closed_dates: HR.dates, closed_hours: HR.hours});
   if (!r.ok){ document.getElementById('hrErr').textContent = r.error || 'That did not save.'; return; }
   document.getElementById('hrModal').remove();
   load();
@@ -114,7 +127,7 @@ function draw(){
     '<div class="muted small">Hours: '+e(r.own_hours ? r.hours_label : 'business hours ('+r.hours_label+')')+(r.closed_label?' &middot; '+e(r.closed_label):'')+'</div>'+
     '<div class="muted small">Dispatch number: '+e(r.phone ? r.phone : 'business number'+(r.business_phone?' ('+r.business_phone+')':''))+'</div>'+
     '<div class="muted small">Minimum order: '+(r.min_order_cents ? '$'+(r.min_order_cents/100).toFixed(2) : 'none')+' &middot; Delivery radius: '+(r.max_miles ? r.max_miles+' mi' : 'no limit')+'</div></span>'+
-    '<span><button class="btn tiny" onclick="hoursRegion('+r.id+')">Hours &amp; closed dates</button>'+
+    '<span><button class="btn tiny" onclick="hoursRegion('+r.id+')">Hours &amp; closed days</button>'+
     '<button class="btn tiny" onclick="phoneRegion('+r.id+')">Dispatch number</button>'+
     '<button class="btn tiny" onclick="rulesEdit(\'region\','+r.id+')">Minimum &amp; radius</button>'+
     '<button class="btn tiny" onclick="renRegion('+r.id+')">Rename</button>'+

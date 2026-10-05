@@ -358,6 +358,7 @@ def init_db():
     ensure_column(con, "menu_items", "avail_end", "TEXT")
     ensure_column(con, "restaurants", "image", "TEXT")
     ensure_column(con, "restaurants", "logo", "TEXT")
+    ensure_column(con, "drivers", "short_alert_at", "TEXT")
     ensure_column(con, "restaurants", "zup_id", "TEXT")
     ensure_column(con, "restaurants", "eta_min", "INTEGER")
     ensure_column(con, "menu_items", "zup_id", "TEXT")
@@ -1665,6 +1666,87 @@ def stack_match(cand, shift):
             best = (r, detour)
     return best
 
+# ---------------------------------------------------------------- automatic messages
+# Every message the system sends on its own. Owners switch each one on or off in Settings.
+AUTO_MSGS = [
+    ("short_staff", "Busy alert to unavailable drivers", "Texts and messages drivers marked Unavailable when orders are waiting and there aren't enough free drivers to take them.", 1),
+    ("drv_reminder", "Reminder to accept an order", "One reminder when a driver hasn't tapped Received in time.", 1),
+    ("drv_moved", "Order moved off a driver's run", "Tells a driver an order was moved to someone else or put back on hold.", 1),
+    ("drv_cancelled", "Order cancelled or refunded", "Tells the driver not to pick up an order that was cancelled or refunded.", 1),
+    ("drv_reopen", "Order reopened", "Tells the driver a delivered order was reopened and sent back to them.", 1),
+    ("drv_tip", "Tip changed", "Tells the driver when a customer changes the tip.", 1),
+    ("drv_status", "Order marked delivered or picked up", "Confirms to the driver when an order's status is marked.", 1),
+    ("drv_roster", "Moved to Scheduled or Unavailable", "Tells a driver when dispatch moves them between Scheduled and Unavailable.", 1),
+    ("drv_schedule", "Schedule and time off decisions", "Tells a driver when their hours or time off are approved, denied, added, changed or removed.", 1),
+    ("drv_request_ack", "Status request received", "Confirms to a driver that their online or offline request reached dispatch.", 1),
+]
+AUTO_MSG_KEYS = {k: d for k, _l, _h, d in AUTO_MSGS}
+
+def auto_msg_on(key):
+    try:
+        row = db().execute("SELECT value FROM settings WHERE key=?", ("am_" + key,)).fetchone()
+    except Exception:
+        row = None
+    if not row or row["value"] in (None, ""):
+        return bool(AUTO_MSG_KEYS.get(key, 1))
+    return str(row["value"]) == "1"
+
+def auto_msg(key, sql, params):
+    """Write an automatic message only when that message type is switched on in Settings."""
+    if auto_msg_on(key):
+        return db().execute(sql, params)
+    return None
+
+def short_staff_alert():
+    """Orders waiting and not enough free drivers: message every Unavailable driver who works
+    that region, then repeat every few minutes while it stays that way."""
+    try:
+        if not auto_msg_on("short_staff") or not business_is_open():
+            return
+        every = setting("short_staff_every_min") or 15
+        con = db()
+        waiting = con.execute("""SELECT id, region_id FROM orders
+                                 WHERE driver_id IS NULL AND redo_driver_id IS NULL
+                                   AND dispatch_status IN ('queued','held')
+                                   AND COALESCE(region_id,0) NOT IN (SELECT id FROM regions WHERE COALESCE(paused,0)=1)""").fetchall()
+        if not waiting:
+            return
+        free = [d for d in on_shift_drivers() if d["load"] == 0]
+        need = {}
+        for o in waiting:
+            need[o["region_id"]] = need.get(o["region_id"], 0) + 1
+        short = {}
+        for reg, n in need.items():
+            have = sum(1 for d in free if covers(driver_work_regions(d["id"]), reg))
+            if n > have:
+                short[reg] = n
+        if not short:
+            return
+        cut = (dt.datetime.now() - dt.timedelta(minutes=int(every))).strftime("%Y-%m-%d %H:%M:%S")
+        biz = (setting("business_name", str) or "Fleet Delivery").strip() or "Fleet Delivery"
+        rows = con.execute("""SELECT * FROM drivers WHERE roster='unavailable' AND COALESCE(active,1)=1
+                              AND status <> 'online'
+                              AND (short_alert_at IS NULL OR short_alert_at < ?)""", (cut,)).fetchall()
+        for d in rows:
+            mine = driver_region_ids(d["id"])
+            regs = [r for r in short if covers(mine, r)]
+            if not regs:
+                continue
+            n = sum(short[r] for r in regs)
+            body = (biz + ": we're busy. " + str(n) + (" order is" if n == 1 else " orders are") +
+                    " waiting and there aren't enough drivers. Can you come online? Open the driver app and tap Request online.")
+            con.execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                        (d["id"], "system", body, now()))
+            con.execute("UPDATE drivers SET short_alert_at=? WHERE id=?", (now(), d["id"]))
+            ph = phone_digits(d["phone"] or "")
+            if len(ph) >= 10:
+                send_text("+1" + ph[-10:], body)
+            log("busy_alert", "Asked " + d["name"] + " to come online (" + str(n) + " waiting)")
+        con.commit()
+    except Exception as e:
+        print("busy alert skipped:", e)
+
+
 def auto_assign():
     try:
         stamp_regions()
@@ -1770,7 +1852,7 @@ def rebalance_stacks():
                        stack_seq=1 WHERE id=?""", (d["id"], o["id"]))
         con.execute("UPDATE drivers SET last_assigned_at=? WHERE id=?", (now(), d["id"]))
         if old:
-            con.execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+            auto_msg("drv_moved", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                         (old["id"], "system", "Order " + o["code"] + " moved to another driver.", now()))
         log("assign", o["code"] + " -> " + d["name"] + " (moved off " + (old["name"] if old else "?") + ")")
         con.commit()
@@ -2533,7 +2615,7 @@ def cancel_unpaid(o, reason, who="dispatch"):
                     kitchen_status='waiting', hold_reason=?, stack_seq=NULL,
                     delivered_at=COALESCE(delivered_at, ?) WHERE id=?""", (reason, now(), o["id"]))
     if o["driver_id"]:
-        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+        auto_msg("drv_cancelled", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                      (o["driver_id"], "system",
                       "Order " + o["code"] + " was cancelled, the card could not be charged.", now()))
     db().execute("DELETE FROM card_vault WHERE order_id=?", (o["id"],))
@@ -3090,7 +3172,7 @@ def api_track_tip(code):
     db().commit()
     log("order", o["code"] + " customer set the tip to " + money(cents))
     if o["driver_id"] and diff:
-        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+        auto_msg("drv_tip", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                      (o["driver_id"], "system", "Tip on " + o["code"] + " is now " + money(cents) + ".", now()))
         db().commit()
     o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
@@ -4409,6 +4491,7 @@ def api_board():
     payout_sweep()  # update driver pay that is still going through PayPal
     auto_driver_pay_sweep()  # pay drivers for delivered trips when auto pay is on
     remind_unreceived()      # one automatic reminder only if a driver hasn't tapped Received in time
+    short_staff_alert()      # busy: ask Unavailable drivers to come online
     purge_cards()
     try:
         purge_old_orders()
@@ -4645,7 +4728,7 @@ def api_assign():
             for i, row in enumerate(rest, start=1):
                 db().execute("UPDATE orders SET stack_seq=? WHERE id=?", (i, row["id"]))
             newname = db().execute("SELECT name FROM drivers WHERE id=?", (did,)).fetchone()["name"]
-            db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+            auto_msg("drv_moved", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                          (prev_did, "dispatch",
                           "Order " + gone + " moved off your run to " + newname + ".", now()))
         db().execute("UPDATE drivers SET last_assigned_at=? WHERE id=?", (now(), did))
@@ -4702,7 +4785,7 @@ def api_order_status():
                 # finishing a run sends the driver to the back of the rotation
                 db().execute("UPDATE drivers SET last_completed_at=? WHERE id=?", (now(), o["driver_id"]))
             if o["driver_id"]:
-                db().execute("""INSERT INTO messages(driver_id,sender,body,created_at)
+                auto_msg("drv_status", """INSERT INTO messages(driver_id,sender,body,created_at)
                                 VALUES(?,?,?,?)""",
                              (o["driver_id"], "system",
                               "Order " + o["code"] + " marked " + d + ".", now()))
@@ -4922,7 +5005,7 @@ def api_refund():
                         hold_reason='refunded in full', delivered_at=COALESCE(delivered_at, ?)
                         WHERE id=?""", (now(), o["id"]))
         if o["driver_id"] and o["dispatch_status"] not in ("delivered",):
-            db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+            auto_msg("drv_cancelled", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                          (o["driver_id"], "system",
                           "Order " + o["code"] + " was refunded in full and cancelled. Do not pick it up.", now()))
         db().execute("DELETE FROM card_vault WHERE order_id=?", (o["id"],))
@@ -5857,7 +5940,7 @@ def api_driver_roster():
                             "error": "That driver still has " + str(load) + " live order(s)."}), 400
         db().execute("UPDATE drivers SET status='offline', online_since=NULL WHERE id=?", (did,))
         activity_mark("driver", did, None)
-    db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+    auto_msg("drv_roster", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                  (did, "dispatch", "Dispatch moved you to " + roster.replace("_", " ") + ".", now()))
     db().commit()
     auto_assign()
@@ -6405,7 +6488,7 @@ def api_dispatch_schedule_edit():
             return bad
         db().execute("""UPDATE availability SET status=?, decided_by=?, decided_at=?, reply=?
                         WHERE id=?""", (dec, who, now(), b.get("reply", ""), b["id"]))
-        db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
+        auto_msg("drv_schedule", "INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
                      (row["driver_id"], "dispatch", who,
                       DOW_NAMES[row["dow"]] + " " + row["start_time"] + "-" + row["end_time"] +
                       " was " + dec + ".", now()))
@@ -6416,7 +6499,7 @@ def api_dispatch_schedule_edit():
             return jsonify({"ok": False}), 404
         db().execute("""UPDATE time_off SET status=?, decided_by=?, decided_at=?, reply=?
                         WHERE id=?""", (dec, who, now(), b.get("reply", ""), b["id"]))
-        db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
+        auto_msg("drv_schedule", "INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
                      (row["driver_id"], "dispatch", who,
                       "Time off " + row["start_date"] + " to " + row["end_date"] + " was " + dec + ".",
                       now()))
@@ -6456,7 +6539,7 @@ def api_dispatch_schedule_edit():
                          (did, dow, start, end, b.get("note", ""), who, now(), now(), ws, rids))
             body = ("Dispatch put you on for " + DOW_NAMES[dow] + " " + short_date(day) + " " +
                     start + "-" + end + ".")
-        db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
+        auto_msg("drv_schedule", "INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
                      (did, "dispatch", who, body, now()))
     elif op == "add":
         dow = int(b.get("dow", 0))
@@ -6472,7 +6555,7 @@ def api_dispatch_schedule_edit():
         db().execute("""INSERT INTO availability(driver_id,dow,start_time,end_time,note,status,
                         decided_by,decided_at,created_at,region_ids) VALUES(?,?,?,?,?,'approved',?,?,?,?)""",
                      (b["driver_id"], dow, start, end, b.get("note", ""), who, now(), now(), rids))
-        db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
+        auto_msg("drv_schedule", "INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
                      (b["driver_id"], "dispatch", who,
                       "Dispatch put you on for " + DOW_NAMES[dow] + " " + start + "-" + end + ".", now()))
     elif op == "update":
@@ -6491,7 +6574,7 @@ def api_dispatch_schedule_edit():
         db().execute("""UPDATE availability SET dow=?, start_time=?, end_time=?, status='approved',
                         decided_by=?, decided_at=? WHERE id=?""",
                      (int(b.get("dow", row["dow"])), start, end, who, now(), b["id"]))
-        db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
+        auto_msg("drv_schedule", "INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
                      (row["driver_id"], "dispatch", who,
                       "Dispatch changed your " + DOW_NAMES[row["dow"]] + " hours to " +
                       start + "-" + end + ".", now()))
@@ -6499,7 +6582,7 @@ def api_dispatch_schedule_edit():
         row = db().execute("SELECT * FROM availability WHERE id=?", (b["id"],)).fetchone()
         db().execute("DELETE FROM availability WHERE id=?", (b["id"],))
         if row:
-            db().execute("INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
+            auto_msg("drv_schedule", "INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
                          (row["driver_id"], "dispatch", who,
                           "Dispatch took " + DOW_NAMES[row["dow"]] + " " + row["start_time"] +
                           "-" + row["end_time"] + " off your schedule.", now()))
@@ -7531,7 +7614,7 @@ def api_hold():
                                ORDER BY stack_seq ASC""", (had,)).fetchall()
         for i, row in enumerate(rest, start=1):
             db().execute("UPDATE orders SET stack_seq=? WHERE id=?", (i, row["id"]))
-        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+        auto_msg("drv_moved", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                      (had, "dispatch",
                       "Order " + o["code"] + " came off your run and is back on hold with dispatch.",
                       now()))
@@ -7627,7 +7710,7 @@ def api_reopen():
         # until the driver taps Received
         db().execute("""UPDATE orders SET dispatch_status='assigned', delivered_at=NULL, stack_seq=?,
                         paged_at=? WHERE id=?""", (seq, now(), o["id"]))
-        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+        auto_msg("drv_reopen", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                      (o["driver_id"], "dispatch",
                       "Order " + o["code"] + " was reopened and sent back to you. Tap Received to accept it.", now()))
     else:
@@ -7854,6 +7937,15 @@ def dispatch_settings():
         return redirect(url_for("dispatch_login"))
     saved = False
     if request.method == "POST":
+        if "automsg_present" in request.form and is_owner(session.get("dispatcher_id")):
+            for _k, _l, _h, _d in AUTO_MSGS:
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                             ("am_" + _k, "1" if request.form.get("am_" + _k) else "0"))
+            try:
+                _e = max(5, min(120, int(request.form.get("short_staff_every_min") or 15)))
+            except ValueError:
+                _e = 15
+            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('short_staff_every_min',?)", (str(_e),))
         if "cashgps_present" in request.form:
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('allow_cash',?)",
                          ("1" if request.form.get("allow_cash") else "0",))
@@ -8065,7 +8157,7 @@ def dispatch_settings():
         if errs:
             db().commit()
             rows = db().execute("SELECT * FROM settings").fetchall()
-            return render_template("dispatch_settings.html", site=site_text(raw=True), s={r["key"]: r["value"] for r in rows},
+            return render_template("dispatch_settings.html", auto_msgs=AUTO_MSGS, am_on=auto_msg_on, owner_view=is_owner(session.get("dispatcher_id")), site=site_text(raw=True), s={r["key"]: r["value"] for r in rows},
                                    saved=False, errors=errs, bh=business_hours_rows(),
                                    bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
         if "order_tokens" in request.form:
@@ -8074,7 +8166,7 @@ def dispatch_settings():
         db().commit()
         saved = True
     rows = db().execute("SELECT * FROM settings").fetchall()
-    return render_template("dispatch_settings.html", site=site_text(raw=True), s={r["key"]: r["value"] for r in rows}, saved=saved,
+    return render_template("dispatch_settings.html", auto_msgs=AUTO_MSGS, am_on=auto_msg_on, owner_view=is_owner(session.get("dispatcher_id")), site=site_text(raw=True), s={r["key"]: r["value"] for r in rows}, saved=saved,
                            bh=business_hours_rows(), bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
 
 # ---------------------------------------------------------------- chat
@@ -8134,7 +8226,7 @@ def request_status(driver_id, want):
     """A driver can only ASK. Dispatch is the one who flips the switch."""
     db().execute("UPDATE drivers SET pending_request=? WHERE id=?", (want, driver_id))
     log_driver(driver_id, "Driver marked: requested " + want)
-    db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+    auto_msg("drv_request_ack", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                  (driver_id, "system",
                   "Request sent to dispatch: " + want + ". Waiting on dispatch to approve.", now()))
     db().commit()
@@ -8485,6 +8577,7 @@ def api_driver_route():
 @app.get("/api/driver/state")
 def api_driver_state():
     remind_unreceived()
+    short_staff_alert()
     try:
         payout_sweep(); auto_driver_pay_sweep()
     except Exception as e:
@@ -9594,6 +9687,79 @@ def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_
     return {"ok": True, "created": made, "updated": updated, "items": items, "skipped": skipped}
 
 
+# ---------------------------------------------------------------- copy imported pictures onto this server
+_PIC_LOCK = threading.Lock()
+_PIC_STATE = {"running": False, "done": 0, "failed": 0}
+
+def remote_picture_count():
+    con = db()
+    n = con.execute("SELECT COUNT(*) FROM restaurants WHERE image LIKE 'http%'").fetchone()[0]
+    n += con.execute("SELECT COUNT(*) FROM restaurants WHERE logo LIKE 'http%'").fetchone()[0]
+    n += con.execute("SELECT COUNT(*) FROM menu_items WHERE image LIKE 'http%'").fetchone()[0]
+    return n
+
+def _copy_pictures_worker():
+    import hashlib
+    try:
+        con = sqlite3.connect(DB_PATH, timeout=30)
+        con.row_factory = sqlite3.Row
+        os.makedirs(UPLOAD_DIR, exist_ok=True)
+        urls = set()
+        for sql in ("SELECT image u FROM restaurants WHERE image LIKE 'http%'",
+                    "SELECT logo u FROM restaurants WHERE logo LIKE 'http%'",
+                    "SELECT DISTINCT image u FROM menu_items WHERE image LIKE 'http%'"):
+            urls.update(r["u"] for r in con.execute(sql).fetchall())
+        for url in sorted(urls):
+            try:
+                path = urllib.parse.urlparse(url).path
+                ext = os.path.splitext(path)[1].lower()
+                if ext not in (".jpg", ".jpeg", ".png", ".webp", ".gif"):
+                    ext = ".jpg"
+                name = "tt_" + hashlib.sha1(url.encode()).hexdigest()[:20] + ext
+                dest = os.path.join(UPLOAD_DIR, name)
+                if not os.path.exists(dest):
+                    _u = urllib.parse.urlsplit(url)
+                    safe = urllib.parse.urlunsplit((_u.scheme, _u.netloc, urllib.parse.quote(urllib.parse.unquote(_u.path)),
+                                                    _u.query, ""))
+                    req = urllib.request.Request(safe, headers={"User-Agent": "Mozilla/5.0"})
+                    blob = urllib.request.urlopen(req, timeout=20).read()
+                    if len(blob) < 200 or len(blob) > 10 * 1024 * 1024:
+                        raise ValueError("bad size")
+                    with open(dest, "wb") as f:
+                        f.write(blob)
+                con.execute("UPDATE restaurants SET image=? WHERE image=?", (name, url))
+                con.execute("UPDATE restaurants SET logo=? WHERE logo=?", (name, url))
+                con.execute("UPDATE menu_items SET image=? WHERE image=?", (name, url))
+                con.commit()
+                _PIC_STATE["done"] += 1
+            except Exception as e:
+                _PIC_STATE["failed"] += 1
+                print("picture copy failed:", url[:120], e)
+        con.close()
+    finally:
+        _PIC_STATE["running"] = False
+
+def start_picture_copy():
+    """Copies every imported picture into this server's photo folder so nothing depends on the old site."""
+    with _PIC_LOCK:
+        if _PIC_STATE["running"]:
+            return False
+        _PIC_STATE.update({"running": True, "done": 0, "failed": 0})
+    threading.Thread(target=_copy_pictures_worker, daemon=True).start()
+    return True
+
+
+@app.route("/api/dispatch/picture-copy", methods=["GET", "POST"])
+def api_picture_copy():
+    me = session.get("dispatcher_id")
+    if not me or not is_owner(me):
+        return jsonify({"ok": False}), 403
+    started = start_picture_copy() if request.method == "POST" else False
+    return jsonify({"ok": True, "started": started, "running": _PIC_STATE["running"],
+                    "copied": _PIC_STATE["done"], "failed": _PIC_STATE["failed"],
+                    "left": remote_picture_count()})
+
+
 @app.route("/dispatch/import-tigertown", methods=["GET", "POST"])
 def dispatch_import_tigertown():
     me = session.get("dispatcher_id")
@@ -9609,6 +9775,8 @@ def dispatch_import_tigertown():
         result = tigertown_import(pick_ids=set(picks) if picks else set(),
                                   skip_paused=False, replace_menu=True,
                                   region_id=int(rg) if rg.isdigit() else None)
+        if result.get("ok"):
+            start_picture_copy()
     rows = []
     if data:
         here = {}
@@ -9625,6 +9793,7 @@ def dispatch_import_tigertown():
                          "paused": bool(z.get("paused") or "(old)" in low or " dnd" in low),
                          "here": bool(m)})
     return render_template("dispatch_import.html", rows=rows, result=result, regions=all_regions(),
+                           remote_pics=remote_picture_count(),
                            pulled=(data or {}).get("pulled", ""))
 
 @app.get("/healthz")
@@ -9864,7 +10033,7 @@ def remind_unreceived():
                              AND driver_paged_at IS NOT NULL AND driver_paged_at < ?
                              AND COALESCE(driver_reminded_for,'') != driver_paged_at""", (cut,)).fetchall()
     for o in rows:
-        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+        auto_msg("drv_reminder", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                      (o["driver_id"], "system", "Order " + o["code"] + " is still waiting for you. "
                       "Tap Received to accept it, or call dispatch if you can't take it.", now()))
         db().execute("UPDATE orders SET driver_reminded_for=? WHERE id=?", (o["driver_paged_at"], o["id"]))

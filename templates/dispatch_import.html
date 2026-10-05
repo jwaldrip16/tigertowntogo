@@ -8,6 +8,22 @@
     <div class="flash">Done. {{ result.created }} restaurants added, {{ result.updated }} updated, {{ result.items }} menu items loaded.</div>
     {% else %}<div class="flash error">{{ result.error }}</div>{% endif %}
   {% endif %}
+  <div class="panel" id="picBox" style="margin:10px 0">
+    <b>Pictures</b>
+    <div id="picMsg" class="muted small">{% if remote_pics %}{{ remote_pics }} pictures still load from the old TigerTownToGo site.{% else %}All pictures are saved on your own server.{% endif %}</div>
+    {% if remote_pics %}<button type="button" class="btn" onclick="copyPics()">Copy pictures to my server</button>{% endif %}
+  </div>
+  <script>
+  async function picStatus(post){
+    const r = await fetch('/api/dispatch/picture-copy', {method: post ? 'POST' : 'GET'}); const j = await r.json();
+    const m = document.getElementById('picMsg');
+    if (j.running){ m.textContent = 'Copying pictures... ' + j.copied + ' done, ' + j.left + ' left.'; setTimeout(()=>picStatus(false), 3000); }
+    else if (j.left){ m.textContent = j.left + ' pictures still load from the old site' + (j.failed ? ' (' + j.failed + ' could not be copied, try again later).' : '.'); }
+    else { m.textContent = 'All pictures are saved on your own server.'; }
+  }
+  function copyPics(){ picStatus(true); }
+  {% if result and result.ok %}setTimeout(()=>picStatus(false), 1000);{% endif %}
+  </script>
   {% if not rows %}<p>The TigerTownToGo menu file isn't in this upload.</p>{% else %}
   <form method="post" onsubmit="return confirm('Import the checked restaurants? Menus on matching restaurants will be replaced.')">
     <p>

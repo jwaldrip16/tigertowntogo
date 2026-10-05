@@ -72,7 +72,10 @@
   }
   window.ffNav={
     open:function(t){
+      if(WATCH!==null){ try{navigator.geolocation.clearWatch(WATCH);}catch(e){} WATCH=null; }
+      if(LINE&&MAP){ MAP.removeLayer(LINE); LINE=null; }
       TARGET=t; ARRIVED=false; RT=null; CUR=1; FOLLOW=true; SPOKEN={}; OFF=0;
+      var rb=$('navReturn'); if(rb) rb.classList.add('hidden');
       $('navBox').classList.remove('hidden'); document.body.classList.add('navopen');
       $('navDest').textContent=t.label+(t.address?' \u00b7 '+t.address:'');
       $('navNext').textContent='Getting directions...'; $('navDist').textContent=''; $('navEta').textContent=''; $('navLeft').textContent='';
@@ -89,11 +92,23 @@
         WATCH=navigator.geolocation.watchPosition(step,function(){}, {enableHighAccuracy:true,maximumAge:0,timeout:20000});
       },50);
     },
+    hide:function(){
+      $('navBox').classList.add('hidden'); document.body.classList.remove('navopen');
+      var b=$('navReturn'); if(b&&TARGET){ $('navReturnTo').textContent=TARGET.label; b.classList.remove('hidden'); }
+    },
+    show:function(){
+      if(!TARGET) return; var b=$('navReturn'); if(b) b.classList.add('hidden');
+      $('navBox').classList.remove('hidden'); document.body.classList.add('navopen');
+      setTimeout(function(){ if(MAP){ MAP.invalidateSize(); if(FOLLOW&&LASTPOS) MAP.setView(LASTPOS,Math.max(MAP.getZoom(),16)); } },50);
+    },
     close:function(){
+      var rb=$('navReturn'); if(rb) rb.classList.add('hidden');
       $('navBox').classList.add('hidden'); document.body.classList.remove('navopen');
       if(WATCH!==null){ navigator.geolocation.clearWatch(WATCH); WATCH=null; }
       try{ speechSynthesis.cancel(); }catch(e){} try{ if(window.ffAwake) ffAwake.hold(false); }catch(e){}
     },
+    target:function(){ return TARGET; },
+    isOpen:function(){ var b=$('navBox'); return !!(b&&!b.classList.contains('hidden')); },
     recenter:function(){ FOLLOW=true; $('navRecenter').classList.add('hidden'); if(LASTPOS&&MAP) MAP.setView(LASTPOS,16); },
     voice:function(){ VOICE=!VOICE; localStorage.setItem('ff_nav_voice',VOICE?'1':'0'); paintVoice(); if(!VOICE){ try{speechSynthesis.cancel();}catch(e){} } },
     overview:function(){ if(LINE&&MAP){ FOLLOW=false; $('navRecenter').classList.remove('hidden'); MAP.fitBounds(LINE.getBounds(),{padding:[30,30]}); } }

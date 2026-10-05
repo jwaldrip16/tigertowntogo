@@ -11,12 +11,14 @@
 <script src="/static/maptiles.js"></script>
 <script src="/static/nosleep.min.js"></script>
 <script src="/static/keepawake.js"></script>
+<script src="/static/drivernav.js"></script>
 
 <script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/static/sw.js").catch(function(){});}</script>
 {% endblock %}
 {% block body %}
 <div class="head"><h1>{{ driver_name }}</h1>
-  <div><a class="btn small" href="/driver/logout">Sign out</a></div></div>
+  <div class="headbtns"><button class="btn small primary" onclick="openNavPick()">Navigate</button>
+  <a class="btn small" href="/driver/logout">Sign out</a></div></div>
 <div id="lateBar" class="latebar hidden"></div>
 <div id="gate" class="panel hidden" style="text-align:center;padding:28px 16px">
   <h2 id="gateMsg"></h2>
@@ -152,6 +154,43 @@
     <button class="btn tiny" onclick="closeTip()">Back</button>
   </div>
   <div id="tipMsg" class="small muted"></div>
+</div>
+
+<div id="navBox" class="navbox hidden">
+  <div class="navbar"><button class="btn navback" onclick="ffNav.hide()">&lsaquo; Driver app</button>
+    <span class="navbarhint">Directions keep running</span></div>
+  <div class="navtop">
+    <div class="navarrow" id="navArrow">&uarr;</div>
+    <div class="navtxt"><div class="navnext" id="navNext">Getting directions...</div>
+      <div class="navdist" id="navDist"></div></div>
+  </div>
+  <div class="navmapwrap"><div id="navMap" class="navmap"></div>
+    <button id="navRecenter" class="btn navrecenter hidden" onclick="ffNav.recenter()">Re-center</button></div>
+  <div class="navbot">
+    <div class="navinfo"><div><span class="naveta" id="navEta"></span> <span class="muted" id="navLeft"></span></div>
+      <div class="navdest" id="navDest"></div></div>
+    <div class="navbtns">
+      <button class="btn" onclick="openNavPick()">New address</button>
+      <button class="btn" onclick="ffNav.overview()">Overview</button>
+      <button class="btn" id="navVoice" onclick="ffNav.voice()">Voice on</button>
+      <button class="btn" onclick="navMapsApp()">Maps app</button>
+      <button class="btn primary" onclick="ffNav.close()">End</button>
+    </div>
+  </div>
+</div>
+<button id="navReturn" class="navreturn hidden" onclick="ffNav.show()">
+  <span class="navreturnarrow">&#10148;</span><span>Back to directions<small id="navReturnTo"></small></span></button>
+<div id="navPick" class="navpick hidden" onclick="if(event.target===this)closeNavPick()">
+  <div class="navsheet">
+    <div class="row between"><h2>Where to?</h2><button class="btn small" onclick="closeNavPick()">Close</button></div>
+    <form onsubmit="navGoTyped();return false" class="navform">
+      <input id="navAddr" type="search" inputmode="search" autocomplete="street-address" enterkeyhint="go"
+        placeholder="Type an address" aria-label="Address">
+      <button class="btn primary" type="submit">Go</button>
+    </form>
+    <div id="navPickMsg" class="navpickmsg"></div>
+    <div id="navPickList"></div>
+  </div>
 </div>
 {% endblock %}
 {% block scripts %}<script>
@@ -333,11 +372,40 @@ function renderStatus(d){
     '<button class="btn tiny" onclick="ask(\'break\')">Request break</button>'+
     '<button class="btn tiny" onclick="ask(\'offline\')">Request clock out</button></div></div>';
 }
+function isCalledIn(o){ return o.order_method==='phone' || o.order_method==='online'; }
+function kitchenLabel(o){
+  const s = o.kitchen_status, ph = o.order_method==='phone';
+  if (s==='preparing') return 'Preparing';
+  if (s==='ready') return 'Ready';
+  if (isCalledIn(o)){
+    if (s==='waiting') return 'Not released yet';
+    if (s==='pending'){
+      if (o.manual_state==='ordering') return ph ? 'Calling it in now' : 'Ordering online now';
+      return ph ? 'Not called in yet' : 'Not ordered online yet';
+    }
+  } else {
+    if (s==='waiting') return 'Not sent to kitchen';
+    if (s==='pending') return 'Sent to kitchen';
+  }
+  return s || '';
+}
+function callInLine(o){
+  if (!isCalledIn(o)) return '';
+  const ph = o.order_method==='phone', by = o.manual_by ? ' by '+o.manual_by : '';
+  let t;
+  if (o.manual_state==='placed') t = '<strong>'+(ph?'Called in':'Ordered online')+(o.manual_time?' '+o.manual_time:'')+'</strong>'+by;
+  else if (o.manual_state==='ordering') t = (ph?'Dispatch is calling it in now':'Dispatch is ordering online now')+by;
+  else if (o.kitchen_status==='waiting') t = 'Dispatch hasn\'t released it yet';
+  else if (o.kitchen_status==='preparing' || o.kitchen_status==='ready') t = (ph?'Called in':'Ordered online');
+  else t = '<strong>'+(ph?'Not called in yet':'Not ordered online yet')+'</strong>';
+  return '<div class="detail-row"><span class="lbl">'+(ph?'Phone order':'Online order')+'</span><span>'+t+'</span></div>';
+}
 function detailBlock(o){
   const lines = (o.lines || o.items.map(i=>i.qty+' x '+i.name))
     .map(l=>'<li>'+l+'</li>').join('');
   return '<div class="detail">'+
     '<div class="paybar">Delivery fee <b>'+o.fee+'</b> &middot; Tip <b>'+o.tip+'</b>'+(o.cash?' &middot; cash':'')+'</div>'+
+    callInLine(o)+
     '<div class="detail-row"><span class="lbl">Pick up</span><span>'+o.restaurant+
       '<br><span class="muted small">'+o.restaurant_address+'</span></span></div>'+
     '<div class="detail-row"><span class="lbl">Deliver to</span><span><strong>'+o.customer+'</strong>'+
@@ -358,7 +426,7 @@ function detailBlock(o){
       ? '<div class="detail-row"><span class="lbl">Kitchen</span><span>'+
         (o.timer_seconds!==null && o.kitchen_status==='preparing'
           ? Math.max(0,Math.ceil(o.timer_seconds/60))+' min left on the timer'
-          : o.kitchen_status)+'</span></div>' : '')+
+          : kitchenLabel(o))+'</span></div>' : '')+
     '</div>';
 }
 function renderRun(stack, total){
@@ -368,7 +436,7 @@ function renderRun(stack, total){
     ' &middot; '+o.code+'</strong> '+
     (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+
     (o.token ? '<span class="pill blue">'+o.token+'</span> ' : '')+
-    '<span class="pill '+(o.kitchen_status==='ready'?'green':'amber')+'">'+o.kitchen_status+'</span> '+
+    '<span class="pill '+(o.kitchen_status==='ready'?'green':'amber')+'">'+kitchenLabel(o)+'</span> '+
     '<span class="pill blue">'+o.dispatch_status.replace('_',' ')+'</span></div>'+
     detailBlock(o)+
     ((o.timeline||[]).length ? '<div class="trailline"><b>Times:</b> '+
@@ -402,8 +470,72 @@ function mapsUrl(ll, address){
 }
 function navStop(ix, which){
   const o = (LAST_STACK || [])[ix]; if (!o) return;
-  const url = which === 'r' ? mapsUrl(o.restaurant_ll, o.restaurant_address) : mapsUrl(o.customer_ll, o.address);
-  window.open(url, '_blank');
+  if (which === 'r') navGoTo(o.restaurant_ll, o.restaurant || 'Restaurant', o.restaurant_address);
+  else navGoTo(o.customer_ll, o.customer || 'Customer', o.address);
+}
+// ---- built-in navigation: go to a stop or any typed address
+function navEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+function navRecent(){ try { return JSON.parse(localStorage.getItem('ff_nav_recent')||'[]'); } catch(e){ return []; } }
+function navRemember(t){
+  const r = navRecent().filter(x=>x.address !== t.address); r.unshift({label:t.label, address:t.address, ll:t.ll});
+  localStorage.setItem('ff_nav_recent', JSON.stringify(r.slice(0,5)));
+}
+function navPickRows(){
+  const rows = [];
+  (LAST_STACK || []).forEach((o,ix)=>{
+    if (o.address) rows.push({k:'c'+ix, kind:'Customer', label:o.customer||'Customer', address:o.address, ll:o.customer_ll, stop:ix+1});
+    if (o.restaurant_address) rows.push({k:'r'+ix, kind:'Restaurant', label:o.restaurant||'Restaurant', address:o.restaurant_address, ll:o.restaurant_ll, stop:ix+1});
+  });
+  navRecent().forEach((x,i)=>{ if(!rows.some(r=>r.address===x.address)) rows.push({k:'h'+i, kind:'Recent', label:x.label, address:x.address, ll:x.ll}); });
+  return rows;
+}
+let NAV_ROWS = [];
+function openNavPick(){
+  NAV_ROWS = navPickRows();
+  document.getElementById('navPickMsg').textContent = '';
+  document.getElementById('navPickList').innerHTML = NAV_ROWS.length ? NAV_ROWS.map((r,i)=>
+    '<button class="navrow" onclick="navPickRow('+i+')"><span class="navkind '+r.kind.toLowerCase()+'">'+r.kind+(r.stop?' &middot; stop '+r.stop:'')+'</span>'+
+    '<b>'+navEsc(r.label)+'</b><span class="muted">'+navEsc(r.address)+'</span></button>').join('')
+    : '<p class="muted">Your stops will show here so you can tap one. You can also type any address above.</p>';
+  document.getElementById('navPick').classList.remove('hidden');
+  document.body.classList.add('navopen');
+  const inp = document.getElementById('navAddr'); inp.value = '';
+  setTimeout(()=>{ try { inp.focus(); } catch(e){} }, 60);
+}
+function closeNavPick(){
+  document.getElementById('navPick').classList.add('hidden');
+  if (!ffNav.isOpen()) document.body.classList.remove('navopen');
+}
+function navPickRow(i){ const r = NAV_ROWS[i]; if (r) navGoTo(r.ll, r.label, r.address); }
+function navGoTyped(){
+  const v = document.getElementById('navAddr').value.trim();
+  if (v.length < 3){ document.getElementById('navPickMsg').textContent = 'Type an address first.'; return; }
+  navGoTo(null, v, v, true);
+}
+async function navGoTo(ll, label, address, typed){
+  const msg = document.getElementById('navPickMsg');
+  if (!ll){
+    if (!address){ alert('That stop has no address.'); return; }
+    if (msg) msg.textContent = 'Finding that address...';
+    const near = (typeof LAST_FIX !== 'undefined' && LAST_FIX) ? '&near='+LAST_FIX.latitude+','+LAST_FIX.longitude : '';
+    let r = null;
+    try { r = await jget('/api/driver/geocode?q='+encodeURIComponent(address)+near); } catch(e){ r = null; }
+    if (!r || !r.ok){
+      const err = (r && r.error) || "Couldn't find that address. Check your signal and try again.";
+      if (!document.getElementById('navPick').classList.contains('hidden')) msg.textContent = err; else alert(err);
+      return;
+    }
+    ll = [r.lat, r.lng];
+    if (typed){ address = r.formatted || address; label = (r.formatted || address).split(',')[0]; }
+  }
+  const t = {ll: ll, label: label, address: address};
+  navRemember(t);
+  document.getElementById('navPick').classList.add('hidden');
+  ffNav.open(t);
+}
+function navMapsApp(){
+  const t = ffNav.target(); if (!t) return;
+  window.open(mapsUrl(t.ll, t.address), '_blank');
 }
 function newOrderAlert(stack){
   // a stop still sitting at "assigned" has not been accepted by the driver yet
