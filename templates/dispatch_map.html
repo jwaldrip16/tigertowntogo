@@ -85,9 +85,7 @@ async function refresh(){
       rows.push('<div class="muted small">No location yet. The driver needs to open their app and allow '+
         'location once.</div>');
     }
-    rows.push('<div class="muted small">'+(d.roster||'scheduled').replace('_',' ')+' · '+
-      (d.bg_gps ? '<span class="pill green">Background GPS on</span>'
-                : 'Background GPS off (Tracking ID '+(d.track_id||'')+')')+'</div>');
+    rows.push('<div class="muted small">'+(d.roster||'scheduled').replace('_',' ')+'</div>');
     const div = document.createElement('div');
     div.className = 'card pad';
     div.innerHTML = rows.join('');

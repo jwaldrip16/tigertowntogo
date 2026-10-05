@@ -396,6 +396,7 @@ def init_db():
     ensure_column(con, "drivers", "last_addr_lat", "REAL")
     ensure_column(con, "drivers", "last_addr_lng", "REAL")
     ensure_column(con, "drivers", "track_id", "TEXT")
+    ensure_column(con, "drivers", "left_app_at", "TEXT")
     ensure_column(con, "drivers", "last_bg_at", "TEXT")
     # customer accounts, saved cards (kept at PayPal), rewards points and gift cards
     con.executescript("""
@@ -5587,10 +5588,7 @@ def miles_between(lat1, lng1, lat2, lng2):
     a = math.sin(dp / 2) ** 2 + math.cos(p1) * math.cos(p2) * math.sin(dl / 2) ** 2
     return round(R * 2 * math.asin(math.sqrt(a)) * 1.3, 1)
 
-# ---- Background GPS from the Traccar Client app (free on iPhone and Android) ----
-# The driver app is a web page, and phones pause web pages while the driver is in
-# Google Maps or Apple Maps. Traccar Client keeps sending location in the background.
-# Each driver's phone uses their own Tracking ID as its "Device identifier".
+# ---- Driver tracking ID (kept for older records) ----
 
 def driver_track_id(did):
     row = db().execute("SELECT track_id FROM drivers WHERE id=?", (did,)).fetchone()
@@ -5670,14 +5668,7 @@ def api_track_comment(code):
 def cash_allowed():
     return (setting("allow_cash", str) or "0") == "1"
 
-DEFAULT_GPS_HELP = """{business}: set up GPS so dispatch can see you while you use Google Maps or Apple Maps.
-1. Install Traccar Client (free). iPhone: https://itunes.apple.com/us/app/traccar-client/id843156974  Android: https://play.google.com/store/apps/details?id=org.traccar.client
-2. Open it. Device identifier: {id}
-3. Server URL: {url}
-4. Location accuracy: High. Distance: 50.
-5. Turn on Continuous tracking (or tap Start). Allow location Always.
-6. Android: set Traccar Client battery use to Unrestricted.
-Turn it on when you go online, off when you go offline. Questions? Call dispatch {phone}."""
+DEFAULT_GPS_HELP = ""
 
 def gps_help_for(d):
     t = (setting("gps_help_text", str) or "").strip() or DEFAULT_GPS_HELP
@@ -5695,51 +5686,16 @@ def gps_settings_ctx():
             "texting": texting_on(), "allow_cash": cash_allowed()}
 app.jinja_env.globals["gps_settings_ctx"] = gps_settings_ctx
 
-@app.post("/api/dispatch/gps-text")
-def api_gps_text():
-    if not dispatcher_required():
-        return jsonify({"ok": False}), 403
-    b = request.get_json(force=True) or {}
-    q = "SELECT * FROM drivers WHERE COALESCE(active,1)=1"
-    args = ()
-    if b.get("driver_id"):
-        q, args = "SELECT * FROM drivers WHERE id=?", (int(b["driver_id"]),)
-    rows = db().execute(q, args).fetchall()
-    if not rows:
-        return jsonify({"ok": False, "error": "No drivers to text."}), 400
-    texted, app_only, links = [], [], []
-    for d in rows:
-        body = gps_help_for(d)
-        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
-                     (d["id"], "dispatcher", body, now()))
-        ph = phone_digits(d["phone"] or "")
-        if ph and send_text("+1" + ph[-10:], body):
-            texted.append(d["name"])
-        else:
-            app_only.append(d["name"])
-            if ph:
-                links.append({"name": d["name"], "phone": nice_phone(ph),
-                              "sms": "sms:" + ph[-10:] + "?&body=" + urllib.parse.quote(body)})
-    db().commit()
-    log("gps_help", "GPS setup sent to " + ", ".join(d["name"] for d in rows))
-    msg = ""
-    if texted:
-        msg += "Texted " + ", ".join(texted) + ". "
-    if app_only:
-        msg += "Sent to the driver chat for " + ", ".join(app_only) + "." + ("" if texting_on() else
-               " Text messages need Twilio set up, so tap a name below to text it from your phone.")
-    return jsonify({"ok": True, "message": msg.strip(), "links": links})
-
 def gps_server_url():
     root = request.url_root
     host = request.host.split(":")[0]
     if root.startswith("http://") and host not in ("localhost", "127.0.0.1") and not host.startswith("192.168."):
         root = "https://" + root[len("http://"):]
-    return root.rstrip("/") + "/api/gps/traccar"
+    return root.rstrip("/")
 
 
 def _gps_ts(v):
-    """Traccar sends ISO time, or seconds / milliseconds since 1970. Returns local time."""
+    """ISO time, or seconds / milliseconds since 1970. Returns local time."""
     if v in (None, ""):
         return None
     try:
@@ -5758,65 +5714,48 @@ def _gps_ts(v):
         return None
 
 
-@app.route("/api/gps/traccar", methods=["GET", "POST"])
-@app.route("/api/gps/traccar/", methods=["GET", "POST"])
-def api_gps_traccar():
-    def num(v):
-        try:
-            return float(v)
-        except (TypeError, ValueError):
-            return None
-    fixes = []
-    data = request.get_json(silent=True)
-    if isinstance(data, dict) and ("location" in data or "device_id" in data):
-        dev = str(data.get("device_id") or data.get("id") or "")
-        locs = data.get("location")
-        for loc in (locs if isinstance(locs, list) else [locs]):
-            if isinstance(loc, dict):
-                c = loc.get("coords") or {}
-                fixes.append((num(c.get("latitude")), num(c.get("longitude")),
-                              num(c.get("accuracy")), _gps_ts(loc.get("timestamp"))))
-    else:
-        f = request.values
-        dev = f.get("id") or f.get("deviceid") or ""
-        lat, lng = num(f.get("lat")), num(f.get("lon"))
-        if (lat is None or lng is None) and f.get("location"):
-            parts = f.get("location").split(",")
-            if len(parts) >= 2:
-                lat, lng = num(parts[0]), num(parts[1])
-        fixes.append((lat, lng, num(f.get("accuracy")), _gps_ts(f.get("timestamp"))))
-    dev = re.sub(r"\D", "", dev)
-    # Always answer 200 so the phone doesn't pile up retries for a fix we won't use.
-    if not dev:
-        return jsonify({"ok": False, "error": "no device id"})
-    d = db().execute("SELECT * FROM drivers WHERE track_id=?", (dev,)).fetchone()
-    if not d:
-        return jsonify({"ok": False, "error": "unknown tracking id"})
-    good = [x for x in fixes if x[0] is not None and x[1] is not None
-            and -90 <= x[0] <= 90 and -180 <= x[1] <= 180 and (x[2] is None or x[2] <= 1000)]
-    if not good:
-        return jsonify({"ok": False, "error": "no usable fix"})
-    if d["status"] == "offline" or not (d["active"] if "active" in d.keys() and d["active"] is not None else 1):
-        # Off shift means no tracking: nothing from this fix is saved, logged, or shown.
-        return jsonify({"ok": True, "tracking": False})
-    db().execute("UPDATE drivers SET last_bg_at=? WHERE id=?", (now(), d["id"]))
-    lat, lng, acc, ts = max(good, key=lambda x: x[3] or dt.datetime.now())
-    t = ts if ts and ts <= dt.datetime.now() else dt.datetime.now()
-    if d["last_loc_at"]:
-        try:
-            if t <= dt.datetime.fromisoformat(d["last_loc_at"]):
-                db().commit()
-                return jsonify({"ok": True, "tracking": True, "stale": True})
-        except ValueError:
-            pass
-    db().execute("UPDATE drivers SET last_lat=?,last_lng=?,last_loc_at=? WHERE id=?",
-                 (lat, lng, t.isoformat(timespec="seconds"), d["id"]))
-    db().commit()
-    if (dt.datetime.now() - t).total_seconds() < 180:
-        addr = update_driver_addr(d["id"], lat, lng)
-        log_gps_fix(d["id"], lat, lng, addr)
-    return jsonify({"ok": True, "tracking": True})
+# ---- Drivers stay in the app while on a run (no Google Maps / Apple Maps) ----
+def _driver_on_run(did):
+    return db().execute("""SELECT code FROM orders WHERE driver_id=? AND dispatch_status NOT IN
+                           ('assigned','delivered','cancelled')""", (did,)).fetchall()
 
+@app.post("/api/driver/app-left")
+def api_driver_app_left():
+    did = session.get("driver_id")
+    if not did:
+        return jsonify({"ok": False}), 403
+    runs = _driver_on_run(did)
+    if not runs:
+        return jsonify({"ok": True})
+    db().execute("UPDATE drivers SET left_app_at=? WHERE id=?", (now(), did))
+    log_driver(did, "Left the driver app during a delivery")
+    db().commit()
+    return jsonify({"ok": True})
+
+@app.post("/api/driver/app-back")
+def api_driver_app_back():
+    did = session.get("driver_id")
+    if not did:
+        return jsonify({"ok": False}), 403
+    b = request.get_json(silent=True) or {}
+    try:
+        secs = max(0, int(b.get("secs") or 0))
+    except (TypeError, ValueError):
+        secs = 0
+    d = db().execute("SELECT name,left_app_at FROM drivers WHERE id=?", (did,)).fetchone()
+    if not d or not d["left_app_at"]:
+        return jsonify({"ok": True})
+    db().execute("UPDATE drivers SET left_app_at=NULL WHERE id=?", (did,))
+    mins = "%d min %d sec" % (secs // 60, secs % 60) if secs >= 60 else "%d sec" % secs
+    log_driver(did, "Came back to the driver app after " + mins)
+    if secs >= 20:
+        codes = ", ".join(r["code"] for r in _driver_on_run(did))
+        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                     (did, "driver", "[Automatic] I left the driver app for " + mins + " during a delivery"
+                      + (" (" + codes + ")" if codes else "") + ".", now()))
+        log("driver", (d["name"] or "Driver") + " left the driver app for " + mins + " during a delivery")
+    db().commit()
+    return jsonify({"ok": True})
 
 @app.post("/api/driver/ping")
 def api_driver_ping():
@@ -7949,10 +7888,6 @@ def dispatch_settings():
         if "cashgps_present" in request.form:
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('allow_cash',?)",
                          ("1" if request.form.get("allow_cash") else "0",))
-            _g = (request.form.get("gps_help_text") or "").strip()[:1500]
-            if _g == DEFAULT_GPS_HELP.strip():
-                _g = ""
-            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('gps_help_text',?)", (_g,))
         if "site_present" in request.form:
             for _k, _d, _n in SITE_TEXT:
                 if _k in request.form:
@@ -8568,7 +8503,7 @@ def api_driver_route():
         if rt:
             break
     if not rt:
-        return jsonify({"ok": False, "error": "Couldn't get directions right now. Use Maps app instead."}), 502
+        return jsonify({"ok": False, "error": "Couldn't get directions right now. Check your signal and try again."}), 502
     if len(_ROUTE_CACHE) > 500:
         _ROUTE_CACHE.clear()
     _ROUTE_CACHE[key] = (time.time(), rt)
@@ -9642,7 +9577,7 @@ def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_
                            image=CASE WHEN image IS NULL OR image='' THEN ? ELSE image END,
                            logo=?, address=CASE WHEN address IS NULL OR address='' THEN ? ELSE address END,
                            lat=COALESCE(lat,?), lng=COALESCE(lng,?), hours=?, eta_min=?,
-                           min_order_cents=COALESCE(min_order_cents,?) WHERE id=?""",
+                           min_order_cents=? WHERE id=?""",
                         (str(z["zid"]), z["cuisine"], z["photo"], z["logo"], z["address"], z["lat"], z["lng"],
                          hours, z.get("eta_min"), z.get("min_order_cents") or None, rid))
             updated += 1
@@ -9769,7 +9704,24 @@ def dispatch_import_tigertown():
         return "Only an owner can import restaurants.", 403
     data = tigertown_data()
     result = None
-    if request.method == "POST":
+    if request.method == "POST" and request.form.get("action") == "match_min":
+        fixed = 0
+        if data:
+            con = db()
+            byz = {}
+            for r in con.execute("SELECT id,name,zup_id,min_order_cents FROM restaurants").fetchall():
+                byz["z" + str(r["zup_id"])] = r
+                byz.setdefault(_norm_name(r["name"]), r)
+            for z in data["restaurants"]:
+                m = byz.get("z" + str(z["zid"])) or byz.get(_norm_name(z["name"]))
+                want = z.get("min_order_cents") or None
+                if m and m["min_order_cents"] != want:
+                    con.execute("UPDATE restaurants SET min_order_cents=? WHERE id=?", (want, m["id"]))
+                    log("settings", "Minimum order for " + m["name"] + " set to " + (money(want) if want else "none") + " to match TigerTownToGo")
+                    fixed += 1
+            con.commit()
+        result = {"ok": True, "min_fixed": fixed}
+    elif request.method == "POST":
         picks = request.form.getlist("pick")
         rg = request.form.get("region_id") or ""
         result = tigertown_import(pick_ids=set(picks) if picks else set(),
@@ -9780,7 +9732,7 @@ def dispatch_import_tigertown():
     rows = []
     if data:
         here = {}
-        for r in db().execute("SELECT id,name,zup_id FROM restaurants").fetchall():
+        for r in db().execute("SELECT id,name,zup_id,min_order_cents FROM restaurants").fetchall():
             here[_norm_name(r["name"])] = r
             if r["zup_id"]:
                 here["z" + str(r["zup_id"])] = r
@@ -9788,6 +9740,9 @@ def dispatch_import_tigertown():
             low = z["name"].lower()
             m = here.get("z" + str(z["zid"])) or here.get(_norm_name(z["name"]))
             rows.append({"zid": z["zid"], "name": z["name"], "cuisine": z["cuisine"], "address": z["address"],
+                         "min_old": z.get("min_order_cents") or 0,
+                         "min_here": (m["min_order_cents"] if m else None),
+                         "min_ok": (not m) or ((m["min_order_cents"] or 0) == (z.get("min_order_cents") or 0)),
                          "photo": z["photo"], "logo": z["logo"], "items": len(z["items"]),
                          "pics": sum(1 for i in z["items"] if i["image"]),
                          "paused": bool(z.get("paused") or "(old)" in low or " dnd" in low),

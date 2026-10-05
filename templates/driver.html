@@ -28,20 +28,6 @@
 </div>
 <div class="panel" id="status"></div>
 <div class="row"><span class="muted small" id="locNote">Checking your location...</span></div>
-<details class="panel small" id="bgGps" {% if not bg_seen %}open{% endif %}>
-  <summary><strong>Keep GPS on while you use Google Maps or Apple Maps</strong>
-    {% if bg_seen %}<span class="pill green">Set up</span>{% else %}<span class="pill amber">Not set up</span>{% endif %}</summary>
-  <p class="muted">Your phone pauses this app while you're in a maps app. Traccar Client keeps your location going to dispatch. One-time setup:</p>
-  <ol>
-    <li>Install <b>Traccar Client</b> from the App Store or Google Play (<a href="https://www.traccar.org/client/" target="_blank">app info</a>).</li>
-    <li>Open it and set <b>Device identifier</b> to <b>{{ track_id }}</b>.</li>
-    <li>Set <b>Server URL</b> to <b>{{ gps_url }}</b></li>
-    <li>Set Location accuracy to <b>High</b> and Distance to <b>50</b>.</li>
-    <li>Turn on <b>Continuous tracking</b> (or Start). When asked, allow location <b>Always</b>.</li>
-    <li>Android: set battery use for Traccar Client to <b>Unrestricted</b>.</li>
-  </ol>
-  <p class="muted">Turn it on when you go online and off when you go offline. While you're offline nothing it sends is saved or shown to dispatch.</p>
-</details>
 <div class="row"><span class="muted small" id="soundNote"></span>
   <button class="btn tiny" id="soundBtn" onclick="toggleSound()">Sound</button>
   <button class="btn tiny" data-awake-btn onclick="ffAwake.toggle()">Keep screen awake</button></div>
@@ -71,9 +57,6 @@
     <div class="muted small callnote"></div>
   </section>
   <section><h2>Your run</h2>
-    <div class="row small muted" style="gap:6px;align-items:center">Directions open in
-      <button id="mapsGoogle" class="btn tiny" onclick="setMapsApp('google')">Google Maps</button>
-      <button id="mapsApple" class="btn tiny" onclick="setMapsApp('apple')">Apple Maps</button></div>
     <div id="stack"></div></section>
 </div>
 
@@ -173,7 +156,6 @@
       <button class="btn" onclick="openNavPick()">New address</button>
       <button class="btn" onclick="ffNav.overview()">Overview</button>
       <button class="btn" id="navVoice" onclick="ffNav.voice()">Voice on</button>
-      <button class="btn" onclick="navMapsApp()">Maps app</button>
       <button class="btn primary" onclick="ffNav.close()">End</button>
     </div>
   </div>
@@ -328,7 +310,7 @@ function renderDone(list){
       '<div class="small">Order total ' + o.total + '</div>' +
       '<div class="row" style="gap:6px;flex-wrap:wrap;margin-top:6px">' +
         (o.phone ? '<a class="btn tiny" href="tel:' + ph + '">Call customer</a><a class="btn tiny" href="sms:' + ph + '">Text customer</a>' : '') +
-        (o.address ? '<a class="btn tiny" target="_blank" href="' + mapsUrl(o.customer_ll, o.address) + '">Map</a>' : '') +
+        (o.address ? '<button class="btn tiny" onclick=\'navGoTo(' + JSON.stringify(o.customer_ll||null) + ',' + JSON.stringify(o.customer||'Customer').replace(/'/g,"&#39;") + ',' + JSON.stringify(o.address).replace(/'/g,"&#39;") + ')\'>Directions</button>' : '') +
       '</div></div>';
   }).join('') : '<p class="muted">No completed orders in the last 14 hours.</p>';
 }
@@ -450,24 +432,7 @@ function renderRun(stack, total){
     stageButtons(o)+'</div></div>'
   ).join('') || '<p class="muted">Nothing assigned to you right now.</p>';
 }
-// Directions open in Google Maps or Apple Maps (the driver picks; iPhone defaults to Apple Maps).
-function mapsApp(){
-  const saved = localStorage.getItem('ffMapsApp');
-  if (saved === 'google' || saved === 'apple') return saved;
-  return /iPhone|iPad|iPod|Macintosh/.test(navigator.userAgent) && 'ontouchend' in document ? 'apple' : 'google';
-}
-function setMapsApp(v){ localStorage.setItem('ffMapsApp', v); paintMapsApp(); }
-function paintMapsApp(){
-  const a = mapsApp();
-  const g = document.getElementById('mapsGoogle'), ap = document.getElementById('mapsApple');
-  if (g) g.className = 'btn tiny' + (a === 'google' ? ' primary' : '');
-  if (ap) ap.className = 'btn tiny' + (a === 'apple' ? ' primary' : '');
-}
-function mapsUrl(ll, address){
-  const dest = ll ? (ll[0] + ',' + ll[1]) : (address || '');
-  if (mapsApp() === 'apple') return 'https://maps.apple.com/?daddr=' + encodeURIComponent(dest) + '&dirflg=d';
-  return 'https://www.google.com/maps/dir/?api=1&travelmode=driving&destination=' + encodeURIComponent(dest);
-}
+// Directions only run inside this app (no Google Maps or Apple Maps).
 function navStop(ix, which){
   const o = (LAST_STACK || [])[ix]; if (!o) return;
   if (which === 'r') navGoTo(o.restaurant_ll, o.restaurant || 'Restaurant', o.restaurant_address);
@@ -532,10 +497,6 @@ async function navGoTo(ll, label, address, typed){
   navRemember(t);
   document.getElementById('navPick').classList.add('hidden');
   ffNav.open(t);
-}
-function navMapsApp(){
-  const t = ffNav.target(); if (!t) return;
-  window.open(mapsUrl(t.ll, t.address), '_blank');
 }
 function newOrderAlert(stack){
   // a stop still sitting at "assigned" has not been accepted by the driver yet
@@ -781,8 +742,24 @@ function startLocation(){
   setInterval(function(){ sendFix(false); }, 3000);
   setInterval(keepAwake, 5000);
   document.addEventListener('visibilitychange', function(){
-    if (document.visibilityState === 'visible'){ WAKE = null; keepAwake(); sendFix(true); }
+    if (document.visibilityState === 'visible'){ WAKE = null; keepAwake(); sendFix(true); appBack(); }
+    else appLeft();
   });
+}
+// Drivers stay in this app while on a run. Leaving it (for Google Maps, Apple Maps or
+// anything else) tells dispatch, and the driver is reminded when they come back.
+let LEFT_AT = 0;
+function onRun(){ return (LAST_STACK || []).some(o => o.dispatch_status && o.dispatch_status !== 'assigned'); }
+function appLeft(){
+  if (!onRun()) return;
+  LEFT_AT = Date.now();
+  try { navigator.sendBeacon('/api/driver/app-left', new Blob([JSON.stringify({})], {type:'application/json'})); } catch(e){}
+}
+function appBack(){
+  if (!LEFT_AT) return;
+  const secs = Math.round((Date.now() - LEFT_AT) / 1000); LEFT_AT = 0;
+  fetch('/api/driver/app-back', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({secs: secs})}).catch(()=>{});
+  if (secs >= 20) alert('Please stay in the driver app during deliveries. Use the Directions buttons here instead of Google Maps or Apple Maps. Dispatch was told you left the app.');
 }
 // Phones pause GPS when the screen sleeps, so the screen stays on while the driver is on shift.
 let WAKE = null;
@@ -942,5 +919,4 @@ async function copyLast(){
 loadWeek();
 try { ffNotify.button('notifBtn','notifNote'); } catch(e){}
 
-paintMapsApp();
 </script>{% endblock %}

@@ -4,7 +4,9 @@
   <h2>Import from TigerTownToGo</h2>
   <p class="muted">Restaurants, photos, logos, hours, menus, prices, sizes and add-ons pulled from the old TigerTownToGo site{% if pulled %} on {{ pulled }}{% endif %}. A restaurant you already have with the same name gets updated, not duplicated, and its menu is replaced with the imported one. New restaurants get a random 4-digit kitchen PIN you can change on the Restaurants page.</p>
   {% if result %}
-    {% if result.ok %}
+    {% if result.ok and result.min_fixed is defined %}
+    <div class="flash">Minimum orders matched. {{ result.min_fixed }} restaurant{{ '' if result.min_fixed == 1 else 's' }} changed.</div>
+    {% elif result.ok %}
     <div class="flash">Done. {{ result.created }} restaurants added, {{ result.updated }} updated, {{ result.items }} menu items loaded.</div>
     {% else %}<div class="flash error">{{ result.error }}</div>{% endif %}
   {% endif %}
@@ -24,6 +26,12 @@
   function copyPics(){ picStatus(true); }
   {% if result and result.ok %}setTimeout(()=>picStatus(false), 1000);{% endif %}
   </script>
+  {% set off = rows|selectattr('min_ok','equalto',false)|list %}
+  <div class="panel" style="margin:10px 0">
+    <b>Minimum orders</b>
+    <div class="muted small">{% if off %}{{ off|length }} restaurant{{ '' if off|length == 1 else 's' }} here {{ 'has' if off|length == 1 else 'have' }} a different minimum than the old TigerTownToGo site (marked in red below).{% else %}Every restaurant here matches the old TigerTownToGo minimum.{% endif %}</div>
+    {% if off %}<form method="post" style="margin-top:6px"><input type="hidden" name="action" value="match_min"><button class="btn primary">Match all minimums</button></form>{% endif %}
+  </div>
   {% if not rows %}<p>The TigerTownToGo menu file isn't in this upload.</p>{% else %}
   <form method="post" onsubmit="return confirm('Import the checked restaurants? Menus on matching restaurants will be replaced.')">
     <p>
@@ -36,13 +44,14 @@
       <button class="btn primary">Import checked</button>
     </p>
     <table class="tbl">
-      <tr><th></th><th>Restaurant</th><th>Items</th><th>Item photos</th><th></th></tr>
+      <tr><th></th><th>Restaurant</th><th>Minimum</th><th>Items</th><th>Item photos</th><th></th></tr>
       {% for r in rows %}
       <tr>
         <td><input type="checkbox" name="pick" value="{{ r.zid }}" data-paused="{{ 1 if r.paused else 0 }}" {{ '' if r.paused else 'checked' }}></td>
         <td><div style="display:flex;gap:8px;align-items:center">
           {% if r.logo %}<img src="{{ r.logo }}" alt="" style="width:36px;height:36px;object-fit:contain;border-radius:6px;background:#fff">{% endif %}
           <div><b>{{ r.name }}</b><div class="muted small">{{ r.cuisine }} · {{ r.address }}</div></div></div></td>
+        <td>{% if r.min_here is none and not r.here %}{{ r.min_old|money }}{% elif r.min_ok %}{{ r.min_old|money }}{% else %}<span class="bad">{{ (r.min_here or 0)|money }} here</span><br><span class="muted small">{{ r.min_old|money }} on old site</span>{% endif %}</td>
         <td>{{ r.items }}</td><td>{{ r.pics }}</td>
         <td>{% if r.here %}<span class="pill green">Already here, will update</span>{% endif %}
             {% if r.paused %}<span class="pill grey">Paused on old site</span>{% endif %}</td>

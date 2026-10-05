@@ -224,33 +224,8 @@ async function setLogo(inp){
   <h2>Payments</h2>
   <label><input type="checkbox" name="allow_cash" value="1" {% if G.allow_cash %}checked{% endif %}> Take cash orders</label>
   <p class="small muted">Off: no cash orders anywhere (website, dispatch orders, gift cards). Customers pay by card, PayPal, Venmo, gift card, or house account.</p>
-  <h2>Driver GPS app instructions</h2>
-  <p class="small muted">This is what drivers get when you text them how to set up the GPS app. These fill in for each driver: {id} their tracking ID, {url} the server address, {name} first name, {phone} dispatch phone, {business} business name.</p>
-  <textarea name="gps_help_text" rows="11" style="width:100%">{{ G.text }}</textarea>
   <button class="btn primary">Save</button>
 </form>
-<div class="panel narrow">
-  <h2>Text drivers the GPS setup</h2>
-  <p class="small muted">Each driver gets the instructions with their own tracking ID, in the driver chat{% if G.texting %} and as a text message{% else %}. Text messages need Twilio; until then, tap a driver's text link to send it from your phone{% endif %}.</p>
-  <button class="btn primary" onclick="gpsText(0)">Text all active drivers</button>
-  <table class="tbl" style="margin-top:8px">
-  {% for d in G.drivers %}<tr><td>{{ d.name }}{% if not d.active %} <span class="pill">inactive</span>{% endif %}</td><td class="small muted">{{ d.phone }}</td>
-    <td><button class="btn tiny" onclick="gpsText({{ d.id }})">Text</button></td></tr>{% endfor %}
-  </table>
-  <div id="gpsOut" class="small" style="margin-top:8px"></div>
-</div>
-<script>
-async function gpsText(id){
-  if(!confirm(id ? 'Text this driver the GPS setup?' : 'Text every active driver the GPS setup?')) return;
-  const r = await fetch('/api/dispatch/gps-text', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(id ? {driver_id:id} : {})});
-  const res = await r.json();
-  const out = document.getElementById('gpsOut');
-  if(!res.ok){ out.textContent = res.error || 'Could not send.'; return; }
-  let h = '<p>' + res.message + '</p>';
-  (res.links||[]).forEach(function(l){ h += '<div><a class="btn tiny" href="'+l.sms+'">Text '+l.name+' ('+l.phone+')</a></div>'; });
-  out.innerHTML = h;
-}
-</script>
 <div class="panel narrow">
   <h2>Purge old orders now</h2>
   <p class="muted small">Download the orders first. Deleted orders cannot be brought back.</p>

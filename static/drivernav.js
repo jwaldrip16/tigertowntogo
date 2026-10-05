@@ -64,7 +64,7 @@
     LAST_RR=Date.now();
     if(re){ $('navNext').textContent='Rerouting...'; }
     jget('/api/driver/route?from='+p[0]+','+p[1]+'&to='+TARGET.ll[0]+','+TARGET.ll[1]).then(function(r){
-      if(!r||!r.ok){ $('navNext').textContent=(r&&r.error)||'Couldn\'t get directions. Tap Maps app.'; return; }
+      if(!r||!r.ok){ $('navNext').textContent=(r&&r.error)||'Couldn\'t get directions. Check your signal and tap New address to try again.'; return; }
       RT=r; CUR=Math.min(1,RT.steps.length-1); SPOKEN={}; draw(); show(p);
       if(!re) say((RT.steps[0]||{}).text ? RT.steps[0].text+'. Then '+RT.steps[CUR].text : RT.steps[CUR].text);
       else say('Rerouting. '+RT.steps[CUR].text);
