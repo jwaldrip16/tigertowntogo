@@ -549,6 +549,8 @@ async function noteOrder(id){
   if(!res.ok) alert('Could not save that note.');
   board(true);
 }
+// New orders from a delivered order are allowed only until 15 minutes after it was delivered.
+function canReorder(o){ return !o || o.reorder_ok !== false; }
 function newFromOrder(id){
   window.location = '/dispatch/new-order?from=' + id;
 }
@@ -755,7 +757,7 @@ function renderCompleted(res){
     ' &middot; '+milesLabel(o)+' &middot; fee '+o.fee+' &middot; <strong>tip '+o.tip+'</strong> &middot; total '+o.total+
     (o.driver?' &middot; driver '+o.driver:'')+'</div>'+
     '<div class="order-actions">'+
-      '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>'+
+      (canReorder(o) ? '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>' : '')+
       (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
       (!o.driver_id && o.dispatch_status!=='cancelled' ? '<select class="sendsel" id="sd'+o.id+'">'+
         '<option value="">Next up</option>'+ (res.drivers||[]).filter(d=>d.status==='online')
@@ -766,7 +768,7 @@ function renderCompleted(res){
         (res.drivers||[]).filter(d=>d.status==='online' && d.id!==o.driver_id)
           .map(d=>'<option value="'+d.id+'">'+d.name+'</option>').join('')+'</select>'+
         '<button class="btn tiny" onclick="moveToDriver('+o.id+')">Move order</button>' : '')+
-    '<button class="btn tiny primary" onclick="redoDialog('+o.id+')">New order from this</button>'+
+    (canReorder(o) ? '<button class="btn tiny primary" onclick="redoDialog('+o.id+')">New order from this</button>' : '')+
     (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
     (o.card_on_file ? '<button class="btn tiny" onclick="viewCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">View card &bull;'+o.card_last4+'</button>' : '')+
 
@@ -892,7 +894,7 @@ async function findAny(){
     (o.driver?' &middot; driver '+fEsc(o.driver):' &middot; no driver yet')+
     (o.hold_reason?' &middot; '+fEsc(o.hold_reason):'')+'</div>'+
     '<div class="row"><button class="btn tiny primary" onclick="editOrder('+o.id+')">Edit order</button>'+
-    '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>'+
+    (canReorder(o) ? '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>' : '')+
       (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
     '<a class="btn tiny" target="_blank" href="'+o.track+'">Tracking page</a></div></div>').join('')
     : '<p class="muted small">No orders match that.</p>') +
@@ -1289,7 +1291,7 @@ function orderCard(o, opts, drivers){
       '<button class="btn tiny" onclick="changeFee('+o.id+')">Change fee ('+o.fee+')</button>'+
       '<button class="btn tiny" onclick="setToken('+o.id+')">'+(o.token?'Tag: '+esc(o.token):'Add tag')+'</button>'+
       '<button class="btn tiny" onclick="noteOrder('+o.id+')">'+(o.dispatch_note?'Edit note':'Add note')+'</button>'+
-      '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>'+
+      (canReorder(o) ? '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>' : '')+
       (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
       '<select id="as'+o.id+'" onchange="assign('+o.id+',this.value)">'+opts+'</select>'+
       '<button class="btn tiny" onclick="dstat('+o.id+',\'received\')">Received</button>'+

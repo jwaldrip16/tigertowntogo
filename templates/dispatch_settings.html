@@ -144,6 +144,21 @@ async function setLogo(inp){
   <input name="driver_pay_tip_pct" type="number" min="0" max="100" value="{{ s['driver_pay_tip_pct'] if s['driver_pay_tip_pct'] is not none else 100 }}">
   <label>Flat amount added per trip ($)</label>
   <input name="driver_pay_flat" type="number" step="0.01" min="0" max="500" value="{{ '%.2f' % ((s['driver_pay_flat_cents'] or 0)|int / 100) }}">
+  {% if owner_view %}
+  <h2>Automatic messages</h2>
+  <input type="hidden" name="automsg_present" value="1">
+  <div class="muted small">Choose which messages the system sends by itself. Unchecked ones are never sent. Messages you or a dispatcher type are not affected.</div>
+  {% for k, label, help, d in auto_msgs %}
+  <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0">
+    <input type="checkbox" name="am_{{ k }}" value="1" {{ 'checked' if am_on(k) else '' }} style="width:auto;margin-top:3px">
+    <span><b>{{ label }}</b><br><span class="muted small">{{ help }}</span></span>
+  </label>
+  {% if k == 'short_staff' %}
+  <label style="margin-left:28px">Send the busy alert again every this many minutes while it stays busy (5 to 120)</label>
+  <input style="margin-left:28px;max-width:120px" name="short_staff_every_min" type="number" min="5" max="120" value="{{ s['short_staff_every_min'] or 15 }}">
+  {% endif %}
+  {% endfor %}
+  {% endif %}
   <h2>Late accept warnings</h2>
   <label>Flash and chime when a kitchen has not accepted an order after this many minutes (0 for off)</label>
   <input name="kitchen_accept_min" type="number" min="0" max="60" value="{{ s['kitchen_accept_min'] or 5 }}">
