@@ -422,6 +422,8 @@ def init_db():
                    ("credit_cents", "INTEGER NOT NULL DEFAULT 0")):
         ensure_column(con, "orders", _c, _t)
     ensure_column(con, "orders", "points_reversed", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(con, "orders", "discount_cents", "INTEGER NOT NULL DEFAULT 0")   # dispatch discount on a placed order
+    ensure_column(con, "orders", "discount_note", "TEXT")
     ensure_column(con, "points_log", "kind", "TEXT")
     con.execute("""CREATE TABLE IF NOT EXISTS reviews (id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER UNIQUE,
         customer_id INTEGER, restaurant_id INTEGER, stars INTEGER NOT NULL, comment TEXT, created_at TEXT)""")
@@ -2310,6 +2312,8 @@ def order_dict(o):
         "subtotal_cents": int(o["subtotal_cents"] or 0),
         "subtotal": money(o["subtotal_cents"]), "fee": money(o["fee_cents"]),
         "tax": money(o["tax_cents"]), "tip": money(o["tip_cents"]), "total": money(o["total_cents"]),
+        "discount_cents": order_discount(o), "discount": money(order_discount(o)) if order_discount(o) else "",
+        "discount_note": (o["discount_note"] or "") if "discount_note" in o.keys() else "",
         "gift": money(o["gift_cents"]) if ("gift_cents" in o.keys() and o["gift_cents"]) else "",
         "reward": money(o["reward_cents"]) if ("reward_cents" in o.keys() and o["reward_cents"]) else "",
         "due": money(due_cents(o)), "due_cents": due_cents(o),
@@ -3054,6 +3058,9 @@ def api_pp_create():
         db().commit()
     return jsonify({"ok": True, "id": j["id"]})
 
+def order_discount(o):
+    return int(o["discount_cents"] or 0) if (o is not None and "discount_cents" in o.keys()) else 0
+
 def delivered_lock(o):
     """Once an order is delivered, only an owner can change it. Returns an error response or None."""
     if o and o["dispatch_status"] == "delivered" and session.get("dispatcher_id") and not is_owner():
@@ -3279,11 +3286,20 @@ def rest_chat_rows(rid, limit=200):
                            ORDER BY id DESC LIMIT ?""", (rid, limit)).fetchall()
     return [rest_msg_dict(m) for m in reversed(rows)]
 
+REST_CHAT_OK_SQL = "COALESCE(r.uses_app,0)=1 AND COALESCE(r.slug,'')!='oneoff'"
+
+def rest_chat_allowed(rid):
+    """Only restaurants that take orders on the tablet get a chat. Called-in restaurants
+    and typed-in pickups are phoned, not messaged."""
+    r = db().execute("SELECT uses_app, slug FROM restaurants WHERE id=?", (rid,)).fetchone()
+    return bool(r) and bool(r["uses_app"]) and (r["slug"] or "") != "oneoff"
+
 def rest_chat_unread_for_dispatch():
-    n = db().execute("SELECT COUNT(*) c FROM rest_messages WHERE sender='restaurant' AND seen_by_dispatch=0").fetchone()["c"]
+    n = db().execute("""SELECT COUNT(*) c FROM rest_messages m JOIN restaurants r ON r.id=m.restaurant_id
+                        WHERE m.sender='restaurant' AND m.seen_by_dispatch=0 AND """ + REST_CHAT_OK_SQL).fetchone()["c"]
     m = db().execute("""SELECT m.id, m.restaurant_id, m.body, r.name FROM rest_messages m
                         JOIN restaurants r ON r.id=m.restaurant_id
-                        WHERE m.sender='restaurant' AND m.seen_by_dispatch=0
+                        WHERE m.sender='restaurant' AND m.seen_by_dispatch=0 AND """ + REST_CHAT_OK_SQL + """
                         ORDER BY m.id DESC LIMIT 1""").fetchone()
     return n, ({"id": m["id"], "restaurant_id": m["restaurant_id"], "name": m["name"], "body": m["body"]} if m else None)
 
@@ -3292,6 +3308,9 @@ def api_rest_chat():
     rid = session.get("restaurant_id")
     if not rid:
         return jsonify({"ok": False}), 403
+    if not rest_chat_allowed(rid):
+        return jsonify({"ok": False, "no_chat": True, "messages": [],
+                        "error": "Chat is only for restaurants that take orders in the app. Call dispatch instead."}), 403
     if request.method == "POST":
         body = " ".join(((request.get_json(silent=True) or {}).get("body") or "").split())[:1000]
         if not body:
@@ -3313,15 +3332,20 @@ def api_dispatch_rest_chats():
             (SELECT COUNT(*) FROM rest_messages m WHERE m.restaurant_id=r.id AND m.sender='restaurant'
                AND m.seen_by_dispatch=0) unread,
             (SELECT MAX(id) FROM rest_messages m WHERE m.restaurant_id=r.id) last_id
-            FROM restaurants r ORDER BY unread DESC, last_id IS NULL, last_id DESC, r.name""").fetchall()
+            FROM restaurants r WHERE """ + REST_CHAT_OK_SQL + """
+            ORDER BY unread DESC, last_id IS NULL, last_id DESC, r.name""").fetchall()
     return jsonify({"ok": True, "restaurants": [{"id": r["id"], "name": r["name"], "unread": r["unread"]} for r in rows]})
 
 @app.route("/api/dispatch/rest-chat/<int:rid>", methods=["GET", "POST"])
 def api_dispatch_rest_chat(rid):
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
-    if not db().execute("SELECT 1 FROM restaurants WHERE id=?", (rid,)).fetchone():
+    rr = db().execute("SELECT name FROM restaurants WHERE id=?", (rid,)).fetchone()
+    if not rr:
         return jsonify({"ok": False, "error": "Unknown restaurant"}), 404
+    if not rest_chat_allowed(rid):
+        return jsonify({"ok": False, "no_chat": True, "messages": [],
+                        "error": rr["name"] + " doesn't take orders in the app, so there's no chat. Call them instead."}), 400
     if request.method == "POST":
         body = " ".join(((request.get_json(silent=True) or {}).get("body") or "").split())[:1000]
         if not body:
@@ -3735,7 +3759,8 @@ def api_approve_address():
         miles, fee = o["miles"] or 0, o["fee_cents"]
     if p.get("fee_cents") not in (None, ""):
         fee = max(0, int(round(float(p["fee_cents"]))))
-    total = o["subtotal_cents"] + fee + o["item_fee_cents"] + o["tax_cents"] + (o["service_cents"] or 0) + o["tip_cents"]
+    total = o["subtotal_cents"] + fee + o["item_fee_cents"] + o["tax_cents"] + (o["service_cents"] or 0) + o["tip_cents"] \
+        - order_discount(o)
     unpaid_card = o["dispatch_status"] == "awaiting_payment"
     if unpaid_card:
         # card not run yet: the address is fine now, but the kitchen still waits on payment
@@ -4952,6 +4977,57 @@ def api_order_credit():
                            " credit for order " + o["code"] + ". Use code " + code + " on your next order.")
     return jsonify({"ok": True, "code": code, "amount": money(cents), "left": money(left - cents), "texted": texted})
 
+@app.post("/api/order/discount")
+def api_order_discount():
+    """Dispatch takes money off an order that was already placed: a dollar amount or a percent
+    of the food. It never cuts into the driver's tip. 0 or blank removes the discount."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(force=True) or {}
+    o = db().execute("SELECT * FROM orders WHERE id=?", (data.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
+    if o["dispatch_status"] == "cancelled":
+        return jsonify({"ok": False, "error": "That order was cancelled."}), 400
+    raw = str(data.get("value") if data.get("value") is not None else "").strip().replace("$", "")
+    pct = raw.endswith("%") or data.get("kind") == "percent"
+    raw = raw.rstrip("%").strip()
+    try:
+        v = float(raw) if raw else 0.0
+    except ValueError:
+        return jsonify({"ok": False, "error": "Enter dollars like 5 or a percent like 10%."}), 400
+    if v < 0 or (pct and v > 100):
+        return jsonify({"ok": False, "error": "Enter dollars like 5 or a percent like 10%."}), 400
+    sub = int(o["subtotal_cents"] or 0)
+    cents = int(round(sub * v / 100.0)) if pct else int(round(v * 100))
+    cap = sub + int(o["fee_cents"] or 0) + int(o["item_fee_cents"] or 0) + int(o["tax_cents"] or 0) + \
+        int((o["service_cents"] if "service_cents" in o.keys() else 0) or 0)
+    capped = cents > cap
+    cents = max(0, min(cents, cap))
+    old = order_discount(o)
+    note = (data.get("note") or "").strip()[:120]
+    db().execute("UPDATE orders SET discount_cents=?, discount_note=?, total_cents=total_cents-? WHERE id=?",
+                 (cents, note if cents else None, cents - old, o["id"]))
+    db().commit()
+    who = dispatcher_row()
+    by = who["name"] if who else "dispatch"
+    if cents:
+        log("edit", by + " gave a " + money(cents) + " discount on " + o["code"] +
+            (" (" + raw + "% of the food)" if pct else "") + (": " + note if note else ""))
+    else:
+        log("edit", by + " removed the discount on " + o["code"])
+    o2 = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
+    paid = (o2["payment_status"] or "") in ("paid", "part_refunded") and int(o2["paid_cents"] or 0) > 0
+    pp_hold = ((o2["pp_state"] or "") if "pp_state" in o2.keys() else "") == "authorized"
+    bal = balance_cents(o2) if paid else 0
+    over = (-bal) if (paid and bal < 0 and not pp_hold) else 0
+    return jsonify({"ok": True, "discount": money(cents), "discount_cents": cents, "total": money(o2["total_cents"]),
+                    "capped": capped, "refund_due": money(over) if over else "", "refund_due_cents": over,
+                    "hold": pp_hold})
+
 @app.post("/api/order/refund")
 def api_refund():
     """Full or partial refund, dispatcher only. cents blank = everything collected."""
@@ -5143,10 +5219,11 @@ def api_order_edit():
     fee, tip = max(0, fee), max(0, tip)
     tax = int(round(subtotal * setting("tax_rate_bp") / 10000.0))
     service = int(round(subtotal * setting("service_fee_bp") / 10000.0))
-    total = subtotal + fee + ifee + tax + service + tip
+    disc = min(order_discount(o), subtotal + fee + ifee + tax + service)
+    total = subtotal + fee + ifee + tax + service + tip - disc
     db().execute("""UPDATE orders SET items=?, subtotal_cents=?, fee_cents=?, item_fee_cents=?,
-                    tax_cents=?, service_cents=?, tip_cents=?, total_cents=? WHERE id=?""",
-                 (json.dumps(items), subtotal, fee, ifee, tax, service, tip, total, o["id"]))
+                    tax_cents=?, service_cents=?, tip_cents=?, total_cents=?, discount_cents=? WHERE id=?""",
+                 (json.dumps(items), subtotal, fee, ifee, tax, service, tip, total, disc, o["id"]))
     db().commit()
     log("edit", o["code"] + " edited by dispatch")
     dupe = ref_in_use(clean_ref(data.get("ref")), o["id"]) if "ref" in data else None
@@ -8809,7 +8886,7 @@ def api_rest_orders():
                     "chat_unread": rc_unread, "chat_last_id": rc_last, "ok": True, "orders": [order_dict(o) for o in rows],
                     "open": is_open(r), "open_24": bool(r["open_24"]),
                     "hours": hours_label(r), "prep_default": r["prep_default"],
-                    "dispatch_ordering": dispatch_ordering})
+                    "dispatch_ordering": dispatch_ordering, "chat_on": rest_chat_allowed(rid)})
 
 @app.post("/api/restaurant/toggle")
 def api_rest_toggle():
@@ -9538,9 +9615,267 @@ def api_menu(rid):
 # ---------------------------------------------------------------- TigerTownToGo (Zuppler) import
 TIGERTOWN_FILE = os.path.join(APP_DIR, "data", "tigertown_import.json")
 
-def tigertown_data():
+import json
+
+def _hhmm(m):
+    m = int(m)
+    if m >= 1440:
+        return "23:59"
+    return "%02d:%02d" % (m // 60, m % 60)
+
+def zup_convert(rest, menus, details):
+    """One Zuppler restaurant (+ its menus and item details) -> Fleet import record."""
+    hours = {}
+    hoo = rest.get("hoursOfOperation") or []
+    for d in range(7):
+        zi = (d + 1) % 7
+        rng = hoo[zi] if zi < len(hoo) else []
+        rng = [x for x in (rng or []) if x and len(x) == 2]
+        hours[str(d)] = ([_hhmm(min(x[0] for x in rng)), _hhmm(max(x[1] for x in rng))] if rng else ["", ""])
+    loc = ((rest.get("locations") or [{}])[0] or {}).get("address") or {}
+    geo = loc.get("geo") or {}
+    parts = [loc.get("street") or loc.get("nickname") or ""]
+    cs = ", ".join(x for x in [loc.get("city") or "", ((loc.get("state") or "") + " " + (loc.get("zip") or "")).strip()] if x)
+    addr = ", ".join(x for x in parts + [cs] if x)
+    svc = next((s for s in rest.get("services") or [] if s.get("id") == "DELIVERY"), None) or \
+          ((rest.get("services") or [None])[0] or {})
+    phone = ((svc.get("contact") or {}).get("phone")) or ""
+    st = rest.get("settings") or {}
+    act_menus = [m for m in (menus or []) if m.get("active", True)]
+    multi = len(act_menus) > 1
+    items, sort = [], 0
+    for m in act_menus:
+        for c in sorted(m.get("categories") or [], key=lambda c: (c.get("priority") or 0)):
+            if not c.get("active", True) or "order it again" in (c.get("name") or "").lower():
+                continue
+            for it in sorted(c.get("items") or [], key=lambda i: (i.get("priority") or 0)):
+                if not it.get("active", True):
+                    continue
+                det = details.get("%s:%s" % (rest["id"], it["id"])) or {}
+                sizes = sorted([s for s in det.get("sizes") or [] if s.get("active", True)],
+                               key=lambda s: (s.get("priority") or 0))
+                groups = []
+                if sizes:
+                    base = min(float(s.get("price") or 0) for s in sizes)
+                    if len(sizes) > 1:
+                        groups.append({"name": "Size", "min": 1, "max": 1,
+                                       "options": [{"name": s.get("sizeName") or "Size",
+                                                    "delta": int(round((float(s.get("price") or 0) - base) * 100))}
+                                                   for s in sizes]})
+                    for g in sorted(sizes[0].get("modifiers") or [], key=lambda g: (g.get("priority") or 0)):
+                        if not g.get("active", True):
+                            continue
+                        opts = [{"name": o.get("name") or "", "delta": int(round(float(o.get("price") or 0) * 100))}
+                                for o in sorted(g.get("options") or [], key=lambda o: (o.get("priority") or 0))
+                                if o.get("active", True)]
+                        if not opts:
+                            continue
+                        mx = g.get("maxSelections")
+                        if not mx:
+                            mx = len(opts) if g.get("multipleSelections") else 1
+                        groups.append({"name": g.get("name") or "Choose", "min": int(g.get("minSelections") or 0),
+                                       "max": int(min(mx, len(opts))), "options": opts})
+                    price = int(round(base * 100))
+                else:
+                    price = int(round(float(it.get("price") or it.get("minPrice") or 0) * 100))
+                sort += 1
+                items.append({"name": (it.get("name") or "").strip(), "description": (it.get("description") or "").strip(),
+                              "price_cents": price, "section": (c.get("name") or "").strip(),
+                              "tab": (m.get("name") or "").strip() if multi else "",
+                              "image": ((it.get("image") or {}).get("medium")) or "", "sort": sort,
+                              "groups": groups, "zid": it["id"]})
+    return {"zid": str(rest["id"]), "name": (rest.get("name") or "").strip(), "cuisine": rest.get("cuisines") or "",
+            "address": addr, "lat": geo.get("lat"), "lng": geo.get("lng"), "phone": phone,
+            "hours": hours, "hours_raw": hoo,
+            "photo": ((rest.get("featuredImage") or {}).get("medium")) or "",
+            "logo": ((rest.get("logo") or {}).get("medium")) or "",
+            "min_order_cents": int(round(float(svc.get("min_order") or 0) * 100)),
+            "delivery_fee_cents": int(round(float(svc.get("defaultChargeAmount") or 0) * 100)),
+            "eta_min": svc.get("defaultTime"), "prep": st.get("preparationTime"),
+            "paused": bool(st.get("pause_online_ordering")), "items": items}
+
+# ---------------------------------------------------------------- import from any Zuppler ordering website
+ZUP_GQL = "https://restaurants-api5.zuppler.com/graphql"
+ZUP_API = "https://api.zuppler.com/v3/channels/"
+ZUP_STATE = {"running": False, "stage": "", "done": 0, "total": 0, "error": "", "site": "", "name": ""}
+_ZUP_LOCK = threading.Lock()
+
+def zuppler_file():
+    return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "zuppler_import.json")
+
+def _zup_get(url, data=None, origin=None, timeout=30, tries=3):
+    last = None
+    for a in range(tries):
+        try:
+            h = {"User-Agent": "Mozilla/5.0"}
+            if data is not None:
+                h["content-type"] = "application/json"
+            if origin:
+                h["Origin"] = origin
+            req = urllib.request.Request(url, data=json.dumps(data).encode() if data is not None else None, headers=h)
+            return urllib.request.urlopen(req, timeout=timeout).read()
+        except Exception as e:
+            last = e
+            time.sleep(1 + a)
+    raise last
+
+def _zup_gql(query, origin):
+    for a in range(3):
+        try:
+            d = json.loads(_zup_get(ZUP_GQL, {"query": query}, origin, timeout=60, tries=1))
+            if d.get("data") is not None:
+                return d["data"]
+        except Exception:
+            pass
+        time.sleep(1 + a)
+    return None
+
+def zuppler_find_channel(site):
+    """Finds the Zuppler channel behind an ordering website (or takes the channel code itself)."""
+    site = (site or "").strip()
+    if not site:
+        raise ValueError("Type the website address.")
+    found = []
+    if re.fullmatch(r"[A-Za-z0-9_-]{4,40}", site) and "." not in site:
+        found.append(site)
+    else:
+        url = site if site.startswith("http") else "https://" + site
+        html = _zup_get(url, timeout=20).decode("utf-8", "replace")
+        pats = [r"channels/([A-Za-z0-9_-]+)\.json", r"channels/([A-Za-z0-9_-]+)/",
+                r"""channel(?:_id|Id|_permalink|Permalink|)["']?\s*[:=]\s*["']([A-Za-z0-9_-]{4,40})["']""",
+                r"""data-channel(?:-id)?=["']([A-Za-z0-9_-]{4,40})["']""",
+                r"zuppler\.com/(?:channels|portal)/([A-Za-z0-9_-]{4,40})"]
+        def scan(text):
+            for p in pats:
+                for m in re.findall(p, text):
+                    if m not in found:
+                        found.append(m)
+        scan(html)
+        if not found:
+            base = urllib.parse.urlsplit(url)
+            for src in re.findall(r"""<script[^>]+src=["']([^"']+)["']""", html)[:15]:
+                full = urllib.parse.urljoin(url, src)
+                if urllib.parse.urlsplit(full).netloc != base.netloc:
+                    continue
+                try:
+                    scan(_zup_get(full, timeout=15, tries=1).decode("utf-8", "replace"))
+                except Exception:
+                    pass
+                if found:
+                    break
+    for code in found:
+        try:
+            ch = json.loads(_zup_get(ZUP_API + code + ".json", timeout=20, tries=2))
+            if ch.get("success") and ch.get("channel"):
+                c = ch["channel"]
+                return {"permalink": c.get("permalink") or code, "name": c.get("name") or code,
+                        "url": c.get("url") or site}
+        except Exception:
+            continue
+    raise ValueError("That website doesn't look like a Zuppler ordering site. Check the address and try again.")
+
+ZUP_REST_Q = """{ restaurant(id: %s) { id name cuisines hoursOfOperation timezone { offset }
+  locations { id address { street city state zip nickname geo { lat lng } } }
+  services { id min_order defaultTime defaultChargeAmount defaultChargePercent contact { phone } }
+  logo { medium } featuredImage { medium } settings { preparationTime pause_online_ordering } } }"""
+ZUP_MENU_Q = """{ menus(restaurantId: %s, channelId: "%s") { id name active default categories { id name active priority
+  items { id name description active price minPrice maxPrice multipleSizes priority image { medium } } } } }"""
+ZUP_ITEM_Q = """{ item(restaurantId: %s, itemId: %s, channelId: "%s") { id name sizes { id sizeName price active priority
+  modifiers { id name active minSelections maxSelections multipleSelections priority
+  options { id name price active priority default } } } } }"""
+
+def _zuppler_worker(site):
+    import concurrent.futures as cf
+    st = ZUP_STATE
     try:
-        with open(TIGERTOWN_FILE) as f:
+        st.update(stage="Finding the ordering site...", done=0, total=0, error="")
+        ch = zuppler_find_channel(site)
+        code, origin = ch["permalink"], (ch["url"] or "").rstrip("/") or None
+        if origin and not origin.startswith("http"):
+            origin = "https://" + origin
+        if origin:
+            sp = urllib.parse.urlsplit(origin)
+            origin = sp.scheme + "://" + sp.netloc
+        st.update(name=ch["name"], stage="Getting the restaurant list from " + ch["name"] + "...")
+        integ = json.loads(_zup_get(ZUP_API + code + "/integrations.json", timeout=40))
+        ids = []
+        for it in integ.get("integrations") or []:
+            rid = (it.get("restaurant") or {}).get("id")
+            if rid and not it.get("disabled") and rid not in ids:
+                ids.append(rid)
+        if not ids:
+            raise ValueError(ch["name"] + " has no restaurants listed.")
+        st.update(stage="Reading restaurants...", total=len(ids), done=0)
+        rests, menus = {}, {}
+        def one_rest(rid):
+            r = (_zup_gql(ZUP_REST_Q % rid, origin) or {}).get("restaurant")
+            m = (_zup_gql(ZUP_MENU_Q % (rid, code), origin) or {}).get("menus")
+            return rid, r, m
+        with cf.ThreadPoolExecutor(8) as ex:
+            for rid, r, m in ex.map(one_rest, ids):
+                if r:
+                    rests[str(rid)], menus[str(rid)] = r, m or []
+                st["done"] += 1
+        jobs = []
+        for rid, ms in menus.items():
+            for m in ms:
+                if not m.get("active", True):
+                    continue
+                for c in m.get("categories") or []:
+                    if not c.get("active", True):
+                        continue
+                    for it in c.get("items") or []:
+                        if it.get("active", True):
+                            jobs.append((rid, it["id"]))
+        jobs = list(dict.fromkeys(jobs))
+        st.update(stage="Reading menu items, sizes and add-ons...", total=len(jobs), done=0)
+        details = {}
+        def one_item(j):
+            return j, (_zup_gql(ZUP_ITEM_Q % (j[0], j[1], code), origin) or {}).get("item")
+        with cf.ThreadPoolExecutor(12) as ex:
+            for j, v in ex.map(one_item, jobs):
+                details["%s:%s" % j] = v
+                st["done"] += 1
+        out = []
+        for rid in [str(i) for i in ids]:
+            if rid in rests:
+                try:
+                    out.append(zup_convert(rests[rid], menus.get(rid), details))
+                except Exception as e:
+                    print("zuppler convert skipped", rid, e)
+        out.sort(key=lambda z: z["name"].lower())
+        data = {"source": ch["name"] + " (Zuppler)", "site": ch["url"] or site, "channel": code,
+                "pulled": dt.date.today().isoformat(), "restaurants": out}
+        tmp = zuppler_file() + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp, zuppler_file())
+        st.update(stage="Done. Found %d restaurants and %d menu items." % (len(out), sum(len(z["items"]) for z in out)))
+    except Exception as e:
+        st.update(error=str(e) or "Couldn't read that website.", stage="")
+    finally:
+        st["running"] = False
+
+def start_zuppler_pull(site):
+    with _ZUP_LOCK:
+        if ZUP_STATE["running"]:
+            return False
+        ZUP_STATE.update(running=True, site=site, name="", error="", stage="Starting...", done=0, total=0)
+    threading.Thread(target=_zuppler_worker, args=(site,), daemon=True).start()
+    return True
+
+@app.get("/api/dispatch/zuppler-status")
+def api_zuppler_status():
+    me = session.get("dispatcher_id")
+    if not me or not is_owner(me):
+        return jsonify({"ok": False}), 403
+    return jsonify({"ok": True, **ZUP_STATE})
+
+
+def tigertown_data():
+    """The restaurants last pulled from a Zuppler site (kept next to the database)."""
+    try:
+        with open(zuppler_file()) as f:
             return json.load(f)
     except Exception:
         return None
@@ -9549,11 +9884,11 @@ def _norm_name(n):
     return "".join(ch for ch in (n or "").lower() if ch.isalnum())
 
 def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_id=None):
-    """Bring restaurants, photos, logos, hours, menus, sizes and add-ons from the old TigerTownToGo site.
+    """Bring restaurants, photos, logos, hours, menus, sizes and add-ons from a Zuppler ordering site.
     A restaurant already here with the same name is updated instead of duplicated."""
     data = tigertown_data()
     if not data:
-        return {"ok": False, "error": "The TigerTownToGo menu file is missing from this upload."}
+        return {"ok": False, "error": "Find the restaurants on a Zuppler website first."}
     con = db()
     have = {}
     for r in con.execute("SELECT * FROM restaurants").fetchall():
@@ -9695,8 +10030,12 @@ def api_picture_copy():
                     "left": remote_picture_count()})
 
 
-@app.route("/dispatch/import-tigertown", methods=["GET", "POST"])
-def dispatch_import_tigertown():
+@app.get("/dispatch/import-tigertown")
+def dispatch_import_tigertown_old():
+    return redirect("/dispatch/import-zuppler")
+
+@app.route("/dispatch/import-zuppler", methods=["GET", "POST"])
+def dispatch_import_zuppler():
     me = session.get("dispatcher_id")
     if not me:
         return redirect("/dispatch/login")
@@ -9704,7 +10043,15 @@ def dispatch_import_tigertown():
         return "Only an owner can import restaurants.", 403
     data = tigertown_data()
     result = None
-    if request.method == "POST" and request.form.get("action") == "match_min":
+    if request.method == "POST" and request.form.get("action") == "fetch":
+        site = (request.form.get("site") or "").strip()
+        if not site:
+            result = {"ok": False, "error": "Type the Zuppler website address."}
+        elif not start_zuppler_pull(site):
+            result = {"ok": False, "error": "Already reading a website. Wait for it to finish."}
+        else:
+            return redirect("/dispatch/import-zuppler")
+    elif request.method == "POST" and request.form.get("action") == "match_min":
         fixed = 0
         if data:
             con = db()
@@ -9717,7 +10064,7 @@ def dispatch_import_tigertown():
                 want = z.get("min_order_cents") or None
                 if m and m["min_order_cents"] != want:
                     con.execute("UPDATE restaurants SET min_order_cents=? WHERE id=?", (want, m["id"]))
-                    log("settings", "Minimum order for " + m["name"] + " set to " + (money(want) if want else "none") + " to match TigerTownToGo")
+                    log("settings", "Minimum order for " + m["name"] + " set to " + (money(want) if want else "none") + " to match " + ((data or {}).get("source") or "the Zuppler site"))
                     fixed += 1
             con.commit()
         result = {"ok": True, "min_fixed": fixed}
@@ -9749,7 +10096,8 @@ def dispatch_import_tigertown():
                          "here": bool(m)})
     return render_template("dispatch_import.html", rows=rows, result=result, regions=all_regions(),
                            remote_pics=remote_picture_count(),
-                           pulled=(data or {}).get("pulled", ""))
+                           pulled=(data or {}).get("pulled", ""), source=(data or {}).get("source", ""),
+                           site=(data or {}).get("site", ""), zup=ZUP_STATE)
 
 @app.get("/healthz")
 def healthz():

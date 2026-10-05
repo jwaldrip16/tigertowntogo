@@ -152,6 +152,11 @@ async function load(force){
       document.querySelector('main, .wrap, body').prepend(dob);
     } else if(!res.dispatch_ordering && dob){ dob.remove(); }
   } catch(e) {}
+  try {
+    const tc = document.getElementById('tabChat');
+    if (tc){ tc.classList.toggle('hidden', res.chat_on === false);
+      if (res.chat_on === false && !document.getElementById('paneChat').classList.contains('hidden')) showTab('active'); }
+  } catch(e) {}
   try { newTicketAlert(res.orders); } catch(e) { console.log('alert skipped', e); }
   const pend = res.orders.filter(o=>o.kitchen_status==='pending' && !['delivered','cancelled'].includes(o.dispatch_status)).length;
   if (pend) flashTicket(pend); else clearTicketFlash();

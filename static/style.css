@@ -590,7 +590,7 @@ body.cust main{padding-top:0}
 button.rwopt{cursor:pointer}button.rwopt.sel{outline:4px solid #16a34a;outline-offset:2px}
 .rwtiers{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:12px}
 .rwtier{border-radius:6px;padding:20px 10px;text-align:center;box-shadow:0 2px 6px rgba(0,0,0,.12);min-height:150px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px}
-.rwtier .badge{width:44px;height:48px;clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%);background:#fff;display:flex;align-items:center;justify-content:center;font-size:22px}
+.rwtier .badge{width:44px;height:48px;clip-path:polygon(50% 0,100% 25%,100% 75%,50% 100%,0 75%,0 25%);background:#fff;display:flex;align-items:center;justify-content:center;font-size:22px;color:#5a3b14}
 .rwtier h3{margin:0;letter-spacing:.06em;font-size:1.05em}
 .rwtier span{background:rgba(60,40,10,.75);color:#fff;border-radius:999px;padding:5px 12px;font-size:.8em;font-weight:700}
 .rwtier.t0{background:linear-gradient(160deg,#e0b25c,#b34f25);color:#5a2f08}.rwtier.t1{background:linear-gradient(160deg,#d9d9d9,#8a8a8a);color:#fff}

@@ -80,7 +80,7 @@ function drawPay(p, o){
     }
     h += '<div class="row"><span>Tip</span><span>$<input id="tipBox" type="number" min="0" max="200" step="0.50" value="'+tipNum+
          '" style="max-width:100px"> <button class="btn small primary" onclick="saveTip()">Save tip</button></span></div>'+
-         '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>'+
+         (o.discount ? '<div class="row"><span>Discount</span><span>-'+o.discount+'</span></div>' : '')+'<div class="row total"><span>Total</span><span>'+o.total+'</span></div>'+
          '<div id="tipMsg" class="small"></div>';
     if(p.owed_cents > 0)
       h += '<p>'+p.owed+' of your tip goes past what your hold covers. <a class="btn primary small" href="'+p.pay_url+'?kind=balance">Pay '+p.owed+'</a></p>';
@@ -110,7 +110,7 @@ async function tick(){
       '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+
       '<p class="big">Scheduled for '+o.scheduled_label+'</p>'+
       '<p>Your order goes to the restaurant shortly before then. This page updates on its own.</p>'+
-      '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
+      (o.discount ? '<div class="row"><span>Discount</span><span>-'+o.discount+'</span></div>' : '')+'<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
     return;
   }
   if(o.scheduled_label && o.dispatch_status !== 'delivered' && o.dispatch_status !== 'cancelled'){
@@ -123,7 +123,7 @@ async function tick(){
       '<p>'+(o.uses_app===false?'Your order has not been placed with the restaurant yet.':'Your order has not gone to the kitchen yet.')+' It goes as soon as your payment is marked paid. '+
       (o.needs_address_approval ? 'Dispatch is also confirming your address, so your delivery fee may change with the distance. ' : '')+
       'Dispatch may call you to take your card. This page updates on its own.</p>'+
-      '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
+      (o.discount ? '<div class="row"><span>Discount</span><span>-'+o.discount+'</span></div>' : '')+'<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
     return;
   }
   if(o.needs_address_approval){
@@ -135,7 +135,7 @@ async function tick(){
       'This page updates on its own.</p>'+
       '<div class="row"><span>Subtotal</span><span>'+o.subtotal+'</span></div>'+
       '<div class="row"><span>Delivery (estimate)</span><span>'+o.fee+'</span></div>'+
-      '<div class="row total"><span>Total so far</span><span>'+o.total+'</span></div>';
+      (o.discount ? '<div class="row"><span>Discount</span><span>-'+o.discount+'</span></div>' : '')+'<div class="row total"><span>Total so far</span><span>'+o.total+'</span></div>';
     return;
   }
   const withDriver = ['assigned','received','at_restaurant','enroute','delivered'].includes(o.dispatch_status);
@@ -151,7 +151,7 @@ async function tick(){
     document.getElementById('box').innerHTML = '<h2>'+o.restaurant+'</h2><p class="muted">'+o.address+'</p>'+
       '<p><b>Waiting on payment.</b> Your order has not gone to the kitchen yet. It goes as soon as your payment is marked paid. '+
       'This page updates on its own.</p>'+
-      '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
+      (o.discount ? '<div class="row"><span>Discount</span><span>-'+o.discount+'</span></div>' : '')+'<div class="row total"><span>Total</span><span>'+o.total+'</span></div>';
     return;
   }
   const calledIn = o.uses_app===false;
@@ -211,7 +211,7 @@ async function tick(){
           '<div class="row"><span>Delivery ('+(o.miles===null?'distance confirmed by dispatch':o.miles+' mi')+')</span><span>'+o.fee+'</span></div>'+
           (o.service_cents ? '<div class="row"><span>Service fee</span><span>'+o.service+'</span></div>' : '')+
           '<div class="row"><span>Tax</span><span>'+o.tax+'</span></div>'+
-          '<div class="row total"><span>Total</span><span>'+o.total+'</span></div>'+
+          (o.discount ? '<div class="row"><span>Discount</span><span>-'+o.discount+'</span></div>' : '')+'<div class="row total"><span>Total</span><span>'+o.total+'</span></div>'+
           '<p><a class="btn" target="_blank" href="'+o.restaurant_nav+'">Navigate to the restaurant</a></p>';
   const keepMap = document.getElementById('tmap');
   if (keepMap && document.getElementById('tmap') && MAP) MAP_EL = keepMap;
