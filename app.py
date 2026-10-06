@@ -2342,6 +2342,28 @@ def nav_url(dest, lat=None, lng=None, name=None):
 
 app.jinja_env.globals["nav_url"] = nav_url
 
+
+def brand_sub(text, name):
+    """'www.crimson2go.com is a restaurant delivery service...' -> 'Crimson 2 Go is a restaurant delivery
+    service...'. A line copied from an old site often starts with its web address or a squashed name
+    ('Tigertowntogo'); show the business name there instead. Other wording is left as written."""
+    text = text or ""
+    name = (name or "").strip()
+    if not name:
+        return text
+    m = re.match(r"\s*(\S+)(\s+is\s+an?\s)", text, re.I)
+    if not m:
+        return text
+    first = m.group(1)
+    squashed = _norm_name(first) == _norm_name(name) or "." in first or (
+        _norm_name(first) and _norm_name(first) in _norm_name(name.replace(" ", "")))
+    lead = first.lower().replace("www.", "").split(".")[0]
+    if squashed or _norm_name(lead) in (_norm_name(name), _norm_name(name).replace("to", "2"), _norm_name(name).replace("2", "to")):
+        return name + text[m.end(1):]
+    return text
+
+app.jinja_env.filters["brandsub"] = brand_sub
+
 def customer_nav_url(address, lat=None, lng=None):
     """Customer directions go to the street address itself, so Maps shows the house number,
     street and city instead of bare coordinates. Coordinates are only the fallback when the

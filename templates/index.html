@@ -3,7 +3,7 @@
 {% if S.site_announce %}<div class="siteannounce" style="background:#b44a22;color:#fff;text-align:center;padding:10px 14px;font-weight:600">{{ S.site_announce }}</div>{% endif %}
 <section class="hero fullbleed" style="background-image:linear-gradient(rgba(0,0,0,.38),rgba(0,0,0,.38)),url('{{ S.hero_image or '/static/home-hero.jpg' }}')">
   <h1>{{ home_headline or 'Delivering the area\'s finest restaurants to your door!' }}</h1>
-  {% if S.home_sub %}<p class="herosub" style="color:#fff;font-size:1.1em;margin:-4px 0 10px;text-align:center">{{ S.home_sub }}</p>{% endif %}
+  {% if S.home_sub %}<p class="herosub" style="color:#fff;font-size:1.1em;margin:-4px 0 10px;text-align:center">{{ S.home_sub|brandsub(biz_name) }}</p>{% endif %}
   <div class="heromode"><span class="on">Delivery</span></div>
   <form class="herosearch" onsubmit="homeSearch();return false">
     <input id="homeAddr" placeholder="Enter your delivery address" autocomplete="street-address">
