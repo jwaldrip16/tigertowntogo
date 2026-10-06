@@ -68,6 +68,14 @@
   {% if faqs %}
     <h3><label><input type="checkbox" name="use_faqs" value="1" checked> FAQs ({{ faqs|length }})</label></h3>
     <p class="muted small">These replace the FAQs on your website. Untick any you don't want.</p>
+    {% if faq_regions %}
+    <label style="display:block;margin:8px 0"><b>Put these FAQs on</b><br>
+      <select name="faq_region">
+        <option value="">The website picked above</option>
+        {% for g in faq_regions %}<option value="{{ g.id }}">Region: {{ g.name }}{% if g.brand %} ({{ g.brand }}){% endif %}{% if g.own %}, replaces its FAQ{% endif %}</option>{% endfor %}
+      </select>
+      <span class="muted small">Pick a region to give it its own FAQ. Customers who pick that area see these questions.</span></label>
+    {% endif %}
     {% for q, a in faqs %}
       <div style="margin:8px 0;padding:8px;border:1px solid #e5e5e5;border-radius:6px">
         <label><input type="checkbox" name="fk{{ loop.index0 }}" value="1" checked> Keep</label>

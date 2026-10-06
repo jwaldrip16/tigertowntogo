@@ -267,10 +267,14 @@ function draw(){
     siteSelect(r)+
     '<div class="muted small">Hours: '+e(r.own_hours ? r.hours_label : 'business hours ('+r.hours_label+')')+(r.closed_label?' &middot; '+e(r.closed_label):'')+'</div>'+
     '<div class="muted small">Dispatch number: '+e(r.phone ? r.phone : 'business number'+(r.business_phone?' ('+r.business_phone+')':''))+'</div>'+
-    '<div class="muted small">Minimum order: '+(r.min_order_cents ? '$'+(r.min_order_cents/100).toFixed(2) : 'none')+' &middot; Delivery radius: '+(r.max_miles ? r.max_miles+' mi' : 'no limit')+'</div></span>'+
+    '<div class="muted small">Minimum order: '+(r.min_order_cents ? '$'+(r.min_order_cents/100).toFixed(2) : 'none')+' &middot; Delivery radius: '+(r.max_miles ? r.max_miles+' mi' : 'no limit')+'</div>'+
+    '<div class="muted small">Delivery fee: '+feeLabel(r.fees)+(r.fees && r.fees.from==='region' ? '' : ' (business fee)')+'</div>'+
+    '<div class="muted small">FAQ: '+(r.faq_text ? 'its own ('+faqCount(r.faq_text)+' questions)' : 'business FAQ')+'</div></span>'+
     '<span><button class="btn tiny" onclick="hoursRegion('+r.id+')">Hours &amp; closed days</button>'+
     '<button class="btn tiny" onclick="phoneRegion('+r.id+')">Dispatch number</button>'+
     '<button class="btn tiny" onclick="rulesEdit(\'region\','+r.id+')">Minimum &amp; radius</button>'+
+    '<button class="btn tiny" onclick="feesRegion('+r.id+')">Delivery fees</button>'+
+    '<button class="btn tiny" onclick="faqRegion('+r.id+')">FAQ</button>'+
     '<button class="btn tiny" onclick="renRegion('+r.id+')">Rename</button>'+
     '<button class="btn tiny danger" onclick="delRegion('+r.id+')">Delete</button></span></div>').join('')
     : '<p class="muted small">No regions yet. Add one below.</p>';
@@ -288,6 +292,58 @@ function draw(){
   document.getElementById('drList').innerHTML = RG.drivers.map(p=>row('d', p)).join('') || '<p class="muted small">No drivers yet.</p>';
   document.getElementById('dpList').innerHTML = RG.dispatchers.map(p=>row('p', p)).join('');
 }
+function feeLabel(f){
+  if(!f) return '';
+  const d = c => '$'+((c||0)/100).toFixed(2);
+  return d(f.base_fee)+' for the first '+(+f.base_miles||0)+' mi, then '+d(f.per_mile)+' a mile';
+}
+function faqCount(t){ return (String(t).match(/^\s*Q:/gim) || []).length; }
+async function feesRegion(id){
+  const it = RG.regions.find(x=>x.id===id); if(!it) return;
+  const bf = RG.business_fees || {};
+  const dol = c => c!=null ? (c/100).toString() : '';
+  const a = prompt('Delivery fee for '+it.name+' in dollars (example 4.99).\nLeave blank to use the business fee ($'+((bf.base_fee||0)/100).toFixed(2)+').',
+                   dol(it.base_fee_cents));
+  if (a === null) return;
+  const m = prompt('How many miles that fee covers in '+it.name+' (example 3).\nLeave blank to use the business\'s ('+(+bf.base_miles||0)+' mi).',
+                   it.base_miles!=null ? String(it.base_miles) : '');
+  if (m === null) return;
+  const p = prompt('Fee for each extra mile in '+it.name+' in dollars (example 1).\nLeave blank to use the business\'s ($'+((bf.per_mile||0)/100).toFixed(2)+').',
+                   dol(it.per_mile_cents));
+  if (p === null) return;
+  const res = await jpost('/api/dispatch/region-fees', {id:id, base_fee:a, base_miles:m, per_mile:p});
+  if (!res.ok){ alert(res.error || 'That did not save.'); return; }
+  load();
+}
+function faqRegion(id){
+  const it = RG.regions.find(x=>x.id===id); if(!it) return;
+  let box = document.getElementById('faqBox');
+  if (!box){
+    box = document.createElement('div'); box.id = 'faqBox';
+    box.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:999;display:flex;align-items:center;justify-content:center;padding:16px';
+    document.body.appendChild(box);
+  }
+  box.innerHTML = '<div class="card" style="background:#fff;max-width:720px;width:100%;max-height:90vh;overflow:auto;padding:18px;border-radius:12px">'+
+    '<h3 style="margin-top:0">FAQ for '+e(it.name)+'</h3>'+
+    '<div class="muted small">Customers in this region see this FAQ. Start each question with Q: and each answer with A:. '+
+    'You can use {business}, {phone}, {email} and {address}. Leave it empty to use the business FAQ from Settings.</div>'+
+    '<textarea id="faqTxt" rows="16" style="width:100%;margin-top:8px;font-family:inherit"></textarea>'+
+    '<div class="row" style="gap:8px;margin-top:10px;flex-wrap:wrap">'+
+    '<button class="btn" onclick="faqSave('+id+')">Save</button>'+
+    '<button class="btn" onclick="faqCopyBiz()">Start from the business FAQ</button>'+
+    '<button class="btn danger" onclick="faqClear('+id+')">Use the business FAQ</button>'+
+    '<button class="btn" onclick="document.getElementById(\'faqBox\').remove()">Cancel</button></div></div>';
+  document.getElementById('faqTxt').value = it.faq_text || '';
+}
+function faqCopyBiz(){ document.getElementById('faqTxt').value = RG.business_faq || ''; }
+async function faqSave(id, txt){
+  const v = txt!=null ? txt : document.getElementById('faqTxt').value;
+  const res = await jpost('/api/dispatch/region-fees', {id:id, faq_text:v});
+  if (!res.ok){ alert(res.error || 'That did not save.'); return; }
+  const b = document.getElementById('faqBox'); if (b) b.remove();
+  load();
+}
+function faqClear(id){ if (confirm('Use the business FAQ for this region?')) faqSave(id, ''); }
 function rulesLabel(r){
   const ru = r.rules || {};
   const m = ru.min_cents ? '$'+(ru.min_cents/100).toFixed(2)+' min'+(r.min_order_cents==null?' (region)':'') : 'No minimum';

@@ -23,6 +23,7 @@
     <div class="flash">Minimum orders matched. {{ result.min_fixed }} restaurant{{ '' if result.min_fixed == 1 else 's' }} changed.</div>
     {% elif result.ok %}
     <div class="flash">Done. {{ result.created }} restaurants added, {{ result.updated }} updated, {{ result['items'] }} menu items loaded.</div>
+    {% if result.fee_set %}<div class="flash">The {{ result.fee_region }} region's delivery fee is now {{ result.fee_set }}, the same as the old website{% if result.fee_mixed %} (its most common fee; some restaurants charged a different one){% endif %}. Change it or its miles under Regions &gt; Delivery fees.</div>{% elif result.fee_none %}<div class="flash">The old website didn't list a delivery fee, so that region keeps its fee.</div>{% endif %}
     {% if result.main_done or result.main_failed %}<div class="flash">{% if result.main_done %}Filled in the main website's {{ result.main_done|join(', ') }}.{% endif %}{% if result.main_failed %} Not filled: {{ result.main_failed|join(', ') }}.{% endif %}</div>{% endif %}
     {% if result.brand %}<div class="flash">{% if result.brand_region %}That region now belongs to {{ result.brand }}.{% else %}Pick a region next time to tie it to {{ result.brand }}.{% endif %}
       {% if result.brand_done %} Filled in {{ result.brand }}'s {{ result.brand_done|join(', ') }}.{% endif %}
@@ -60,6 +61,7 @@
         <select name="region_id"><option value="">No region</option>
           {% for g in regions %}<option value="{{ g['id'] }}">{{ g['name'] }}</option>{% endfor %}
         </select></label>
+      <label class="small"><input type="checkbox" name="use_fee" value="1" checked> Use this website's delivery fee for that region</label>
       {% endif %}
 {% if brands_on %}
       <label>Brand for that region

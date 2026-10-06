@@ -490,6 +490,10 @@ def init_db():
     ensure_column(con, "menu_items", "image_src", "TEXT")          # where an item picture first came from
     ensure_column(con, "regions", "min_order_cents", "INTEGER")   # blank = no minimum
     ensure_column(con, "regions", "max_miles", "REAL")            # blank = no radius limit
+    ensure_column(con, "regions", "base_fee_cents", "INTEGER")    # blank = the business delivery fee
+    ensure_column(con, "regions", "base_miles", "REAL")           # blank = the business's first miles
+    ensure_column(con, "regions", "per_mile_cents", "INTEGER")    # blank = the business per-mile fee
+    ensure_column(con, "regions", "faq_text", "TEXT")             # blank = the business FAQ
     ensure_column(con, "restaurants", "min_order_cents", "INTEGER")  # blank = use the region's
     ensure_column(con, "restaurants", "max_miles", "REAL")           # blank = use the region's
     ensure_column(con, "drivers", "active", "INTEGER DEFAULT 1")
@@ -1173,14 +1177,26 @@ def zip_check(r, typed):
         return {"zip": z, "found": False}
     miles = round(haversine_miles(r["lat"], r["lng"], zc["lat"], zc["lng"]) * ROAD_FACTOR, 2)
     rules = delivery_rules(r)
-    return {"zip": z, "found": True, "miles": miles, "fee": fee_for_miles(miles),
+    return {"zip": z, "found": True, "miles": miles, "fee": fee_for_miles(miles, _rv(r, "region_id")),
             "max_miles": rules["max_miles"],
             "within": (not rules["max_miles"]) or miles <= rules["max_miles"]}
 
-def fee_for_miles(miles):
-    base_fee = setting("base_fee_cents")
-    base_miles = setting("base_miles")
-    per_mile = setting("per_mile_cents")
+def fee_rules(region_id=None):
+    """Delivery fee for a region: its own base fee, first miles and per-mile fee, each
+    falling back to the business's (Settings > Delivery fees) when left blank."""
+    out = {"base_fee": setting("base_fee_cents"), "base_miles": setting("base_miles"),
+           "per_mile": setting("per_mile_cents"), "from": "business"}
+    reg = _region(region_id) if region_id else None
+    if reg is not None:
+        for k, col in (("base_fee", "base_fee_cents"), ("base_miles", "base_miles"), ("per_mile", "per_mile_cents")):
+            v = _rv(reg, col)
+            if v is not None:
+                out[k], out["from"] = v, "region"
+    return out
+
+def fee_for_miles(miles, region_id=None):
+    fr = fee_rules(region_id)
+    base_fee, base_miles, per_mile = int(fr["base_fee"] or 0), float(fr["base_miles"] or 0), int(fr["per_mile"] or 0)
     if miles <= base_miles:
         return base_fee
     return base_fee + int(math.ceil(miles - base_miles)) * per_mile
@@ -1218,7 +1234,7 @@ def delivery_rules(r):
 
 def quote(restaurant, lat, lng):
     miles = round(haversine_miles(restaurant["lat"], restaurant["lng"], lat, lng) * ROAD_FACTOR, 2)
-    return miles, fee_for_miles(miles)
+    return miles, fee_for_miles(miles, _rv(restaurant, "region_id"))
 
 def money(cents):
     return "${:,.2f}".format((cents or 0) / 100.0)
@@ -2855,9 +2871,9 @@ def menu(slug):
     open_now = biz and (any_rest_open() if r["slug"] == "oneoff" else is_open(r))
     return render_template("menu.html", r=r, rules=delivery_rules(r), items=items, open=open_now, biz_open=biz,
                            hours=hours_label(r), custom=(r["slug"] == "oneoff"),
-                           base_fee=money(setting("base_fee_cents")),
-                           base_miles=setting("base_miles"),
-                           per_mile=money(setting("per_mile_cents")))
+                           base_fee=money(fee_rules(r["region_id"])["base_fee"]),
+                           base_miles="%g" % float(fee_rules(r["region_id"])["base_miles"] or 0),
+                           per_mile=money(fee_rules(r["region_id"])["per_mile"]))
 
 @app.post("/api/quote")
 def api_quote():
@@ -4256,10 +4272,10 @@ def checkout():
     if address_ok:
         formatted, lat, lng = g1["formatted"], g1["lat"], g1["lng"]
         miles, fee = (quote(r, lat, lng) if r["lat"] and r["lng"]
-                      else (0, setting("base_fee_cents")))
+                      else (0, fee_rules(_rv(r, "region_id"))["base_fee"]))
     else:
         formatted, lat, lng = typed, None, None
-        miles, fee = 0, setting("base_fee_cents")
+        miles, fee = 0, fee_rules(_rv(r, "region_id"))["base_fee"]
         _zc = zip_check(r, typed)
         if _zc["found"]:                 # priced from the ZIP code's center until dispatch confirms the address
             miles, fee = _zc["miles"], _zc["fee"]
@@ -7938,10 +7954,16 @@ def regions_payload():
     regs = all_regions()
     return {"ok": True, "me": session.get("dispatcher_id"), "owner": is_owner(),
             "sites": sites_payload(), "fonts": BRAND_FONT_LABELS,
+            "business_fees": fee_rules(None), "business_faq": (setting("faq_text", str) or "").strip() or DEFAULT_FAQ,
             "regions": [{"id": r["id"], "name": r["name"], "site_id": (_region(r["id"])["site_id"] or 0),
                          "own_hours": bool(region_own_hours(r["id"])),
                          "min_order_cents": _rv(_region(r["id"]), "min_order_cents"),
                          "max_miles": _rv(_region(r["id"]), "max_miles"),
+                         "base_fee_cents": _rv(_region(r["id"]), "base_fee_cents"),
+                         "base_miles": _rv(_region(r["id"]), "base_miles"),
+                         "per_mile_cents": _rv(_region(r["id"]), "per_mile_cents"),
+                         "fees": fee_rules(r["id"]),
+                         "faq_text": _rv(_region(r["id"]), "faq_text") or "",
                          "phone": nice_phone((_region(r["id"])["phone"] or "")) if (_region(r["id"])["phone"] or "") else "",
                          "business_phone": nice_phone(dispatch_phone()),
                          "hours_label": business_hours_label(r["id"]) or "no hours limit",
@@ -8449,6 +8471,58 @@ def api_driver_active():
     log("driver_active", d["name"] + (" active" if want else " inactive") + " by " + (session.get("dispatcher_name") or "dispatch"))
     auto_assign()
     return jsonify({"ok": True, "active": want, "driver": d["name"]})
+
+
+@app.post("/api/dispatch/region-fees")
+def api_region_fees():
+    """A region's own delivery fees (dollars and miles) and/or its own FAQ.
+    Blank clears a value so the region uses the business's from Settings."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(silent=True) or {}
+    try:
+        oid = int(b.get("id") or 0)
+    except Exception:
+        oid = 0
+    reg = _region(oid)
+    if reg is None:
+        return jsonify({"ok": False, "error": "Region not found."}), 404
+    if not _can_edit_region(oid):
+        return jsonify({"ok": False, "error": "You can only change regions you're assigned to."}), 403
+    def num(v, lo, hi, what):
+        v = str(v if v is not None else "").strip().replace("$", "").replace(",", "")
+        if v == "":
+            return None, None
+        try:
+            f = float(v)
+        except Exception:
+            return None, "Enter a number for the " + what + ", or leave it blank."
+        if f < lo or f > hi:
+            return None, "The %s has to be from %g to %g, or blank." % (what, lo, hi)
+        return f, None
+    what = []
+    if "base_fee" in b or "base_miles" in b or "per_mile" in b:
+        bf, e1 = num(b.get("base_fee"), 0, 100, "delivery fee")
+        bm, e2 = num(b.get("base_miles"), 0, 50, "number of miles the fee covers")
+        pm, e3 = num(b.get("per_mile"), 0, 20, "fee per extra mile")
+        if e1 or e2 or e3:
+            return jsonify({"ok": False, "error": e1 or e2 or e3}), 400
+        db().execute("UPDATE regions SET base_fee_cents=?, base_miles=?, per_mile_cents=? WHERE id=?",
+                     (int(round(bf * 100)) if bf is not None else None, bm,
+                      int(round(pm * 100)) if pm is not None else None, oid))
+        what.append("delivery fees")
+    if "faq_text" in b:
+        ft = str(b.get("faq_text") or "").replace("\r\n", "\n").strip()[:12000]
+        db().execute("UPDATE regions SET faq_text=? WHERE id=?", (ft or None, oid))
+        what.append("FAQ")
+    if not what:
+        return jsonify({"ok": False, "error": "Nothing to save."}), 400
+    db().commit()
+    fr = fee_rules(oid)
+    log("region_fees", "%s: %s saved by %s (fee %s first %g mi, then %s/mi, %s)" % (
+        reg["name"], " and ".join(what), session.get("dispatcher_name") or "dispatch",
+        money(fr["base_fee"]), float(fr["base_miles"] or 0), money(fr["per_mile"]), fr["from"]))
+    return jsonify({"ok": True, "fees": fr})
 
 
 @app.post("/api/dispatch/delivery-rules")
@@ -11877,6 +11951,22 @@ def dispatch_import_website():
             result = {"ok": False, "error": "Tick the box to confirm you own this website or have the owner's permission."}
         else:
             con, done, failed = db(), [], []
+            reg_done, reg_faq = [], None
+            _fr = (request.form.get("faq_region") or "").strip()
+            if request.form.get("use_faqs") and _fr.isdigit() and _region(int(_fr)) is not None:
+                reg_faq = int(_fr)
+                pairs = []
+                for i, (q, a) in enumerate(data.get("faqs") or []):
+                    if request.form.get("fk%d" % i):
+                        pairs.append("Q: %s\nA: %s" % (" ".join((request.form.get("fq%d" % i) or q).split()),
+                                                        " ".join((request.form.get("fa%d" % i) or a).split())))
+                if pairs:
+                    con.execute("UPDATE regions SET faq_text=? WHERE id=?", ("\n\n".join(pairs)[:12000], reg_faq))
+                    con.commit()
+                    rn = _region(reg_faq)["name"]
+                    reg_done.append("%d FAQs for the %s region" % (len(pairs), rn))
+                    log("site", "%s region FAQ filled from %s (%d questions)" % (rn, data.get("site") or "a website", len(pairs)))
+            done = list(reg_done)
             bsid = brand_target(con, request.form.get("brand"), request.form.get("business_name") or data.get("business_name"))
             if bsid:
                 picks, parts = {}, {"colors"} if request.form.get("use_colors") else set()
@@ -11891,7 +11981,7 @@ def dispatch_import_website():
                     picks["social_" + k] = (request.form.get("social_" + k) or "").strip() if request.form.get("use_social_" + k) else ""
                     if picks["social_" + k]:
                         parts.add("socials")
-                if request.form.get("use_faqs"):
+                if request.form.get("use_faqs") and not reg_faq:
                     pairs = []
                     for i, (q, a) in enumerate(data.get("faqs") or []):
                         if request.form.get("fk%d" % i):
@@ -11911,11 +12001,12 @@ def dispatch_import_website():
                 # only the ticked text goes in: drop blank picks so the brand keeps its own
                 picks = {k: v for k, v in picks.items() if v not in ("", None)}
                 done, failed = brand_fill(con, bsid, data, parts, picks)
+                done = reg_done + list(done)
                 b = site_by_id(bsid)
                 log("site", "Brand " + b["name"] + " filled from " + (data.get("site") or "a website") + ": " + ", ".join(done))
                 result = {"ok": True, "done": done, "failed": failed, "brand": b["name"], "brand_id": bsid}
                 return render_template("dispatch_import_website.html", data=data, result=result, fields=WEBCOPY_TEXT,
-                                       faqs=(data or {}).get("faqs") or [], sites=db().execute("SELECT id,name FROM sites ORDER BY sort,id").fetchall(),
+                                       faqs=(data or {}).get("faqs") or [], faq_regions=faq_region_list(), sites=db().execute("SELECT id,name FROM sites ORDER BY sort,id").fetchall(),
                                        phone_fmt=nice_phone((data or {}).get("phone") or ""))
             def put(k, v):
                 con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, v))
@@ -11933,7 +12024,7 @@ def dispatch_import_website():
                         v = "https://" + v
                     put("social_" + k, v)
                     done.append({"x": "X (Twitter)", "facebook": "Facebook", "instagram": "Instagram"}[k])
-            if request.form.get("use_faqs"):
+            if request.form.get("use_faqs") and not reg_faq:
                 qs = [(request.form.get("fq%d" % i) or "").strip() for i in range(len(data.get("faqs") or []))]
                 pairs = []
                 for i, (q, a) in enumerate(data.get("faqs") or []):
@@ -11966,7 +12057,7 @@ def dispatch_import_website():
             result = {"ok": True, "done": done, "failed": failed}
     faqs = (data or {}).get("faqs") or []
     return render_template("dispatch_import_website.html", data=data, result=result, fields=WEBCOPY_TEXT,
-                           faqs=faqs, sites=db().execute("SELECT id,name FROM sites ORDER BY sort,id").fetchall(),
+                           faqs=faqs, faq_regions=faq_region_list(), sites=db().execute("SELECT id,name FROM sites ORDER BY sort,id").fetchall(),
                            phone_fmt=nice_phone((data or {}).get("phone") or ""))
 
 
@@ -12010,6 +12101,23 @@ def dispatch_import_zuppler():
         result = tigertown_import(pick_ids=set(picks) if picks else set(),
                                   skip_paused=False, replace_menu=True,
                                   region_id=int(rg) if rg.isdigit() else None)
+        if result.get("ok") and rg.isdigit() and request.form.get("use_fee") and _region(int(rg)) is not None:
+            # the old site's delivery fee becomes that region's own delivery fee (the most common one)
+            from collections import Counter
+            want = {str(x) for x in picks}
+            fees = [int(z.get("delivery_fee_cents") or 0) for z in (data or {}).get("restaurants") or []
+                    if (not want or str(z["zid"]) in want) and int(z.get("delivery_fee_cents") or 0) > 0]
+            if fees:
+                cnt = Counter(fees)
+                fee = cnt.most_common(1)[0][0]
+                db().execute("UPDATE regions SET base_fee_cents=? WHERE id=?", (fee, int(rg)))
+                db().commit()
+                rn = _region(int(rg))["name"]
+                result["fee_set"], result["fee_region"] = money(fee), rn
+                result["fee_mixed"] = len(cnt) > 1
+                log("region_fees", "%s delivery fee set to %s from %s" % (rn, money(fee), (data or {}).get("source") or "the import"))
+            else:
+                result["fee_none"] = True
         if result.get("ok") and not brands_on() and request.form.get("main_fill"):
             web = (data or {}).get("site") or re.sub(r"\s*\(.*\)$", "", (data or {}).get("source") or "")
             pulled = None
@@ -13586,9 +13694,43 @@ Q: I have a problem with my order, what should I do?
 A: If there is any problem with your order, you must call us within 15 minutes of the order being delivered. We will confirm the mistake with the restaurant. Once we verify with the restaurant that the problem was on their end, we will either have your self-employed delivery professional re-deliver the missing or incorrect item or refund you the amount. We do not issue refunds for orders on our own. If you have an issue with your food, we will be happy to speak with the restaurant to help get you a refund. We are contractually obligated not to refund any orders without consent from the restaurant.
 """
 
-def faq_items():
-    raw = (setting("faq_text", str) or "").strip() or DEFAULT_FAQ
-    ph = dispatch_phone()
+def faq_region_list():
+    """Regions with their brand's name, for 'put these FAQs on' pickers."""
+    out = []
+    try:
+        names = {r["id"]: r["name"] for r in db().execute("SELECT id, name FROM sites").fetchall()}
+        for g in all_regions():
+            reg = _region(g["id"])
+            out.append({"id": g["id"], "name": g["name"], "brand": names.get((_rv(reg, "site_id") or 0), ""),
+                        "own": bool((_rv(reg, "faq_text") or "").strip())})
+    except Exception:
+        pass
+    return out
+
+def faq_region_id():
+    """The region whose FAQ the customer sees: the area they picked, else the first region
+    with its own FAQ on this brand's website. 0 = the business FAQ."""
+    try:
+        pick = request.args.get("region")
+        if pick is None:
+            pick = session.get("cust_region") or ""
+        if str(pick).isdigit() and _region(int(pick)) is not None:
+            return int(pick)
+        s = current_site()
+        if s is not None:
+            for rid in sorted(site_region_ids(s["id"])):
+                reg = _region(rid)
+                if reg is not None and (_rv(reg, "faq_text") or "").strip():
+                    return rid
+    except Exception:
+        pass
+    return 0
+
+def faq_items(region_id=None):
+    reg = _region(region_id) if region_id else None
+    raw = ((_rv(reg, "faq_text") or "").strip() if reg is not None else "") \
+        or (setting("faq_text", str) or "").strip() or DEFAULT_FAQ
+    ph = ((_rv(reg, "phone") or "") if reg is not None else "") or dispatch_phone()
     rep_ = {"{business}": (setting("business_name", str) or "Fleet Foot Delivery").strip(), "{phone}": nice_phone(ph) or "dispatch",
             "{email}": (setting("business_email", str) or "").strip(), "{address}": (setting("business_address", str) or "").strip()}
     items, q, a = [], None, []
@@ -13609,7 +13751,7 @@ def faq_items():
 
 @app.route("/faq")
 def faq_page():
-    return render_template("faq.html", faqs=faq_items())
+    return render_template("faq.html", faqs=faq_items(faq_region_id()))
 
 @app.post("/api/home-search")
 def api_home_search():
@@ -13623,7 +13765,7 @@ def api_home_search():
     for r in db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' AND lat IS NOT NULL").fetchall():
         miles = round(haversine_miles(r["lat"], r["lng"], g["lat"], g["lng"]) * ROAD_FACTOR, 1)
         mx = delivery_rules(r)["max_miles"]
-        out.append({"slug": r["slug"], "miles": miles, "fee": money(fee_for_miles(miles)), "ok": (not mx) or miles <= mx})
+        out.append({"slug": r["slug"], "miles": miles, "fee": money(fee_for_miles(miles, r["region_id"])), "ok": (not mx) or miles <= mx})
     return jsonify({"ok": True, "formatted": g.get("formatted") or addr, "restaurants": out,
                     "count": len([x for x in out if x["ok"]])})
 
