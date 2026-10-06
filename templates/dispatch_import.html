@@ -57,9 +57,9 @@
   <form method="post" onsubmit="return confirm('Import the checked restaurants? Menus on matching restaurants will be replaced.')">
     <p>
 {% if regions_on %}
-      <label>Put new restaurants in region
-        <select name="region_id"><option value="">No region</option>
-          {% for g in regions %}<option value="{{ g['id'] }}">{{ g['name'] }}</option>{% endfor %}
+      <label>Put these restaurants in region
+        <select name="region_id"><option value="">Keep each restaurant's region (new ones get none)</option>
+          {% for g in regions %}<option value="{{ g['id'] }}">{{ g['name'] }}{% if g['brand'] %} ({{ g['brand'] }}){% endif %}</option>{% endfor %}
         </select></label>
       <label class="small"><input type="checkbox" name="use_fee" value="1" checked> Use this website's delivery fee for that region</label>
       {% endif %}

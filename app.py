@@ -11603,9 +11603,10 @@ def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_
                            logo=?, address=CASE WHEN address IS NULL OR address='' THEN ? ELSE address END,
                            lat=COALESCE(lat,?), lng=COALESCE(lng,?), hours=?, eta_min=COALESCE(?,eta_min),
                            phone=CASE WHEN phone IS NULL OR phone='' THEN ? ELSE phone END,
-                           min_order_cents=COALESCE(?,min_order_cents) WHERE id=?""",
+                           min_order_cents=COALESCE(?,min_order_cents), region_id=COALESCE(?,region_id) WHERE id=?""",
                         (str(z["zid"]), z["cuisine"], z["photo"] or "", z["logo"] or "", z["address"], z["lat"], z["lng"],
-                         hours, z.get("eta_min"), z.get("phone") or "", z.get("min_order_cents") or None, rid))
+                         hours, z.get("eta_min"), z.get("phone") or "", z.get("min_order_cents") or None,
+                         region_id or None, rid))
             updated += 1
         else:
             base = "".join(ch if ch.isalnum() else "-" for ch in z["name"].lower()).strip("-")
@@ -12271,7 +12272,7 @@ def dispatch_import_zuppler():
                          "pics": sum(1 for i in z["items"] if i["image"]),
                          "paused": bool(z.get("paused") or "(old)" in low or " dnd" in low),
                          "here": bool(m)})
-    return render_template("dispatch_import.html", rows=rows, result=result, regions=all_regions(),
+    return render_template("dispatch_import.html", rows=rows, result=result, regions=faq_region_list(),
                            sites=db().execute("SELECT id,name FROM sites ORDER BY sort,id").fetchall(),
                            region_site={r["id"]: (r["site_id"] or 0) for r in db().execute("SELECT id,site_id FROM regions").fetchall()},
                            remote_pics=remote_picture_count(),
