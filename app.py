@@ -2,7 +2,7 @@
 import urllib.error
 import base64, difflib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
 import dbx
-from flask import Flask, g, request, session, redirect, url_for, render_template, jsonify, send_from_directory, flash, get_flashed_messages
+from flask import Flask, g, has_request_context, request, session, redirect, url_for, render_template, jsonify, send_from_directory, flash, get_flashed_messages
 import presets
 
 # ---------------------------------------------------------------- local time
@@ -476,6 +476,9 @@ def init_db():
     ensure_column(con, "regions", "closed_dates", "TEXT")   # "2026-11-26,2026-12-25"
     ensure_column(con, "regions", "closed_hours", "TEXT")   # {"2026-11-26": ["15:00","23:59"]} closed only that window
     ensure_column(con, "regions", "phone", "TEXT")          # blank = the business dispatch number
+    con.execute("""CREATE TABLE IF NOT EXISTS sites (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                   phone TEXT, domains TEXT, logo TEXT, sort INTEGER DEFAULT 0, created_at TEXT)""")
+    ensure_column(con, "regions", "site_id", "INTEGER DEFAULT 0")   # 0 = not tied to a brand site
     ensure_column(con, "regions", "min_order_cents", "INTEGER")   # blank = no minimum
     ensure_column(con, "regions", "max_miles", "REAL")            # blank = no radius limit
     ensure_column(con, "restaurants", "min_order_cents", "INTEGER")  # blank = use the region's
@@ -826,7 +829,104 @@ def seed(con):
         con.execute("INSERT OR REPLACE INTO geocache(q,formatted,lat,lng,ok) VALUES(?,?,?,?,1)",
                     (q, f, la, ln))
 
+_SITE_KEYS = {"business_name": "name", "dispatch_phone": "phone"}
+_STAFF_PREFIXES = ("/dispatch", "/driver", "/restaurant", "/api/dispatch", "/api/driver", "/api/restaurant",
+                   "/go/", "/api/hub", "/manifest/hub")
+
+
+def _norm_host(h):
+    h = (h or "").strip().lower()
+    for pre in ("https://", "http://"):
+        if h.startswith(pre):
+            h = h[len(pre):]
+    h = h.split("/")[0].split(":")[0]
+    return h[4:] if h.startswith("www.") else h
+
+
+def site_domains(s):
+    return [d for d in (_norm_host(x) for x in re.split(r"[\s,]+", (s["domains"] or "") if s else "")) if d]
+
+
+def site_by_id(sid):
+    try:
+        sid = int(sid or 0)
+    except (TypeError, ValueError):
+        return None
+    if not sid:
+        return None
+    return db().execute("SELECT * FROM sites WHERE id=?", (sid,)).fetchone()
+
+
+def site_of_region(rid):
+    try:
+        rid = int(rid or 0)
+    except (TypeError, ValueError):
+        return None
+    if not rid:
+        return None
+    r = db().execute("SELECT site_id FROM regions WHERE id=?", (rid,)).fetchone()
+    return site_by_id(r["site_id"]) if r else None
+
+
+def site_region_ids(sid):
+    return {r["id"] for r in db().execute("SELECT id FROM regions WHERE COALESCE(site_id,0)=?", (int(sid),)).fetchall()}
+
+
+def current_site():
+    """The brand site this request belongs to: its web address, or a ?site= preview. None on staff pages."""
+    if not has_request_context():
+        return None
+    if "_site_forced" in g:
+        return g._site_forced
+    if "_site" in g:
+        return g._site
+    s = None
+    try:
+        if not request.path.startswith(_STAFF_PREFIXES):
+            pv = request.args.get("site")
+            if pv is not None and pv.isdigit():
+                session["site_preview"] = int(pv)
+            host = _norm_host(request.host)
+            for row in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
+                if host in site_domains(row):
+                    s = row
+                    break
+            if s is None and session.get("site_preview"):
+                s = site_by_id(session.get("site_preview"))
+    except Exception:
+        s = None
+    g._site = s
+    return s
+
+
+class order_site:
+    """with order_site(region_id): texts and pages use that region's brand name and number."""
+    def __init__(self, rid):
+        self.rid = rid
+    def __enter__(self):
+        if has_request_context():
+            self.had = "_site_forced" in g
+            self.old = g.get("_site_forced")
+            s = site_of_region(self.rid)
+            if s is not None:
+                g._site_forced = s
+            elif not self.had:
+                self.had = None
+        return self
+    def __exit__(self, *a):
+        if has_request_context() and self.had is not None:
+            if self.had:
+                g._site_forced = self.old
+            else:
+                g.pop("_site_forced", None)
+        return False
+
+
 def setting(key, cast=int):
+    if key in _SITE_KEYS:
+        s = current_site()
+        if s is not None and (s[_SITE_KEYS[key]] or "").strip():
+            return cast(s[_SITE_KEYS[key]].strip())
     row = db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return cast(row["value"]) if row else None
 
@@ -2409,8 +2509,10 @@ def order_dict(o):
         _e = eta_info(o, r, d)
     except Exception:
         _e = {"eta_min": None, "eta_clock": "", "eta_note": ""}
+    _so = site_of_region(o["region_id"] if "region_id" in _okeys(o) else None)
     return {
-        "id": o["id"], "code": o["code"],
+        "id": o["id"], "code": o["code"], "site_name": (_so["name"] if _so is not None else ""),
+        "site_phone": (nice_phone(_so["phone"] or "") if _so is not None and (_so["phone"] or "").strip() else ""),
         "eta_min": _e["eta_min"], "eta_clock": _e["eta_clock"], "eta_note": _e["eta_note"],
         "scheduled_for": o["scheduled_for"], "scheduled_label": when_label(o["scheduled_for"]) if o["scheduled_for"] else "",
         "release_label": when_label(o["release_at"]) if o["release_at"] else "", "ref": (o["ref_code"] or ""), "restaurant": pu["name"], "restaurant_address": pu["address"],
@@ -2499,6 +2601,10 @@ def order_dict(o):
 @app.route("/")
 def home():
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
+    _site = current_site()
+    if _site is not None:
+        _sreg = site_region_ids(_site["id"])
+        rs = [r for r in rs if r["region_id"] and r["region_id"] in _sreg]
     biz_on = business_is_open()
     # region picker: only regions that actually have restaurants
     used = {r["region_id"] for r in rs if r["region_id"]}
@@ -2532,6 +2638,9 @@ def menu(slug):
     if not r:
         return redirect(url_for("home"))
     if r["slug"] == "oneoff" and not any_rest_on():
+        return redirect(url_for("home"))
+    _site = current_site()
+    if _site is not None and r["slug"] != "oneoff" and (r["region_id"] or 0) not in site_region_ids(_site["id"]):
         return redirect(url_for("home"))
     items = db().execute("SELECT * FROM menu_items WHERE restaurant_id=? AND active=1", (r["id"],)).fetchall()
     biz = business_is_open() and business_in_hours(rid=r["region_id"])
@@ -7151,11 +7260,128 @@ def api_dispatcher_avail_edit():
 
 # ---------------------------------------------------------------- regions page
 
+def sites_payload():
+    out = []
+    for s in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
+        lg = (s["logo"] or "").strip()
+        out.append({"id": s["id"], "name": s["name"], "phone": nice_phone(s["phone"] or "") if (s["phone"] or "").strip() else "",
+                    "domains": ", ".join(site_domains(s)),
+                    "logo": media_url(lg) if lg and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(lg))) else "",
+                    "regions": sorted(site_region_ids(s["id"]))})
+    return out
+
+
+def sites_edit(b, con, who):
+    """Owner only: the brand sites (name, phone, web addresses) and which regions belong to each."""
+    if not is_owner():
+        return jsonify({"ok": False, "error": "Only an owner can change the brand sites."}), 403
+    op = b.get("op")
+    if op in ("add_site", "edit_site"):
+        name = " ".join(str(b.get("name") or "").split())[:60]
+        if not name:
+            return jsonify({"ok": False, "error": "Give the site a business name."}), 400
+        ph = "".join(c for c in str(b.get("phone") or "") if c.isdigit())
+        if len(ph) == 11 and ph.startswith("1"):
+            ph = ph[1:]
+        if ph and len(ph) != 10:
+            return jsonify({"ok": False, "error": "Enter a 10-digit phone number."}), 400
+        doms = []
+        for d in re.split(r"[\s,]+", str(b.get("domains") or "")):
+            d = _norm_host(d)
+            if not d:
+                continue
+            if not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d):
+                return jsonify({"ok": False, "error": d + " is not a web address. Use something like tigertowntogo.com."}), 400
+            if d not in doms:
+                doms.append(d)
+        sid = int(b.get("id") or 0) if op == "edit_site" else 0
+        if op == "edit_site" and not site_by_id(sid):
+            return jsonify({"ok": False, "error": "That site is gone."}), 404
+        for s in con.execute("SELECT * FROM sites WHERE id IS NOT ?", (sid or None,)).fetchall():
+            if s["name"].lower() == name.lower():
+                return jsonify({"ok": False, "error": "There is already a site called " + name + "."}), 400
+            both = set(doms) & set(site_domains(s))
+            if both:
+                return jsonify({"ok": False, "error": sorted(both)[0] + " already belongs to " + s["name"] + "."}), 400
+        if op == "add_site":
+            srt = con.execute("SELECT COALESCE(MAX(sort),0)+1 s FROM sites").fetchone()["s"]
+            cur = con.execute("INSERT INTO sites(name,phone,domains,sort,created_at) VALUES(?,?,?,?,?)",
+                              (name, ph, ",".join(doms), srt, now()))
+            sid = cur.lastrowid
+            log("site", who + " added brand site " + name)
+        else:
+            con.execute("UPDATE sites SET name=?, phone=?, domains=? WHERE id=?", (name, ph, ",".join(doms), sid))
+            log("site", who + " changed brand site " + name)
+        con.commit()
+        return jsonify({"ok": True, "id": sid, **regions_payload()})
+    if op == "delete_site":
+        s = site_by_id(b.get("id"))
+        if not s:
+            return jsonify({"ok": False, "error": "That site is gone."}), 404
+        con.execute("UPDATE regions SET site_id=0 WHERE site_id=?", (s["id"],))
+        con.execute("DELETE FROM sites WHERE id=?", (s["id"],))
+        drop_media((s["logo"] or "").strip())
+        con.commit()
+        log("site", who + " deleted brand site " + s["name"])
+        return jsonify({"ok": True, **regions_payload()})
+    # set_region_site
+    try:
+        rid = int(b.get("region_id") or 0)
+        sid = int(b.get("site_id") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "Pick a region."}), 400
+    if not con.execute("SELECT 1 FROM regions WHERE id=?", (rid,)).fetchone():
+        return jsonify({"ok": False, "error": "That region is gone."}), 404
+    if sid and not site_by_id(sid):
+        return jsonify({"ok": False, "error": "That site is gone."}), 404
+    con.execute("UPDATE regions SET site_id=? WHERE id=?", (sid, rid))
+    con.commit()
+    log("site", who + " moved a region to " + (site_by_id(sid)["name"] if sid else "no site"))
+    return jsonify({"ok": True, **regions_payload()})
+
+
+@app.post("/api/dispatch/site-logo")
+def api_site_logo():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    if not is_owner():
+        return jsonify({"ok": False, "error": "Only an owner can change the brand sites."}), 403
+    s = site_by_id(request.form.get("id"))
+    if not s:
+        return jsonify({"ok": False, "error": "That site is gone."}), 404
+    old = (s["logo"] or "").strip()
+    if request.form.get("op") == "reset":
+        drop_media(old)
+        db().execute("UPDATE sites SET logo='' WHERE id=?", (s["id"],))
+        db().commit()
+        return jsonify({"ok": True, "logo": ""})
+    fs = request.files.get("photo")
+    if not fs:
+        return jsonify({"ok": False, "error": "Choose a picture to upload."}), 400
+    raw = fs.read(PHOTO_MAX_BYTES + 1)
+    if len(raw) > PHOTO_MAX_BYTES:
+        return jsonify({"ok": False, "error": "That picture is over 10 MB. Pick a smaller one."}), 400
+    try:
+        from PIL import Image
+        import io
+        im = Image.open(io.BytesIO(raw)).convert("RGBA")
+        im.thumbnail((512, 512))
+        name = secrets.token_hex(10) + ".png"
+        im.save(os.path.join(UPLOAD_DIR, name), "PNG", optimize=True)
+    except Exception:
+        return jsonify({"ok": False, "error": "That picture could not be read. Try a PNG or JPG."}), 400
+    drop_media(old)
+    db().execute("UPDATE sites SET logo=? WHERE id=?", (name, s["id"]))
+    db().commit()
+    return jsonify({"ok": True, "logo": media_url(name)})
+
+
 def regions_payload():
     con = db()
     regs = all_regions()
     return {"ok": True, "me": session.get("dispatcher_id"), "owner": is_owner(),
-            "regions": [{"id": r["id"], "name": r["name"],
+            "sites": sites_payload(),
+            "regions": [{"id": r["id"], "name": r["name"], "site_id": (_region(r["id"])["site_id"] or 0),
                          "own_hours": bool(region_own_hours(r["id"])),
                          "min_order_cents": _rv(_region(r["id"]), "min_order_cents"),
                          "max_miles": _rv(_region(r["id"]), "max_miles"),
@@ -7275,6 +7501,7 @@ def api_find_order():
                     "kitchen": o["kitchen_status"], "hold_reason": o["hold_reason"] or "",
                     "driver": d["name"] if d else "", "created": (o["created_at"] or "")[:16].replace("T", " "),
                     "region": names.get(o["region_id"] or 0, "No region"),
+                    "site_name": (lambda _s: _s["name"] if _s is not None else "")(site_of_region(o["region_id"])),
                     "mine": covers(myr, o["region_id"]),
                     "web": (o["source"] or "") == "website",
                     "track": "/track/" + o["code"]})
@@ -7485,6 +7712,8 @@ def api_regions_edit():
                 out.add(x)
         return out
 
+    if op in ("add_site", "edit_site", "delete_site", "set_region_site"):
+        return sites_edit(b, con, who)
     if op in ("add_region", "rename_region"):
         name = " ".join(str(b.get("name") or "").split())[:40]
         if not name:
@@ -9710,6 +9939,9 @@ def api_site_image():
 
 
 def logo_url():
+    s = current_site()
+    if s is not None and (s["logo"] or "").strip() and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(s["logo"]))):
+        return media_url(s["logo"])
     name = (setting("logo_image", str) or "").strip()
     if name and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(name))):
         return media_url(name)
@@ -9717,6 +9949,11 @@ def logo_url():
 
 
 def logo_path():
+    s = current_site()
+    if s is not None and (s["logo"] or "").strip():
+        sp = os.path.join(UPLOAD_DIR, os.path.basename(s["logo"]))
+        if os.path.exists(sp):
+            return sp
     name = (setting("logo_image", str) or "").strip()
     p = os.path.join(UPLOAD_DIR, os.path.basename(name)) if name else ""
     if p and os.path.exists(p):
@@ -10989,6 +11226,9 @@ def dispatch_phone(rid=None):
             r = db().execute("SELECT phone FROM regions WHERE id=?", (int(rid),)).fetchone()
             if r and (r["phone"] or "").strip():
                 return r["phone"].strip()
+            s = site_of_region(rid)
+            if s is not None and (s["phone"] or "").strip():
+                return s["phone"].strip()
         except Exception:
             pass
     return (setting("dispatch_phone", str) or "").strip()
@@ -11657,6 +11897,13 @@ def confirm_call_info(o):
         return None
     return {"phone": nice_phone(ph), "tel": tel_digits(ph)}
 
+def _reg0(oid):
+    try:
+        r = db().execute("SELECT region_id FROM orders WHERE id=?", (oid,)).fetchone()
+        return r["region_id"] if r else None
+    except Exception:
+        return None
+
 def apply_checkout_credits(oid, code, cr, placed_by):
     """Spend the gift card / rewards on the new order, charge a saved card, and set the confirm call."""
     note = {"paid": False, "message": "", "gift": "", "rewards": "", "saved_card": ""}
@@ -11674,7 +11921,7 @@ def apply_checkout_credits(oid, code, cr, placed_by):
     _o0 = db().execute("SELECT customer_phone, address FROM orders WHERE id=?", (oid,)).fetchone()
     if placed_by == "customer" and cr["customer_id"] and _o0:
         db().execute("UPDATE customers SET address=? WHERE id=?", (_o0["address"], cr["customer_id"]))
-    if placed_by == "customer" and setting("confirm_call") and dispatch_phone() and _o0 and customer_is_new(_o0["customer_phone"]):
+    if placed_by == "customer" and setting("confirm_call") and dispatch_phone(_reg0(oid)) and _o0 and customer_is_new(_o0["customer_phone"]):
         db().execute("UPDATE orders SET confirm_state='waiting', kitchen_go=0 WHERE id=?", (oid,))
         db().execute("UPDATE orders SET kitchen_status='waiting', kitchen_sent_at=NULL WHERE id=? AND kitchen_status='pending'", (oid,))
     db().commit()

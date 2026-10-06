@@ -141,6 +141,7 @@
 {% block scripts %}
 <script src="/static/itempick.js"></script><script src="/static/cardbox.js"></script><script src="/static/ppcard.js"></script>
 <script>
+function siteTag(o){ return o && o.site_name ? '<span class="pill" title="Answer the phone as '+String(o.site_name).replace(/[&<>"']/g,'')+(o.site_phone?' ('+o.site_phone+')':'')+'">'+String(o.site_name).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</span> ' : ''; }
 let DRAGGED = null;
 let SEEN_PENDING = null;
 let LAST = null;
@@ -765,7 +766,7 @@ function renderCompleted(res){
     '<div class="order"><div class="order-head"><strong>'+o.code+'</strong> '+refPill(o)+tokenPill(o)+'<span class="pill '+
     (o.dispatch_status==='delivered'?'green':'grey')+'">'+o.dispatch_status+'</span> '+
     '<span class="muted small">'+(o.delivered_time || (o.delivered_at||'').replace('T',' '))+'</span></div>'+
-    '<div class="muted small">'+o.restaurant+' &rarr; '+o.customer+' &middot; '+o.address+
+    '<div class="muted small">'+siteTag(o)+o.restaurant+' &rarr; '+o.customer+' &middot; '+o.address+
     ' &middot; '+milesLabel(o)+' &middot; fee '+o.fee+' &middot; <strong>tip '+o.tip+'</strong>'+(o.discount ? ' &middot; discount '+o.discount : '')+' &middot; total '+o.total+
     (o.driver?' &middot; driver '+o.driver:'')+'</div>'+
     '<div class="order-actions">'+
@@ -898,7 +899,7 @@ async function findAny(){
   if (!r.ok){ out.innerHTML = '<p class="muted small">Search did not work. Try again.</p>'; return; }
   out.innerHTML = (r.results.length ? r.results.map(o=>
     '<div class="findres'+(o.mine?'':' other')+'"><div class="row between"><span><strong>'+fEsc(o.code)+'</strong> '+
-    fEsc(o.customer)+' &middot; '+fEsc(o.restaurant)+' <span class="pill blue">'+fEsc(o.region)+'</span>'+
+    fEsc(o.customer)+' &middot; '+fEsc(o.restaurant)+' <span class="pill blue">'+fEsc(o.region)+'</span> '+siteTag(o)+
     (o.web?' <span class="pill green">Web</span>':'')+
     (o.mine?'':' <span class="pill amber">outside your regions</span>')+'</span>'+
     '<span class="muted small">'+fEsc(o.created)+'</span></div>'+
@@ -1296,7 +1297,7 @@ function orderCard(o, opts, drivers){
     ' '+srcPill(o)+
     payPill(o)+
     (o.placed_by!=='customer' ? ' <span class="pill grey">by '+o.placed_by+'</span>' : '')+'</div>'+
-    '<div class="muted small">'+o.restaurant+' &rarr; '+o.customer+' &middot; '+o.address+
+    '<div class="muted small">'+siteTag(o)+o.restaurant+' &rarr; '+o.customer+' &middot; '+o.address+
     ' &middot; '+milesLabel(o)+' &middot; fee '+o.fee+' &middot; total '+o.total+'</div>'+
     (o.needs_address_approval ? '<div class="issuebar">Address not verified &middot; pending dispatch '+
       'approval. The kitchen has not seen this order yet.</div>' : '')+
