@@ -6,7 +6,7 @@
   {% if any_rest_label() %}Available {{ any_rest_label() }}.{% endif %}
   <span class="pill {{ 'green' if open else 'grey' }}">{{ 'Open' if open else 'Closed' }}</span></p>
 {% else %}
-{% if r['logo'] %}<img class="herologo" src="{{ r['logo'] }}" alt="">{% endif %}
+{% if r['logo'] %}<img class="herologo" src="{{ r['logo'] if (r['logo'].startswith('http') or r['logo'].startswith('/')) else '/media/' ~ r['logo'] }}" alt="">{% endif %}
 {% if r['image'] %}<img class="hero" src="{{ r['image'] if r['image'].startswith('http') else '/media/' ~ r['image'] }}" alt="{{ r['name'] }}">{% endif %}
 <h1>{{ r['name'] }}</h1>
 <p class="muted">{{ r['address'] }} &middot; {{ hours }} &middot;

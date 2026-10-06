@@ -75,7 +75,7 @@
       <tr>
         <td><input type="checkbox" name="pick" value="{{ r.zid }}" data-paused="{{ 1 if r.paused else 0 }}" {{ '' if r.paused else 'checked' }}></td>
         <td><div style="display:flex;gap:8px;align-items:center">
-          {% if r.logo %}<img src="{{ r.logo }}" alt="" style="width:36px;height:36px;object-fit:contain;border-radius:6px;background:#fff">{% endif %}
+          {% if r.logo %}<img src="{{ r.logo if (r.logo.startswith('http') or r.logo.startswith('/')) else '/media/' ~ r.logo }}" alt="" style="width:36px;height:36px;object-fit:contain;border-radius:6px;background:#fff">{% endif %}
           <div><b>{{ r.name }}</b><div class="muted small">{{ r.cuisine }} · {{ r.address }}</div></div></div></td>
         <td>{% if r.min_here is none and not r.here %}{{ r.min_old|money }}{% elif r.min_ok %}{{ r.min_old|money }}{% else %}<span class="bad">{{ (r.min_here or 0)|money }} here</span><br><span class="muted small">{{ r.min_old|money }} on old site</span>{% endif %}</td>
         <td>{{ r.items }}</td><td>{{ r.pics }}</td>

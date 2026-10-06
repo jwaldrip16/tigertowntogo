@@ -63,7 +63,7 @@
   {% for c in cards %}
   <a class="card {{ 'closed' if not c.open else '' }}" data-slug="{{ c.r['slug'] }}" href="/r/{{ c.r['slug'] }}">
     {% if c.r['image'] %}<img class="cardimg" src="{{ c.r['image'] if c.r['image'].startswith('http') else '/media/' ~ c.r['image'] }}" alt="" loading="lazy">{% endif %}
-    {% if c.r['logo'] %}<img class="cardlogo" src="{{ c.r['logo'] }}" alt="" loading="lazy">{% endif %}
+    {% if c.r['logo'] %}<img class="cardlogo" src="{{ c.r['logo'] if (c.r['logo'].startswith('http') or c.r['logo'].startswith('/')) else '/media/' ~ c.r['logo'] }}" alt="" loading="lazy">{% endif %}
     <h3>{{ c.r['name'] }}</h3>
     <p class="muted">{{ c.r['address'] }}</p>
     <p class="muted">{{ c.hours }}</p>
