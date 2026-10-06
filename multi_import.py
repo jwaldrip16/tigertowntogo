@@ -402,7 +402,33 @@ def _faqs(page):
             a = _txt(parts[i + 1])
             if a:
                 out.append((q, a[:1500]))
+    if out:
+        return out
+    # older sites: a bold question ("<strong>How do I order?</strong>") with the answer after it
+    body = re.sub(r"<script.*?</script>|<style.*?</style>", "", page, flags=re.S | re.I)
+    cut = re.search(r"<footer|class=\"site-footer", body, re.I)
+    if cut:
+        body = body[:cut.start()]
+    parts = re.split(r"(<(?:strong|b)\b[^>]*>(?:(?!</?(?:strong|b)\b).)*?\?\s*</(?:strong|b)>)", body, flags=re.S | re.I)
+    for i in range(1, len(parts), 2):
+        q = _txt(parts[i])
+        if not (q.endswith("?") and 8 <= len(q) <= 200):
+            continue
+        a = parts[i + 1] if i + 1 < len(parts) else ""
+        a = re.split(r"<hr\b", a, flags=re.I)[0]
+        a = re.sub(r"(?i)<br\s*/?>|</p>", "\n", a)
+        a = re.sub(r"_{4,}", "", _txt_keep(a))
+        a = "\n".join(l.strip() for l in a.splitlines() if l.strip())
+        if a:
+            out.append((q, a[:1500]))
     return out
+
+
+def _txt_keep(fragment):
+    """Like _txt but keeps line breaks."""
+    t = re.sub(r"<[^>]+>", "", fragment)
+    t = html.unescape(t).replace("\xa0", " ")
+    return "\n".join(" ".join(l.split()) for l in t.splitlines())
 
 
 def _hex6(v):
