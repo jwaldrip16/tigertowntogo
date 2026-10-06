@@ -69,6 +69,14 @@ async function setLogo(inp){
     <label>Gift card maximum ($) <input name="gift_max" type="number" min="5" max="2000" value="{{ (s.get('gift_max_cents','50000')|int)//100 }}" style="max-width:100px"></label></div>
   <label><input type="checkbox" name="confirm_call" value="1" {{ 'checked' if s.get('confirm_call','1') == '1' else '' }}> New customers' website orders: ask them to call dispatch to confirm before the order goes to the kitchen</label>
   <div class="muted small">Existing customers never have to call. New customers see your dispatch number with a Call button, and the order waits on the board with a "Waiting for confirm call" tag until you tap Customer called or Send to kitchen. Mark customers existing on the Customers page.</div>
+  {% if owner_view %}
+  <h2>Brands and regions</h2>
+  <input type="hidden" name="modes_present" value="1">
+  <label><input type="checkbox" name="brands_on" value="1" {% if brands_on %}checked{% endif %}> Use brand sites (more than one brand)</label>
+  <div class="muted small">Turn this off if the business has only one brand. Every page, text and receipt then uses the name, logo, phone and website text here in Settings, the brand buttons go away, and website and menu imports fill the main website. Your brand sites are kept, so turning it back on brings them back.</div>
+  <label><input type="checkbox" name="regions_on" value="1" {% if regions_on %}checked{% endif %}> Use regions (more than one area)</label>
+  <div class="muted small">Turn this off if the business covers one area. Customers won't see the "Where are you?" buttons, and menu imports skip the region choice. Your regions and their settings are kept.</div>
+  {% endif %}
   <h2>Customer website</h2>
   {% if is_owner_view is not defined or is_owner_view %}<p><a class="btn small" href="/dispatch/import-website">Copy a whole website</a> <span class="muted small">Bring in the name, logo, photos, text, contact info and FAQs from a site you own.</span></p>{% endif %}
   <input type="hidden" name="site_present" value="1">

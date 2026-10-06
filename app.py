@@ -859,7 +859,38 @@ def site_by_id(sid):
     return db().execute("SELECT * FROM sites WHERE id=?", (sid,)).fetchone()
 
 
+def _flag_on(key):
+    """An on/off switch from Settings (on unless saved as 0), read once per request."""
+    cache = None
+    try:
+        if has_request_context():
+            cache = g.get("_flags")
+            if cache is None:
+                cache = g._flags = {}
+            if key in cache:
+                return cache[key]
+        row = db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        v = not (row is not None and str(row["value"]).strip() == "0")
+    except Exception:
+        return True
+    if cache is not None:
+        cache[key] = v
+    return v
+
+
+def brands_on():
+    """Settings > Brands and regions: off means one brand, so every page uses the main business."""
+    return _flag_on("brands_on")
+
+
+def regions_on():
+    """Settings > Brands and regions: off means one area, so nobody picks a region."""
+    return _flag_on("regions_on")
+
+
 def site_of_region(rid):
+    if not brands_on():
+        return None
     try:
         rid = int(rid or 0)
     except (TypeError, ValueError):
@@ -878,6 +909,8 @@ def current_site():
     """The brand this request shows: a forced order/restaurant brand, the web address's brand,
     or (on a shared address) the brand of the area the customer picked. None on staff pages."""
     if not has_request_context():
+        return None
+    if not brands_on():
         return None
     if "_site_forced" in g:
         return g._site_forced
@@ -901,6 +934,8 @@ def current_site():
 def host_site():
     """The brand site of the web address itself (or a ?site= preview). None on staff pages."""
     if not has_request_context():
+        return None
+    if not brands_on():
         return None
     if "_hsite" in g:
         return g._hsite
@@ -2725,7 +2760,7 @@ def home():
                for g in all_regions() if g["id"] in used]
     # brand picker on the main (shared) website: one button per brand site with restaurants
     brands, brand_site = [], None
-    if not _own_addr:
+    if not _own_addr and brands_on():
         reg_site = {g["id"]: (g["site_id"] or 0) for g in db().execute("SELECT id, site_id FROM regions").fetchall()}
         used_all = {r["region_id"] for r in rs_all if r["region_id"]}
         used_sites = {reg_site.get(rid, 0) for rid in used_all}
@@ -2756,6 +2791,8 @@ def home():
             session["cust_brand"] = ""
         elif _site is not None:
             brand_site = _site   # previewing a brand: its button shows as picked
+    if not regions_on():
+        regions = []   # regions are off: one area, no "Where are you?" buttons
     pick = request.args.get("region")
     if pick is not None:
         session["cust_region"] = pick if pick.isdigit() else ""
@@ -3663,6 +3700,14 @@ def inject_brand_look():
         return brand_look(s) if s is not None else {"brand_css": "", "brand_theme": "", "brand_font": ""}
     except Exception:
         return {"brand_css": "", "brand_theme": "", "brand_font": ""}
+
+
+@app.context_processor
+def inject_modes():
+    try:
+        return {"brands_on": brands_on(), "regions_on": regions_on()}
+    except Exception:
+        return {"brands_on": True, "regions_on": True}
 
 
 @app.context_processor
@@ -8731,6 +8776,14 @@ def dispatch_settings():
                     pp_msgs.append(("bad", "The %s keys need both a client ID and a secret." % _m))
             if not (_new.get("pp_%s_client" % _mode) and _new.get("pp_%s_secret" % _mode)):
                 pp_msgs.append(("bad", "PayPal is off: there are no %s keys saved, so customers cannot pay online." % _mode))
+        if "modes_present" in request.form and is_owner(session.get("dispatcher_id")):
+            for _k in ("brands_on", "regions_on"):
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                             (_k, "1" if request.form.get(_k) else "0"))
+            db().commit()
+            g.pop("_flags", None)
+            g.pop("_site", None)
+            g.pop("_hsite", None)
         if "cashgps_present" in request.form:
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('allow_cash',?)",
                          ("1" if request.form.get("allow_cash") else "0",))
@@ -11338,6 +11391,42 @@ def webcopy_file():
     return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "website_import.json")
 
 
+def main_fill(con, data):
+    """Fill the main website (Settings) from a read website: name, phone, logo, photos and text.
+    Used when brand sites are off. Returns (filled, not filled) labels."""
+    done, failed = [], []
+    def put(k, v):
+        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, v))
+    for k, label, n in WEBCOPY_TEXT:
+        v = data.get("phone") if k == "dispatch_phone" else data.get(k)
+        v = " ".join(str(v or "").split())[:n]
+        if k == "dispatch_phone":
+            v = re.sub(r"\D", "", v)[-10:]
+        if v:
+            put(k, v)
+            done.append(label)
+    if data.get("logo"):
+        try:
+            name = _webcopy_picture(data["logo"], logo=True)
+            drop_media((setting("logo_image", str) or "").strip())
+            put("logo_image", name)
+            done.append("Logo")
+        except Exception:
+            failed.append("Logo")
+    pics = data.get("pictures") or []
+    for i, (key, label) in enumerate((("hero_image", "Top photo"), ("pocket_image", "App section photo"))):
+        if i < len(pics):
+            try:
+                name = _webcopy_picture(pics[i])
+                drop_media((setting(key, str) or "").strip())
+                put(key, name)
+                done.append(label)
+            except Exception:
+                failed.append(label)
+    con.commit()
+    return done, failed
+
+
 def _webcopy_picture(url, logo=False):
     """Download a picture from the copied site onto your own server. Returns the saved file name."""
     from PIL import Image
@@ -11649,11 +11738,25 @@ def dispatch_import_zuppler():
         result = {"ok": True, "min_fixed": fixed}
     elif request.method == "POST":
         picks = request.form.getlist("pick")
-        rg = request.form.get("region_id") or ""
+        rg = (request.form.get("region_id") or "") if regions_on() else ""
         result = tigertown_import(pick_ids=set(picks) if picks else set(),
                                   skip_paused=False, replace_menu=True,
                                   region_id=int(rg) if rg.isdigit() else None)
-        if result.get("ok") and (request.form.get("brand") or "").strip():
+        if result.get("ok") and not brands_on() and request.form.get("main_fill"):
+            web = (data or {}).get("site") or re.sub(r"\s*\(.*\)$", "", (data or {}).get("source") or "")
+            pulled = None
+            if web:
+                try:
+                    import multi_import
+                    pulled = multi_import.site_pull(web)
+                except Exception:
+                    pulled = None
+            if pulled:
+                result["main_done"], result["main_failed"] = main_fill(db(), pulled)
+                log("settings", "Main website filled from " + web + ": " + ", ".join(result["main_done"]))
+            else:
+                result["main_failed"] = ["I couldn't read " + (web or "the website") + " for the website details"]
+        if result.get("ok") and brands_on() and (request.form.get("brand") or "").strip():
             con = db()
             web = (data or {}).get("site") or re.sub(r"\s*\(.*\)$", "", (data or {}).get("source") or "")
             pulled = None

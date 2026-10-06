@@ -8,7 +8,9 @@
 several regions. Someone with no region checked covers every region. A region picked on someone's availability
 overrides this list while they are working that shift.</p>
 
-<div class="panel" id="stPanel">
+{% if not brands_on %}<div class="panel muted small">Brand sites are off, so every page uses the main name, logo and phone from Settings. Turn them on in Settings &gt; Brands and regions.</div>{% endif %}
+{% if not regions_on %}<div class="panel muted small">Regions are off, so customers don't pick an area and menu imports skip the region choice. Turn them on in Settings &gt; Brands and regions.</div>{% endif %}
+<div class="panel" id="stPanel"{% if not brands_on %} style="display:none"{% endif %}>
   <h2>Brand sites</h2>
   <p class="muted small">Each site has its own business name, phone number, logo, web address and design (colors, font, photos and home page text). Pick a site on each region
   below. A site's website only shows the restaurants in its regions, and its orders, texts and "call to confirm" show that

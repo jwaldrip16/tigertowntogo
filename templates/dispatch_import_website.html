@@ -18,6 +18,7 @@
   <input type="hidden" name="action" value="apply">
   <h2>What I found on {{ data.site }}</h2>
   <p class="muted small">Read from {{ data.pages|length }} page{{ '' if data.pages|length == 1 else 's' }}. Untick anything you don't want, and edit any text before copying.</p>
+{% if brands_on %}
   <label style="display:block;margin:10px 0"><b>Copy it into</b><br>
     <select name="brand">
       <option value="">Main website (Settings &gt; Customer website)</option>
@@ -25,11 +26,17 @@
       <option value="new">A new brand named after this website</option>
     </select>
     <span class="muted small">Pick a brand to fill that brand's name, logo, phone, colors, photos and text. The main website and other brands stay as they are.</span></label>
+  {% else %}
+  <input type="hidden" name="brand" value="">
+  <p class="muted small">This copies into your main website (Settings &gt; Customer website).</p>
+  {% endif %}
+{% if brands_on %}
   {% if data.colors %}
     <label style="display:block;margin:10px 0"><input type="checkbox" name="use_colors" value="1" checked> <b>Colors</b> (for a brand)<br>
     {% for c in data.colors %}<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px"><input type="color" name="color" value="{{ c }}"> <span class="small muted">{{ 'Main' if loop.first else 'Accent' if loop.index == 2 else '' }}</span></span>{% endfor %}</label>
   {% else %}
     <label style="display:block;margin:10px 0"><input type="checkbox" name="use_colors" value="1" checked> <b>Colors</b> (for a brand): this site hides its colors, so I'll take them from its logo.</label>
+  {% endif %}
   {% endif %}
   {% set vals = {'dispatch_phone': phone_fmt} %}
   {% for k, label, n in fields %}{% set v = vals.get(k) or data.get(k) or '' %}{% if v %}
