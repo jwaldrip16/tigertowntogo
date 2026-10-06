@@ -30,6 +30,39 @@ def set_app_tz(name):
 APP_TZ = _pick_tz()
 set_app_tz(APP_TZ)
 
+# Each region can run on its own time zone (Athens GA on Eastern while Opelika stays Central).
+# Every stamp is still saved in APP_TZ; a region's hours, scheduled times and the times shown
+# for its orders are turned into that region's local time.
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
+TZ_CHOICES = [("America/New_York", "Eastern"), ("America/Chicago", "Central"), ("America/Denver", "Mountain"),
+              ("America/Phoenix", "Arizona"), ("America/Los_Angeles", "Pacific"),
+              ("America/Anchorage", "Alaska"), ("Pacific/Honolulu", "Hawaii")]
+TZ_SHORT = {"America/New_York": "ET", "America/Chicago": "CT", "America/Denver": "MT", "America/Phoenix": "MST",
+            "America/Los_Angeles": "PT", "America/Anchorage": "AKT", "Pacific/Honolulu": "HT"}
+_ZCACHE = {}
+
+def _zone(name):
+    if not name or ZoneInfo is None:
+        return None
+    if name not in _ZCACHE:
+        try:
+            _ZCACHE[name] = ZoneInfo(name)
+        except Exception:
+            _ZCACHE[name] = None
+    return _ZCACHE[name]
+
+def tz_shift(naive, src, dst):
+    """A wall-clock time in zone src -> the same moment as a wall-clock time in zone dst."""
+    if naive is None or not src or not dst or src == dst:
+        return naive
+    zs, zd = _zone(src), _zone(dst)
+    if zs is None or zd is None:
+        return naive
+    return naive.replace(tzinfo=zs).astimezone(zd).replace(tzinfo=None)
+
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(APP_DIR, "delivery.db"))
 GOOGLE_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
@@ -493,6 +526,7 @@ def init_db():
     ensure_column(con, "regions", "base_fee_cents", "INTEGER")    # blank = the business delivery fee
     ensure_column(con, "regions", "base_miles", "REAL")           # blank = the business's first miles
     ensure_column(con, "regions", "per_mile_cents", "INTEGER")    # blank = the business per-mile fee
+    ensure_column(con, "regions", "tz", "TEXT")                   # blank = the app's time zone (APP_TZ)
     ensure_column(con, "regions", "faq_text", "TEXT")             # blank = the business FAQ
     ensure_column(con, "restaurants", "min_order_cents", "INTEGER")  # blank = use the region's
     ensure_column(con, "restaurants", "max_miles", "REAL")           # blank = use the region's
@@ -1277,11 +1311,11 @@ def is_open(restaurant, when=None):
         return False
     if region_paused_for(restaurant):
         return False
+    when = to_region(when or dt.datetime.now(), _rv(restaurant, "region_id"))
     if is_closed_day(restaurant["id"], when):
         return False
     if restaurant["open_24"]:
         return True
-    when = when or dt.datetime.now()
     hours = json.loads(restaurant["hours"])
     span = hours.get(str(when.weekday()))
     if not span or span[0] == "" or span[1] == "":
@@ -1294,13 +1328,14 @@ def is_open(restaurant, when=None):
 def hours_label(restaurant):
     if region_paused_for(restaurant):
         return "Not taking orders right now"
-    shut = is_closed_day(restaurant["id"])
+    local = region_now(_rv(restaurant, "region_id"))
+    shut = is_closed_day(restaurant["id"], local)
     if shut:
         return "Closed today (" + shut + ")" if shut.strip() else "Closed today"
     if restaurant["open_24"]:
         return "Open 24 hours"
     hours = json.loads(restaurant["hours"])
-    span = hours.get(str(dt.datetime.now().weekday()))
+    span = hours.get(str(local.weekday()))
     if not span or not span[0]:
         return "Closed today"
     return "Today " + span[0] + " - " + span[1]
@@ -2530,15 +2565,19 @@ STATUS_WORDS = {
 }
 
 
-def clock(ts):
-    """2026-09-29T14:12:06 -> 2:12 PM. Falls back to the raw stamp if it is odd."""
+def clock(ts, rid=None):
+    """2026-09-29T14:12:06 -> 2:12 PM (in the region's own time, tagged ' ET' when it is not
+    the app's zone). Falls back to the raw stamp if it is odd."""
     if not ts:
         return ""
     try:
         d = dt.datetime.fromisoformat(ts.replace(" ", "T"))
     except ValueError:
         return ts
-    return d.strftime("%-I:%M %p") if os.name != "nt" else d.strftime("%I:%M %p").lstrip("0")
+    tag = ""
+    if rid:
+        d, tag = to_region(d, rid), tz_tag(rid)
+    return (d.strftime("%-I:%M %p") if os.name != "nt" else d.strftime("%I:%M %p").lstrip("0")) + tag
 
 
 def stamp_label(kind, status):
@@ -2580,11 +2619,12 @@ def order_timeline(oid):
                            WHERE order_id=? ORDER BY id""", (oid,)).fetchall()
     o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
     called_in = o is not None and not order_uses_app(o)
+    trg = _rv(o, "region_id") if o is not None else None
     out = []
     placed = None
     if called_in and "manual_state" in o.keys() and o["manual_state"] == "placed" and o["manual_at"]:
         placed = {"kind": "manual", "status": "placed", "label": "Order placed with the restaurant",
-                  "at": o["manual_at"], "time": clock(o["manual_at"]), "day": (o["manual_at"] or "")[:10]}
+                  "at": o["manual_at"], "time": clock(o["manual_at"], trg), "day": (o["manual_at"] or "")[:10]}
     for r in rows:
         if called_in and r["kind"] == "kitchen" and r["status"] == "pending":
             continue
@@ -2593,7 +2633,7 @@ def order_timeline(oid):
             placed = None
         out.append({"kind": r["kind"], "status": r["status"],
                     "label": stamp_label(r["kind"], r["status"]),
-                    "at": r["at"], "time": clock(r["at"]),
+                    "at": r["at"], "time": clock(r["at"], trg),
                     "day": (r["at"] or "")[:10]})
     if placed:
         out.append(placed)
@@ -2693,8 +2733,8 @@ def order_dict(o):
         "site_phone": (nice_phone(_so["phone"] or "") if _so is not None and (_so["phone"] or "").strip() else ""),
         "site_logo": site_logo_url(_so),
         "eta_min": _e["eta_min"], "eta_clock": _e["eta_clock"], "eta_note": _e["eta_note"],
-        "scheduled_for": o["scheduled_for"], "scheduled_label": when_label(o["scheduled_for"]) if o["scheduled_for"] else "",
-        "release_label": when_label(o["release_at"]) if o["release_at"] else "", "ref": (o["ref_code"] or ""), "restaurant": pu["name"], "restaurant_address": pu["address"],
+        "scheduled_for": o["scheduled_for"], "scheduled_label": when_label(o["scheduled_for"], _rv(o, "region_id")) if o["scheduled_for"] else "",
+        "release_label": when_label(o["release_at"], _rv(o, "region_id")) if o["release_at"] else "", "tz": region_tz(_rv(o, "region_id")), "tz_tag": tz_tag(_rv(o, "region_id")).strip(), "ref": (o["ref_code"] or ""), "restaurant": pu["name"], "restaurant_address": pu["address"],
         "restaurant_phone": pu["phone"], "restaurant_tel": "tel:" + digits(pu["phone"]),
         "pickup_listed": pu["listed"],
         "customer_tel": "tel:" + digits(o["customer_phone"] or ""),
@@ -2710,9 +2750,9 @@ def order_dict(o):
         "lines": [line_label(x) for x in json.loads(o["items"])],
         "item_count": sum(int(x.get("qty", 1)) for x in json.loads(o["items"])),
         "timeline": order_timeline(o["id"]),
-        "placed_time": clock(o["created_at"]),
-        "ready_time": clock(o["ready_at"]),
-        "delivered_time": clock(o["delivered_at"]),
+        "placed_time": clock(o["created_at"], _rv(o, "region_id")),
+        "ready_time": clock(o["ready_at"], _rv(o, "region_id")),
+        "delivered_time": clock(o["delivered_at"], _rv(o, "region_id")),
         "payment_status": o["payment_status"] or "unpaid",
         "pay_method": o["pay_method"] or "",
         "kitchen_go": int(o["kitchen_go"] if "kitchen_go" in o.keys() and o["kitchen_go"] is not None else 1),
@@ -2771,7 +2811,7 @@ def order_dict(o):
         "order_url": ((r["order_url"] or "") if r is not None and "order_url" in r.keys() else ""),
         "manual_state": (o["manual_state"] or "") if "manual_state" in o.keys() else "",
         "manual_by": (o["manual_by"] or "") if "manual_by" in o.keys() else "",
-        "manual_time": (clock(o["manual_at"]) if "manual_at" in o.keys() and o["manual_at"] else ""),
+        "manual_time": (clock(o["manual_at"], _rv(o, "region_id")) if "manual_at" in o.keys() and o["manual_at"] else ""),
         "pp": pp_info(o),
     }
 
@@ -3923,20 +3963,27 @@ def future_lead():
     except Exception:
         return 45
 
-def when_label(s):
+def when_label(s, rid=None, local=False):
+    """'Today at 6:30 PM'. With a region, an app-time stamp is shown in that region's time
+    (local=True means s is already the region's time)."""
     try:
         w = dt.datetime.fromisoformat(s)
     except Exception:
         return s or ""
+    tag = ""
+    if rid:
+        if not local:
+            w = to_region(w, rid)
+        tag = tz_tag(rid)
     day = w.date()
-    today = dt.date.today()
+    today = region_now(rid).date() if rid else dt.date.today()
     if day == today:
         d = "Today"
     elif day == today + dt.timedelta(days=1):
         d = "Tomorrow"
     else:
         d = w.strftime("%a %b ") + str(w.day)
-    return d + " at " + w.strftime("%I:%M %p").lstrip("0")
+    return d + " at " + w.strftime("%I:%M %p").lstrip("0") + tag
 
 def parse_future(s):
     """'2026-10-02T18:30' or '2026-10-02 18:30' -> datetime, or None."""
@@ -3953,11 +4000,13 @@ def future_slots(r, day):
     is open, at least FUTURE_MIN_AHEAD minutes from now."""
     earliest = dt.datetime.now() + dt.timedelta(minutes=FUTURE_MIN_AHEAD)
     out = []
-    t = dt.datetime.combine(day, dt.time(0, 0))
+    rg = _rv(r, "region_id")
+    t = dt.datetime.combine(day, dt.time(0, 0))     # the restaurant's local day
     end = t + dt.timedelta(days=1)
     while t < end:
-        if (t >= earliest and is_open(r, t) and business_in_hours(t, r["region_id"]) and
-                (r["slug"] != "oneoff" or dispatcher_required() or item_available(any_rest_row(), t))):
+        ta = from_region(t, rg)
+        if (ta >= earliest and is_open(r, ta) and business_in_hours(ta, rg) and
+                (r["slug"] != "oneoff" or dispatcher_required() or item_available(any_rest_row(), ta))):
             out.append(t.strftime("%Y-%m-%dT%H:%M"))
         t += dt.timedelta(minutes=15)
     return out
@@ -3983,7 +4032,7 @@ def release_scheduled():
                     (o["sched_kitchen"] or "pending", o["sched_dispatch"] or "held",
                      o["sched_hold"] or "waiting on kitchen", now(), o["id"]))
         con.commit()
-        log("order", o["code"] + " future order for " + when_label(o["scheduled_for"]) +
+        log("order", o["code"] + " future order for " + when_label(o["scheduled_for"], _rv(o, "region_id")) +
             " released to " + ("dispatch to run the card" if (o["sched_dispatch"] == "awaiting_payment")
                                else "the kitchen"))
     return sent
@@ -4079,14 +4128,16 @@ def api_future_slots():
     if not r:
         return jsonify({"ok": False, "error": "Unknown restaurant"}), 404
     days = []
+    rg = _rv(r, "region_id")
     for n in range(FUTURE_MAX_DAYS):
-        day = dt.date.today() + dt.timedelta(days=n)
+        day = region_now(rg).date() + dt.timedelta(days=n)      # the restaurant's own today
         slots = future_slots(r, day)
         if slots:
             days.append({"date": day.isoformat(),
-                         "label": when_label(slots[0]).split(" at ")[0],
-                         "slots": [{"value": s, "label": when_label(s).split(" at ")[1]} for s in slots]})
-    return jsonify({"ok": True, "open_now": is_open(r), "days": days, "lead_min": future_lead()})
+                         "label": when_label(slots[0], rg, local=True).split(" at ")[0],
+                         "slots": [{"value": s, "label": when_label(s, rg, local=True).split(" at ")[1]} for s in slots]})
+    return jsonify({"ok": True, "open_now": is_open(r), "days": days, "lead_min": future_lead(),
+                    "tz": region_tz(rg), "tz_tag": tz_tag(rg).strip()})
 
 @app.get("/api/dispatch/future")
 def api_dispatch_future():
@@ -4122,7 +4173,7 @@ def api_future_cancel():
                  ("future order cancelled by " + who + ": " + why, now(), o["id"]))
     db().execute("DELETE FROM card_vault WHERE order_id=?", (o["id"],))
     db().commit()
-    log("cancel", o["code"] + " (future order for " + when_label(o["scheduled_for"]) + ") cancelled by " + who + ": " + why)
+    log("cancel", o["code"] + " (future order for " + when_label(o["scheduled_for"], _rv(o, "region_id")) + ") cancelled by " + who + ": " + why)
     return jsonify({"ok": True})
 
 @app.post("/api/dispatch/future-release")
@@ -4164,6 +4215,7 @@ def checkout():
         sched = parse_future(payload.get("scheduled_for"))
         if not sched:
             return jsonify({"ok": False, "error": "Pick a date and time for the future order."}), 400
+        sched = from_region(sched, _rv(r, "region_id"))   # picked in the restaurant's own time
         is_disp = bool(dispatcher_required())
         soonest = dt.datetime.now() + dt.timedelta(minutes=(5 if is_disp else FUTURE_MIN_AHEAD - 1))
         if sched < soonest:
@@ -4174,12 +4226,12 @@ def checkout():
                             str(FUTURE_MAX_DAYS) + " days out."}), 400
         if not is_disp and not business_in_hours(sched, r["region_id"]):
             cl = closed_dates_label(r["region_id"])
-            return jsonify({"ok": False, "error": "We are not open at " + when_label(sched.isoformat()) + "." +
+            return jsonify({"ok": False, "error": "We are not open at " + when_label(sched.isoformat(), r["region_id"]) + "." +
                             ((" Our hours are " + business_hours_label(r["region_id"]) + ".") if business_hours_label(r["region_id"]) else "") +
                             ((" " + cl + ".") if cl else "")}), 400
         if not is_disp and not is_open(r, sched):
             return jsonify({"ok": False, "error": r["name"] + " is not open at " +
-                            when_label(sched.isoformat()) + ". Pick another time."}), 400
+                            when_label(sched.isoformat(), r["region_id"]) + ". Pick another time."}), 400
     if not sched and not is_open(r) and placed_by == "customer":
         return jsonify({"ok": False, "error": r["name"] + " is closed right now. "
                         "You can still schedule the order for a time they are open."}), 400
@@ -4409,10 +4461,10 @@ def checkout():
                             kitchen_status='scheduled', dispatch_status='scheduled', hold_reason=?
                             WHERE id=?""",
                          (cur_o["kitchen_status"], cur_o["dispatch_status"], cur_o["hold_reason"],
-                          "future order for " + when_label(sched.isoformat()), oid))
-            log("order", code + " scheduled for " + when_label(sched.isoformat()))
+                          "future order for " + when_label(sched.isoformat(), r["region_id"]), oid))
+            log("order", code + " scheduled for " + when_label(sched.isoformat(), r["region_id"]))
         db().commit()
-        future_note = "Scheduled for " + when_label(sched.isoformat()) + "."
+        future_note = "Scheduled for " + when_label(sched.isoformat(), r["region_id"]) + "."
         if dispatcher_required() and not is_open(r, sched):
             future_note += " Heads up: " + r["name"] + " is not normally open then."
     if multi_root:
@@ -4652,7 +4704,7 @@ def eta_info(o, r=None, d=None):
             when = dt.datetime.fromisoformat(o["scheduled_for"])
             if when > nowdt + dt.timedelta(minutes=10):
                 return {"eta_min": int((when - nowdt).total_seconds() // 60),
-                        "eta_clock": clock(when.isoformat()), "eta_note": "scheduled"}
+                        "eta_clock": clock(when.isoformat(), _rv(o, "region_id")), "eta_note": "scheduled"}
         except ValueError:
             pass
     if r is None:
@@ -4697,7 +4749,7 @@ def eta_info(o, r=None, d=None):
         total = max(kitchen, ETA_NO_DRIVER_MIN) + out
         note = "no driver yet"
     total = max(2, int(round(total)))
-    return {"eta_min": total, "eta_clock": clock((nowdt + dt.timedelta(minutes=total)).isoformat()),
+    return {"eta_min": total, "eta_clock": clock((nowdt + dt.timedelta(minutes=total)).isoformat(), _rv(o, "region_id")),
             "eta_note": note}
 
 
@@ -7954,7 +8006,8 @@ def regions_payload():
     regs = all_regions()
     return {"ok": True, "me": session.get("dispatcher_id"), "owner": is_owner(),
             "sites": sites_payload(), "fonts": BRAND_FONT_LABELS,
-            "business_fees": fee_rules(None), "business_faq": (setting("faq_text", str) or "").strip() or DEFAULT_FAQ,
+            "business_fees": fee_rules(None), "tz_choices": TZ_CHOICES, "app_tz": APP_TZ,
+            "app_tz_name": dict(TZ_CHOICES).get(APP_TZ, APP_TZ), "business_faq": (setting("faq_text", str) or "").strip() or DEFAULT_FAQ,
             "regions": [{"id": r["id"], "name": r["name"], "site_id": (_region(r["id"])["site_id"] or 0),
                          "own_hours": bool(region_own_hours(r["id"])),
                          "min_order_cents": _rv(_region(r["id"]), "min_order_cents"),
@@ -7963,6 +8016,7 @@ def regions_payload():
                          "base_miles": _rv(_region(r["id"]), "base_miles"),
                          "per_mile_cents": _rv(_region(r["id"]), "per_mile_cents"),
                          "fees": fee_rules(r["id"]),
+                         "tz": (_rv(_region(r["id"]), "tz") or ""), "tz_now": clock(now(), r["id"]) if region_tz(r["id"]) != APP_TZ else clock(now()),
                          "faq_text": _rv(_region(r["id"]), "faq_text") or "",
                          "phone": nice_phone((_region(r["id"])["phone"] or "")) if (_region(r["id"])["phone"] or "") else "",
                          "business_phone": nice_phone(dispatch_phone()),
@@ -8472,6 +8526,30 @@ def api_driver_active():
     auto_assign()
     return jsonify({"ok": True, "active": want, "driver": d["name"]})
 
+
+@app.post("/api/dispatch/region-tz")
+def api_dispatch_region_tz():
+    """A region's own time zone. Blank = the app's zone. Its hours, scheduled orders and
+    the times on the dispatch, driver and kitchen screens for its orders follow it."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    b = request.get_json(force=True) or {}
+    rid = int(b.get("id") or 0)
+    if _region(rid) is None:
+        return jsonify({"ok": False, "error": "Region not found."}), 404
+    if not _can_edit_region(rid):
+        return jsonify({"ok": False, "error": "You can only change your own regions."}), 403
+    tz = (b.get("tz") or "").strip()
+    if tz and tz not in dict(TZ_CHOICES):
+        return jsonify({"ok": False, "error": "Pick a time zone from the list."}), 400
+    if tz == APP_TZ:
+        tz = ""
+    db().execute("UPDATE regions SET tz=? WHERE id=?", (tz or None, rid))
+    db().commit()
+    name = _region(rid)["name"]
+    log("settings", "%s region time zone set to %s by %s" % (name, dict(TZ_CHOICES).get(tz or APP_TZ, tz or APP_TZ),
+                                                           session.get("dispatcher_name") or "dispatch"))
+    return jsonify({"ok": True, "tz": tz, "now": clock(now(), rid)})
 
 @app.post("/api/dispatch/region-fees")
 def api_region_fees():
@@ -12515,6 +12593,33 @@ def purge_chats():
 BH_DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
 
 
+def region_tz(rid):
+    """The region's own time zone, or the app's when it has none set."""
+    if not rid:
+        return APP_TZ
+    try:
+        row = db().execute("SELECT tz FROM regions WHERE id=?", (int(rid),)).fetchone()
+    except Exception:
+        return APP_TZ
+    tz = ((row["tz"] if row else "") or "").strip()
+    return tz if tz and _zone(tz) is not None else APP_TZ
+
+def to_region(when, rid):
+    """App time -> the region's local time."""
+    return tz_shift(when, APP_TZ, region_tz(rid))
+
+def from_region(when, rid):
+    """The region's local time -> app time (what gets saved)."""
+    return tz_shift(when, region_tz(rid), APP_TZ)
+
+def region_now(rid):
+    return to_region(dt.datetime.now().replace(microsecond=0), rid)
+
+def tz_tag(rid):
+    """' ET' after a time when the region is not on the app's zone, so dispatch can tell."""
+    tz = region_tz(rid)
+    return "" if tz == APP_TZ else " " + TZ_SHORT.get(tz, tz.split("/")[-1].replace("_", " "))
+
 def _region(rid):
     if not rid:
         return None
@@ -12597,7 +12702,7 @@ def business_hours(rid=None):
 def business_in_hours(when=None, rid=None):
     """Inside operating hours (the region's when it has its own) and not on one of the
     region's closed dates? True when no hours are set and no closed date applies."""
-    when = when or dt.datetime.now()
+    when = to_region(when or dt.datetime.now(), rid)
     if region_closed_now(rid, when):
         return False
     closed = set(region_closed_dates(rid)) if rid else set()

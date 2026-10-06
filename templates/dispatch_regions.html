@@ -269,7 +269,8 @@ function draw(){
     '<div class="muted small">Dispatch number: '+e(r.phone ? r.phone : 'business number'+(r.business_phone?' ('+r.business_phone+')':''))+'</div>'+
     '<div class="muted small">Minimum order: '+(r.min_order_cents ? '$'+(r.min_order_cents/100).toFixed(2) : 'none')+' &middot; Delivery radius: '+(r.max_miles ? r.max_miles+' mi' : 'no limit')+'</div>'+
     '<div class="muted small">Delivery fee: '+feeLabel(r.fees)+(r.fees && r.fees.from==='region' ? '' : ' (business fee)')+'</div>'+
-    '<div class="muted small">FAQ: '+(r.faq_text ? 'its own ('+faqCount(r.faq_text)+' questions)' : 'business FAQ')+'</div></span>'+
+    '<div class="muted small">FAQ: '+(r.faq_text ? 'its own ('+faqCount(r.faq_text)+' questions)' : 'business FAQ')+'</div>'+
+    '<div class="muted small">Time zone: '+tzSelect(r)+' <span id="tzNow'+r.id+'">now '+e(r.tz_now||'')+'</span></div></span>'+
     '<span><button class="btn tiny" onclick="hoursRegion('+r.id+')">Hours &amp; closed days</button>'+
     '<button class="btn tiny" onclick="phoneRegion('+r.id+')">Dispatch number</button>'+
     '<button class="btn tiny" onclick="rulesEdit(\'region\','+r.id+')">Minimum &amp; radius</button>'+
@@ -291,6 +292,17 @@ function draw(){
       (kind==='p' && !RG.owner ? ' <span class="pill">Set by the owner</span>' : '')+'</span></div><div class="rgpick">'+boxes(kind, p)+'</div></div>';
   document.getElementById('drList').innerHTML = RG.drivers.map(p=>row('d', p)).join('') || '<p class="muted small">No drivers yet.</p>';
   document.getElementById('dpList').innerHTML = RG.dispatchers.map(p=>row('p', p)).join('');
+}
+function tzSelect(r){
+  const cur = r.tz || RG.app_tz;
+  return '<select onchange="tzRegion('+r.id+',this.value)">'+(RG.tz_choices||[]).map(z=>
+    '<option value="'+z[0]+'" '+(z[0]===cur?'selected':'')+'>'+e(z[1])+(z[0]===RG.app_tz?' (business)':'')+'</option>').join('')+'</select>';
+}
+async function tzRegion(id, tz){
+  const r = await jpost('/api/dispatch/region-tz', {id:id, tz:tz});
+  if(!r.ok){ alert(r.error||'Could not save.'); load && load(); return; }
+  const it = RG.regions.find(x=>x.id===id); if(it){ it.tz = r.tz; it.tz_now = r.now; }
+  const n = document.getElementById('tzNow'+id); if(n) n.textContent = 'now '+r.now;
 }
 function feeLabel(f){
   if(!f) return '';
