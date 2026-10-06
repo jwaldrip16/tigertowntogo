@@ -1,4 +1,5 @@
 {% extends "base.html" %}{% block body %}
+<style>.rgsect{margin:0 0 10px}.rghead{font-size:15px;margin:10px 0 6px;padding:4px 8px;background:#eef2f8;border-radius:6px}</style>
 <div id="flash" class="flashbar hidden">New pending order</div>
 <div class="head">
   <h1>Dispatch board</h1>
@@ -804,7 +805,10 @@ function drawRegionQueues(res){
   const box = document.getElementById('rgQueues'); if(!box) return;
   const qs = res.region_queues || [];
   if (qs.length < 2 && !(qs[0] && qs[0].id)){ box.innerHTML = ''; return; }
-  box.innerHTML = '<div class="muted small">' + (res.is_owner ? 'Queue in every region (owner view)' : 'Queue in your regions') + '</div>' +
+  window.RG_ORDER = qs.map(q=>q.id);
+  const anyOpen = qs.some(q=>RGQ_OPEN[q.id]);
+  box.innerHTML = '<div class="row between"><span class="muted small">' + (res.is_owner ? 'Queue in every region (owner view)' : 'Queue in your regions') +
+    '</span><button class="btn tiny" onclick="rgOpenAll(' + (anyOpen ? 'false' : 'true') + ')">' + (anyOpen ? 'Close all queues' : 'Open all queues') + '</button></div>' +
     qs.map(q => {
       const late = q.oldest_min >= 15;
       const head = '<button class="btn tiny" onclick="RGQ_OPEN['+q.id+']=!RGQ_OPEN['+q.id+'];board(true)">' +
@@ -817,12 +821,22 @@ function drawRegionQueues(res){
       let body = '';
       if (RGQ_OPEN[q.id]){
         body = '<div class="small" style="margin:4px 0 8px 10px">' +
-          ((q.orders||[]).map(o => '#' + o.pos + ' ' + esc(o.code) + ' ' + esc(o.restaurant) + ' (' + o.minutes + ' min' +
-             (o.reason ? ', ' + esc(o.reason) : '') + ')').join('<br>') || 'Nothing waiting.') +
+          ((q.orders||[]).map(o => '<div class="row" style="gap:6px;align-items:center;margin:2px 0">#' + o.pos + ' ' + esc(o.code) + ' ' + esc(o.restaurant) + ' (' + o.minutes + ' min' +
+             (o.reason ? ', ' + esc(o.reason) : '') + ')' +
+             ((q.driver_choices||[]).length
+               ? ' <select class="tiny" id="rgs' + o.id + '"><option value="">Send to driver...</option>' +
+                 q.driver_choices.map(d => '<option value="' + d.id + '">' + esc(d.name) + '</option>').join('') +
+                 '</select><button class="btn tiny primary" onclick="rgSend(' + o.id + ')">Send</button>'
+               : ' <span class="muted">no driver on here</span>') + '</div>').join('') || 'Nothing waiting.') +
           '<br><span class="muted">Drivers on: ' + (q.drivers && q.drivers.length ? q.drivers.map(esc).join(', ') : 'none') + '</span></div>';
       }
       return '<div>' + head + pill + body + '</div>';
     }).join('');
+}
+function rgOpenAll(on){ (window.RG_ORDER||[]).forEach(id=>{ RGQ_OPEN[id] = on; }); board(true); }
+async function rgSend(oid){
+  const sel = document.getElementById('rgs' + oid); if (!sel || !sel.value){ alert('Pick a driver first.'); return; }
+  await assign(oid, sel.value);
 }
 function drawRegionBar(res){
   const lab = document.getElementById('rgLabel'), b = document.getElementById('rgAll');
@@ -984,12 +998,22 @@ async function board(force){
     pending.length ? '(' + pending.length + ')' : '';
   document.getElementById('activeCount').textContent =
     active.length ? '(' + active.length + ' on ' + new Set(active.map(o=>o.driver_id)).size + ' driver(s))' : '';
-  document.getElementById('pending').innerHTML = pending.map(o=>orderCard(o,opts,res.drivers)).join('') ||
+  document.getElementById('pending').innerHTML = byRegion(pending, o=>orderCard(o,opts,res.drivers)) ||
     '<p class="muted">Nothing pending.</p>';
-  document.getElementById('orders').innerHTML = active.map(o=>orderCard(o,opts)).join('') ||
+  document.getElementById('orders').innerHTML = byRegion(active, o=>orderCard(o,opts)) ||
     '<p class="muted">No orders on drivers right now.</p>';
   res.orders.forEach(o=>{ const s=document.getElementById('as'+o.id); if(s) s.value = o.driver_id||''; });
 
+}
+// Queue and on-driver lists come in region sections (in region order) once orders span more than one region.
+function byRegion(list, card){
+  const ids = []; const groups = {};
+  list.forEach(o => { const k = o.region_id || 0; if (!(k in groups)){ groups[k] = []; ids.push(k); } groups[k].push(o); });
+  if (ids.length < 2) return list.map(card).join('');
+  const rank = {}; (window.RG_ORDER||[]).forEach((id,i)=>{ rank[id] = i; });
+  ids.sort((a,b)=> (a===0)-(b===0) || ((a in rank ? rank[a] : 999) - (b in rank ? rank[b] : 999)));
+  return ids.map(k => '<div class="rgsect"><h3 class="rghead">' + esc(groups[k][0].region_label || 'No region') +
+    ' <span class="muted small">(' + groups[k].length + ')</span></h3>' + groups[k].map(card).join('') + '</div>').join('');
 }
 function milesLabel(o){ return (o.miles===null||o.miles===undefined) ? 'distance TBC' : o.miles+' mi'; }
 async function approveAddress(id, addr){

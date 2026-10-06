@@ -75,6 +75,7 @@ async function setLogo(inp){
   <label><input type="checkbox" name="brands_on" value="1" {% if brands_on %}checked{% endif %}> Use brand sites (more than one brand)</label>
   <div class="muted small">Turn this off if the business has only one brand. Every page, text and receipt then uses the name, logo, phone and website text here in Settings, the brand buttons go away, and website and menu imports fill the main website. Your brand sites are kept, so turning it back on brings them back.</div>
   <label><input type="checkbox" name="regions_on" value="1" {% if regions_on %}checked{% endif %}> Use regions (more than one area)</label>
+  <label><input type="checkbox" name="dispatch_region_lock" value="1" {% if region_lock %}checked{% endif %}> Only dispatchers assigned to a region can create orders there (owners can always create)</label>
   <div class="muted small">Turn this off if the business covers one area. Customers won't see the "Where are you?" buttons, and menu imports skip the region choice. Your regions and their settings are kept.</div>
   {% endif %}
   <h2>Customer website</h2>

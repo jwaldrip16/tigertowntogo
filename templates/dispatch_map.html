@@ -15,6 +15,7 @@
 <p class="muted small">Live positions from each driver's phone. Pins move every 2 seconds, with the closest street address. A pin goes
 grey once a fix is more than 10 minutes old, which usually means the driver closed the app.
 Add this page to your home screen to keep it as its own Tracker app.</p>
+<div class="row" id="rgChips" style="flex-wrap:wrap;gap:6px;margin:6px 0"></div>
 <div class="maprow">
   <div id="map" class="map"></div>
   <aside class="panel" id="side"></aside>
@@ -23,7 +24,15 @@ Add this page to your home screen to keep it as its own Tracker app.</p>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="/static/maptiles.js"></script>
 <script>
-let MAP = null, LAYER = null, FITTED = false;
+let MAP = null, LAYER = null, FITTED = false, RG = 0, RGLIST = [];
+function pickRegion(id){ RG = id; FITTED = false; tick(); }
+function drawChips(regs){
+  const box = document.getElementById('rgChips');
+  if (!regs || regs.length < 2){ box.innerHTML = ''; return; }
+  box.innerHTML = [{id:0, label:'All regions'}].concat(regs).map(r =>
+    '<button class="btn tiny' + (RG===r.id ? ' primary' : '') + '" onclick="pickRegion(' + r.id + ')">' + r.label + '</button>').join('');
+}
+function inRegion(d){ return !RG || !(d.region_ids||[]).length || (d.region_ids||[]).includes(RG); }
 const MARKS = {};
 function glide(mk, to, ms){
   const from = mk.getLatLng(), t0 = performance.now();
@@ -51,9 +60,25 @@ async function refresh(){
   const res = await (await fetch('/api/dispatch/locations')).json();
   if(!res.ok){ window.location = '/dispatch/login'; return; }
   const pts = [], seen = {};
+  RGLIST = res.regions || [];
+  if (RG && !RGLIST.some(r=>r.id===RG)) RG = 0;
+  drawChips(RGLIST);
   const SIDE = document.createElement('div');
   SIDE.innerHTML = '<h2>Drivers</h2>';
-  res.drivers.forEach(d => {
+  const labelOf = {}; RGLIST.forEach(r=>{ labelOf[r.id] = r.label; });
+  const shownDrivers = res.drivers.filter(inRegion);
+  // Side list in region sections: a driver working two regions shows under each.
+  const sections = [];
+  if (RGLIST.length > 1){
+    (RG ? RGLIST.filter(r=>r.id===RG) : RGLIST).forEach(r => {
+      const ds = shownDrivers.filter(d => (d.region_ids||[]).includes(r.id));
+      if (ds.length) sections.push([r.label, ds]);
+    });
+    const loose = shownDrivers.filter(d => !(d.region_ids||[]).some(x => labelOf[x]));
+    if (loose.length) sections.push(['Any region', loose]);
+  } else sections.push(['', shownDrivers]);
+  const sideCard = {};
+  shownDrivers.forEach(d => {
     const rows = [];
     rows.push('<div class="row between"><div><strong>'+d.name+'</strong> '+
       '<span class="pill '+(d.status==='online'?'green':d.status==='break'?'amber':'grey')+'">'+d.status+'</span></div>'+
@@ -86,11 +111,13 @@ async function refresh(){
         'location once.</div>');
     }
     rows.push('<div class="muted small">'+(d.roster||'scheduled').replace('_',' ')+'</div>');
-    const div = document.createElement('div');
-    div.className = 'card pad';
-    div.innerHTML = rows.join('');
-    SIDE.appendChild(div);
+    sideCard[d.id] = rows.join('');
   });
+  sections.forEach(([lab, ds]) => {
+    if (lab){ const h = document.createElement('h3'); h.className = 'small'; h.style.margin = '10px 0 4px'; h.textContent = lab + ' (' + ds.length + ')'; SIDE.appendChild(h); }
+    ds.forEach(d => { const div = document.createElement('div'); div.className = 'card pad'; div.innerHTML = sideCard[d.id]; SIDE.appendChild(div); });
+  });
+  if (!shownDrivers.length){ const p2 = document.createElement('p'); p2.className = 'muted small'; p2.textContent = 'No drivers in this region right now.'; SIDE.appendChild(p2); }
   Object.keys(MARKS).forEach(id=>{ if (!seen[id]){ LAYER.removeLayer(MARKS[id]); delete MARKS[id]; } });
   document.getElementById('side').replaceChildren(...SIDE.childNodes);
   if(pts.length && !FITTED){ MAP.fitBounds(pts, {padding:[40,40], maxZoom:14}); FITTED = true; }

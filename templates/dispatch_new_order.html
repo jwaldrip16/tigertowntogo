@@ -10,8 +10,13 @@
   <section>
     <h2>Restaurant</h2>
     <p class="small muted">One restaurant per order. For a second restaurant, place a separate order and link it below. The order minimum and delivery fee apply to each order, and it may go with a different driver, so the tip is per order.</p>
+    {% if locked_out %}<p class="small muted">Only restaurants in the regions you're assigned to are listed. Ask the owner to add you to another region.</p>{% endif %}
     <select id="rest" onchange="drawMenu()">
+      {% if rest_groups|length > 1 %}
+      {% for gp in rest_groups %}<optgroup label="{{ gp.label }}">{% for r in gp.rests %}<option value="{{ r['id'] }}">{{ r['name'] }}</option>{% endfor %}</optgroup>{% endfor %}
+      {% else %}
       {% for r in restaurants %}<option value="{{ r['id'] }}">{{ r['name'] }}</option>{% endfor %}
+      {% endif %}
       <option value="{{ oneoff }}">Not on the list, type the pickup in</option>
     </select>
     <div id="pickup" class="hidden">

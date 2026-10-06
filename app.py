@@ -1659,6 +1659,49 @@ def dispatcher_view_regions(did):
     return dispatcher_region_ids(did) | dispatcher_work_regions(did)
 
 
+def order_lock_on():
+    """Settings > Brands and regions: only dispatchers assigned to a region can create its orders."""
+    try:
+        row = db().execute("SELECT value FROM settings WHERE key='dispatch_region_lock'").fetchone()
+        return row is not None and str(row["value"]).strip() == "1"
+    except Exception:
+        return False
+
+
+def can_create_in_region(rid, did=None):
+    """With the lock on, a dispatcher creates orders only for restaurants in regions assigned
+    to them. Owners always can, and so can anyone for a restaurant or pickup with no region."""
+    did = did if did is not None else session.get("dispatcher_id")
+    try:
+        rid = int(rid or 0)
+    except (TypeError, ValueError):
+        rid = 0
+    if not rid or not order_lock_on() or is_owner(did):
+        return True
+    return rid in dispatcher_region_ids(did)
+
+
+def region_label(rid):
+    """'Auburn (Bulldawg Food)': region name plus the brand it belongs to, when brands are on."""
+    cache = g.setdefault("_rglabels", {}) if has_request_context() else {}
+    rid = int(rid or 0)
+    if rid in cache:
+        return cache[rid]
+    if not rid:
+        lab = "No region"
+    else:
+        row = db().execute("SELECT name FROM regions WHERE id=?", (rid,)).fetchone()
+        lab = row["name"] if row else "No region"
+        try:
+            so = site_of_region(rid)
+            if row and so is not None and (so["name"] or "").strip() and so["name"].strip().lower() != lab.lower():
+                lab += " (" + so["name"].strip() + ")"
+        except Exception:
+            pass
+    cache[rid] = lab
+    return lab
+
+
 def is_owner(did=None):
     """Owners and developers: full access to the business. (Developers still can't delete
     orders, or change them unless an owner allows it; see dev_guard.)"""
@@ -1885,6 +1928,8 @@ def region_queues(region_ids=None, detail=True):
             on = [d["name"] for d in shift if covers(driver_work_regions(d["id"]), rid)]
         else:
             on = [d["name"] for d in shift]
+        choices = [{"id": d["id"], "name": d["name"]} for d in shift
+                   if not rid or covers(driver_work_regions(d["id"]), rid)]
         pi = pinfo.get(rid)
         q = {"id": rid, "name": name, "waiting": len(mine),
              "paused": bool(pi and pi["paused"]), "paused_by": (pi["paused_by"] if pi and pi["paused"] else "") or "",
@@ -1892,6 +1937,8 @@ def region_queues(region_ids=None, detail=True):
              "drivers_on": len(on)}
         if detail:
             q["drivers"] = on
+            q["driver_choices"] = choices
+            q["label"] = region_label(rid)
             q["orders"] = [{"id": o["id"], "code": o["code"], "pos": i + 1, "status": o["dispatch_status"],
                             "reason": o["hold_reason"] or "", "restaurant": o["rname"] or "",
                             "minutes": mins(o)} for i, o in enumerate(mine)]
@@ -2760,6 +2807,7 @@ def order_dict(o):
     _so = site_of_region(o["region_id"] if "region_id" in _okeys(o) else None)
     return {
         "id": o["id"], "code": o["code"], "site_name": (_so["name"] if _so is not None else ""),
+        "region_id": int(_rv(o, "region_id") or 0), "region_label": region_label(_rv(o, "region_id")),
         "site_phone": (nice_phone(_so["phone"] or "") if _so is not None and (_so["phone"] or "").strip() else ""),
         "site_logo": site_logo_url(_so),
         "eta_min": _e["eta_min"], "eta_clock": _e["eta_clock"], "eta_note": _e["eta_note"],
@@ -3987,7 +4035,7 @@ def inject_brand_look():
 @app.context_processor
 def inject_modes():
     try:
-        return {"brands_on": brands_on(), "regions_on": regions_on()}
+        return {"brands_on": brands_on(), "regions_on": regions_on(), "region_lock": order_lock_on()}
     except Exception:
         return {"brands_on": True, "regions_on": True}
 
@@ -4250,6 +4298,9 @@ def checkout():
     if not r:
         return jsonify({"ok": False, "error": "Unknown restaurant"}), 400
     placed_by = payload.get("placed_by", "customer")
+    if placed_by == "dispatch" and dispatcher_required() and not can_create_in_region(_rv(r, "region_id")):
+        return jsonify({"ok": False, "error": "You're not assigned to " + region_label(_rv(r, "region_id")) +
+                        ", so you can't create orders there. Ask the owner to add you to that region."}), 403
     house = bool(payload.get("house")) and placed_by == "dispatch" and bool(dispatcher_required())
     multi_root, _merr = multi_resolve(payload.get("multi_with"), payload.get("customer_phone"),
                                       placed_by == "dispatch" and bool(dispatcher_required()))
@@ -6154,8 +6205,17 @@ def dispatch_new_order():
             multi_src = {"code": mo["code"], "restaurant_id": mo["restaurant_id"], "customer_name": mo["customer_name"],
                          "customer_phone": mo["customer_phone"], "address": mo["address"],
                          "address_note": mo["address_note"] or ""}
-    return render_template("dispatch_new_order.html",
-                           restaurants=[dict(r) for r in rests if r["slug"] != "oneoff"],
+    shown = [r for r in rests if r["slug"] != "oneoff" and can_create_in_region(_rv(r, "region_id"))]
+    order_of = {x["id"]: i for i, x in enumerate(all_regions())}
+    groups = {}
+    for r in shown:
+        rid = int(_rv(r, "region_id") or 0)
+        groups.setdefault(rid, []).append(dict(r))
+    rest_groups = [{"id": rid, "label": region_label(rid), "rests": groups[rid]}
+                   for rid in sorted(groups, key=lambda k: (k == 0, order_of.get(k, 9999)))]
+    locked_out = order_lock_on() and not is_owner() and len(shown) < len([r for r in rests if r["slug"] != "oneoff"])
+    return render_template("dispatch_new_order.html", rest_groups=rest_groups, locked_out=locked_out,
+                           restaurants=[dict(r) for r in shown],
                            menus=menus, src=src, multi_src=multi_src, multi_policy=MULTI_POLICY, oneoff=oneoff, tokens=token_list(),
                            reasons=[{"key": k, "label": v} for k, v in REDO_REASONS.items()])
 
@@ -6774,8 +6834,12 @@ def api_locations():
                 pass
         out.append({"id": d["id"], "name": d["name"], "phone": d["phone"], "status": d["status"],
                     "roster": d["roster"], "location": loc, "next_stop": stop,
-                    "track_id": driver_track_id(d["id"]), "bg_gps": bg_on})
-    return jsonify({"ok": True, "drivers": out})
+                    "track_id": driver_track_id(d["id"]), "bg_gps": bg_on,
+                    "region_ids": sorted(driver_work_regions(d["id"]))})
+    me = session.get("dispatcher_id")
+    mine = set() if is_owner(me) else dispatcher_view_regions(me)
+    regs = [{"id": r["id"], "label": region_label(r["id"])} for r in all_regions() if not mine or r["id"] in mine]
+    return jsonify({"ok": True, "drivers": out, "regions": regs})
 
 @app.get("/dispatch/map")
 def dispatch_map():
@@ -9223,7 +9287,7 @@ def dispatch_settings():
                     else:
                         br_msgs.append(("ok", "Saved %s." % _nm))
         if "modes_present" in request.form and is_owner(session.get("dispatcher_id")):
-            for _k in ("brands_on", "regions_on"):
+            for _k in ("brands_on", "regions_on", "dispatch_region_lock"):
                 db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
                              (_k, "1" if request.form.get(_k) else "0"))
             db().commit()
