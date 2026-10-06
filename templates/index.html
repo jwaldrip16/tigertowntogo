@@ -36,10 +36,22 @@
 {% if not biz_open %}<div class="panel" style="border-left:4px solid #b44a22">{% if S.closed_msg %}{{ S.closed_msg }}{% else %}<b>We are closed right now.</b> You can still place a future order: pick a restaurant and choose Schedule for later.{% endif %}</div>{% endif %}
 {% if hours_text %}<p class="muted small" style="text-align:center">Delivery hours{% if sel_region_name %} in {{ sel_region_name }}{% endif %}: {{ hours_text }}{% if biz_phone %} &middot; Call <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>{% endif %}</p>{% endif %}
 {% if closed_text %}<p class="muted small" style="text-align:center">{{ closed_text }}</p>{% endif %}
+{% if brands and brands|length > 1 %}
+<div class="brandpick">
+  <span class="muted small">Pick a brand</span>
+  <div class="brandrow">
+    <a class="brandbtn {{ 'on' if not sel_brand else '' }}" href="/?brand=all#restaurants"><span class="brandname">All brands</span></a>
+    {% for b in brands %}
+    <a class="brandbtn {{ 'on' if sel_brand == b.id else '' }}" href="/?brand={{ b.id }}#restaurants">
+      {% if b.logo %}<img src="{{ b.logo }}" alt="" loading="lazy">{% endif %}<span class="brandname">{{ b.name }}</span></a>
+    {% endfor %}
+  </div>
+</div>
+{% endif %}
 {% if regions|length > 1 %}
 <div class="regionpick">
   <span class="muted small">Where are you?</span>
-  <a class="chip {{ 'on' if not sel_region else '' }}" href="/?region=all#restaurants">All areas</a>
+  <a class="chip {{ 'on' if not sel_region else '' }}" href="/?region=all{% if sel_brand %}&brand={{ sel_brand }}{% endif %}#restaurants">All areas</a>
   {% for g in regions %}
   <a class="chip {{ 'on' if sel_region == g.id else '' }}" href="/?region={{ g.id }}#restaurants">{{ g.name }}{% if g.paused %} (not taking orders){% endif %}</a>
   {% endfor %}

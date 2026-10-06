@@ -2718,6 +2718,28 @@ def home():
     paused = paused_region_ids()
     regions = [{"id": g["id"], "name": g["name"], "paused": g["id"] in paused}
                for g in all_regions() if g["id"] in used]
+    # brand picker on the main (shared) website: one button per brand site with restaurants
+    brands, brand_site = [], None
+    if _site is None:
+        reg_site = {g["id"]: (g["site_id"] or 0) for g in db().execute("SELECT id, site_id FROM regions").fetchall()}
+        used_sites = {reg_site.get(rid, 0) for rid in used}
+        for srow in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
+            if srow["id"] in used_sites:
+                brands.append({"id": srow["id"], "name": srow["name"], "logo": site_logo_url(srow)})
+        bpick = request.args.get("brand")
+        if bpick is not None:
+            session["cust_brand"] = bpick if bpick.isdigit() else ""
+            session["cust_region"] = ""
+        elif request.args.get("region") is not None:
+            session["cust_brand"] = ""
+        bsel = session.get("cust_brand") or ""
+        if bsel.isdigit() and int(bsel) in {b["id"] for b in brands}:
+            brand_site = site_by_id(int(bsel))
+            _breg = site_region_ids(brand_site["id"])
+            rs = [r for r in rs if r["region_id"] and r["region_id"] in _breg]
+            regions = [g for g in regions if g["id"] in _breg]
+        elif bsel:
+            session["cust_brand"] = ""
     pick = request.args.get("region")
     if pick is not None:
         session["cust_region"] = pick if pick.isdigit() else ""
@@ -2733,7 +2755,10 @@ def home():
         biz = biz_on and business_in_hours(rid=sel_id)
     else:
         biz = biz_on and (business_in_hours() or any(business_in_hours(rid=g["id"]) for g in regions))
+    if brand_site is not None and not sel_id:
+        g._site = brand_site   # show the picked brand's logo, name, phone and design
     return render_template("index.html", cards=cards, biz_open=biz, regions=regions,
+                           brands=brands, sel_brand=brand_site["id"] if brand_site is not None else 0,
                            sel_region=sel_id, sel_region_name=sel_name,
                            hours_text=business_hours_label(sel_id or None),
                            closed_text=closed_dates_label(sel_id) if sel_id else "",
