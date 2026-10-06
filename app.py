@@ -44,7 +44,10 @@ app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
 from werkzeug.middleware.proxy_fix import ProxyFix
 app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.config["PREFERRED_URL_SCHEME"] = "https"
-app.secret_key = os.environ.get("SECRET_KEY", "dev-secret-change-me")
+# A blank SECRET_KEY in Railway used to break every login with an error page.
+# Blank or missing now falls back to a built-in key so sign-in keeps working;
+# set a long random SECRET_KEY in Railway for real security.
+app.secret_key = (os.environ.get("SECRET_KEY") or "").strip() or "dev-secret-change-me"
 
 # ---------------------------------------------------------------- database
 
@@ -10849,6 +10852,29 @@ def healthz():
     return jsonify({"ok": True, "time": now()})
 
 init_db()
+
+
+def _auto_secret_key():
+    """No SECRET_KEY in Railway: make a random one the first time the app starts and
+    keep it in the database, so sign-ins stay secure and survive every deploy."""
+    if (os.environ.get("SECRET_KEY") or "").strip():
+        return
+    try:
+        con = dbx.connect(DB_PATH)
+        row = con.execute("SELECT value FROM settings WHERE key='auto_secret_key'").fetchone()
+        key = (row[0] if row else "") or ""
+        if len(key) < 32:
+            key = secrets.token_hex(32)
+            con.execute("DELETE FROM settings WHERE key='auto_secret_key'")
+            con.execute("INSERT INTO settings(key, value) VALUES('auto_secret_key', ?)", (key,))
+            con.commit()
+        con.close()
+        app.secret_key = key
+    except Exception as e:
+        print("auto secret key not saved, using the built-in key:", e)
+
+
+_auto_secret_key()
 seed_brand_photos()
 
 def current_portal():
