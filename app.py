@@ -873,13 +873,35 @@ def site_region_ids(sid):
 
 
 def current_site():
-    """The brand site this request belongs to: its web address, or a ?site= preview. None on staff pages."""
+    """The brand this request shows: a forced order/restaurant brand, the web address's brand,
+    or (on a shared address) the brand of the area the customer picked. None on staff pages."""
     if not has_request_context():
         return None
     if "_site_forced" in g:
         return g._site_forced
     if "_site" in g:
         return g._site
+    s = host_site()
+    if s is None:
+        try:
+            if not request.path.startswith(_STAFF_PREFIXES):
+                pick = request.args.get("region")
+                if pick is None:
+                    pick = session.get("cust_region") or ""
+                if str(pick).isdigit():
+                    s = site_of_region(int(pick))
+        except Exception:
+            s = None
+    g._site = s
+    return s
+
+
+def host_site():
+    """The brand site of the web address itself (or a ?site= preview). None on staff pages."""
+    if not has_request_context():
+        return None
+    if "_hsite" in g:
+        return g._hsite
     s = None
     try:
         if not request.path.startswith(_STAFF_PREFIXES):
@@ -895,7 +917,7 @@ def current_site():
                 s = site_by_id(session.get("site_preview"))
     except Exception:
         s = None
-    g._site = s
+    g._hsite = s
     return s
 
 
@@ -2513,6 +2535,7 @@ def order_dict(o):
     return {
         "id": o["id"], "code": o["code"], "site_name": (_so["name"] if _so is not None else ""),
         "site_phone": (nice_phone(_so["phone"] or "") if _so is not None and (_so["phone"] or "").strip() else ""),
+        "site_logo": site_logo_url(_so),
         "eta_min": _e["eta_min"], "eta_clock": _e["eta_clock"], "eta_note": _e["eta_note"],
         "scheduled_for": o["scheduled_for"], "scheduled_label": when_label(o["scheduled_for"]) if o["scheduled_for"] else "",
         "release_label": when_label(o["release_at"]) if o["release_at"] else "", "ref": (o["ref_code"] or ""), "restaurant": pu["name"], "restaurant_address": pu["address"],
@@ -2601,7 +2624,7 @@ def order_dict(o):
 @app.route("/")
 def home():
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
-    _site = current_site()
+    _site = host_site()
     if _site is not None:
         _sreg = site_region_ids(_site["id"])
         rs = [r for r in rs if r["region_id"] and r["region_id"] in _sreg]
@@ -2639,9 +2662,13 @@ def menu(slug):
         return redirect(url_for("home"))
     if r["slug"] == "oneoff" and not any_rest_on():
         return redirect(url_for("home"))
-    _site = current_site()
+    _site = host_site()
     if _site is not None and r["slug"] != "oneoff" and (r["region_id"] or 0) not in site_region_ids(_site["id"]):
         return redirect(url_for("home"))
+    if _site is None and r["slug"] != "oneoff":
+        _rs = site_of_region(r["region_id"])
+        if _rs is not None:
+            g._site_forced = _rs   # restaurant's brand: logo, name and phone on its menu page
     items = db().execute("SELECT * FROM menu_items WHERE restaurant_id=? AND active=1", (r["id"],)).fetchall()
     biz = business_is_open() and business_in_hours(rid=r["region_id"])
     open_now = biz and (any_rest_open() if r["slug"] == "oneoff" else is_open(r))
@@ -4053,6 +4080,10 @@ def track(code):
     o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
     if not o:
         return render_template("track.html", order=None, code=code)
+    if host_site() is None:
+        _ts = site_of_region(o["region_id"])
+        if _ts is not None:
+            g._site_forced = _ts   # the order's brand logo, name and phone on its tracking page
     return render_template("track.html", order={"code": o["code"]}, code=code)
 
 TRACK_FIELDS = ("code", "multi_group", "note", "credits", "dispatch_status", "kitchen_status", "restaurant", "restaurant_nav", "address",
@@ -7502,6 +7533,7 @@ def api_find_order():
                     "driver": d["name"] if d else "", "created": (o["created_at"] or "")[:16].replace("T", " "),
                     "region": names.get(o["region_id"] or 0, "No region"),
                     "site_name": (lambda _s: _s["name"] if _s is not None else "")(site_of_region(o["region_id"])),
+                    "site_logo": site_logo_url(site_of_region(o["region_id"])),
                     "mine": covers(myr, o["region_id"]),
                     "web": (o["source"] or "") == "website",
                     "track": "/track/" + o["code"]})
@@ -9936,6 +9968,13 @@ def api_site_image():
     db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (key, name))
     db().commit()
     return jsonify({"ok": True, "url": media_url(name)})
+
+
+def site_logo_url(s):
+    """A brand site's own logo, or '' when it has none."""
+    if s is not None and (s["logo"] or "").strip() and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(s["logo"]))):
+        return media_url(s["logo"])
+    return ""
 
 
 def logo_url():

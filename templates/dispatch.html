@@ -141,7 +141,7 @@
 {% block scripts %}
 <script src="/static/itempick.js"></script><script src="/static/cardbox.js"></script><script src="/static/ppcard.js"></script>
 <script>
-function siteTag(o){ return o && o.site_name ? '<span class="pill" title="Answer the phone as '+String(o.site_name).replace(/[&<>"']/g,'')+(o.site_phone?' ('+o.site_phone+')':'')+'">'+String(o.site_name).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</span> ' : ''; }
+function siteTag(o){ return o && o.site_name ? '<span class="pill" title="Answer the phone as '+String(o.site_name).replace(/[&<>"']/g,'')+(o.site_phone?' ('+o.site_phone+')':'')+'">'+(o.site_logo&&/^\/[\w\/.\-]+$/.test(o.site_logo)?'<img src="'+o.site_logo+'" alt="" style="height:16px;width:16px;object-fit:contain;vertical-align:-3px;margin-right:4px;border-radius:3px">':'')+String(o.site_name).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</span> ' : ''; }
 let DRAGGED = null;
 let SEEN_PENDING = null;
 let LAST = null;

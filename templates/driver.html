@@ -14,7 +14,14 @@
 <script src="/static/keepawake.js"></script>
 <script src="/static/drivernav.js"></script>
 
-<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scope:"/"}).catch(function(){});}</script>
+<script>
+function brandLine(o){
+  if (!o || !o.site_name) return '';
+  var n = String(o.site_name).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; });
+  var img = (o.site_logo && /^\/[\w\/.\-]+$/.test(o.site_logo)) ? '<img src="'+o.site_logo+'" alt="" style="height:18px;width:18px;object-fit:contain;vertical-align:-4px;margin-right:5px;border-radius:3px">' : '';
+  return '<div class="small" style="margin:4px 0">'+img+'Delivering for <b>'+n+'</b></div>';
+}
+if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scope:"/"}).catch(function(){});}</script>
 {% endblock %}
 {% block body %}
 <div class="head"><h1>{{ driver_name }}</h1>
@@ -308,7 +315,7 @@ function renderDone(list){
       '<span class="pill ' + (o.dispatch_status === 'delivered' ? 'green' : 'grey') + '">' + o.dispatch_status + '</span></div>' +
       '<span class="muted small">' + (o.delivered_time || (o.delivered_at || '').slice(11, 16)) + '</span></div>' +
       '<div class="paybar">Delivery fee <b>' + o.fee + '</b> &middot; Tip <b>' + o.tip + '</b>' + (o.cash ? ' &middot; cash' : '') + '</div>' +
-      '<div class="small">From ' + o.restaurant + '</div>' +
+      brandLine(o) + '<div class="small">From ' + o.restaurant + '</div>' +
       '<div class="detail-row"><span class="lbl">Customer</span><span><strong>' + o.customer + '</strong>' +
         (o.phone ? '<br><a href="tel:' + ph + '">' + o.phone + '</a>' : '') +
         '<br>' + o.address + (o.note ? '<br><em>' + o.note + '</em>' : '') + '</span></div>' +
@@ -394,6 +401,7 @@ function detailBlock(o){
   return '<div class="detail">'+
     '<div class="paybar">Delivery fee <b>'+o.fee+'</b> &middot; Tip <b>'+o.tip+'</b>'+(o.cash?' &middot; cash':'')+'</div>'+
     callInLine(o)+
+    brandLine(o)+
     '<div class="detail-row"><span class="lbl">Pick up</span><span>'+o.restaurant+
       '<br><span class="muted small">'+o.restaurant_address+'</span></span></div>'+
     '<div class="detail-row"><span class="lbl">Deliver to</span><span><strong>'+o.customer+'</strong>'+
