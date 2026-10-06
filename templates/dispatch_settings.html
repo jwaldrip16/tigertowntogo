@@ -318,7 +318,26 @@ async function setLogo(inp){
          placeholder="{% if pp[m].has_secret %}Saved{% if pp[m].tail %}, ends in {{ pp[m].tail }}{% endif %}. Type a new one to replace it.{% else %}Not saved yet{% endif %}">
   {% if pp[m].client or pp[m].has_secret %}<label style="display:flex;gap:6px;align-items:center;margin-top:4px"><input type="checkbox" name="pp_{{ m }}_clear" value="1" style="width:auto"> Remove the {{ m }} keys</label>{% endif %}
   {% endfor %}
-  <p class="small muted">Switching between Sandbox and Live waits until no order has a PayPal hold from the other set of keys.</p>
+  {% if pp.brands %}
+  <h3 style="margin:18px 0 4px">Keys for each brand</h3>
+  <p class="small muted">Give a brand its own PayPal keys to send its payments to its own PayPal account. Leave a brand blank to use the main keys above. Orders are paid with the keys of the brand their restaurant's region belongs to, and each order's charge and refunds always use the keys that took its payment. Driver payouts through PayPal always come from the main keys. Cards customers save on one brand's site can only be used on that brand.</p>
+  {% for b in pp.brands %}
+  <details style="border-top:1px solid #eee;padding:8px 0" {{ 'open' if b.own else '' }}>
+    <summary><b>{{ b.name }}</b> <span class="small" style="color:{{ '#1e7e34' if b.ready else '#666' }}">{{ ('own ' ~ pp.mode ~ ' keys') if b.ready else 'uses the main keys' }}</span></summary>
+    <input type="hidden" name="ppb_{{ b.id }}_present" value="1">
+    {% for m, title in (('sandbox', 'Sandbox'), ('live', 'Live')) %}
+    <h4 style="margin:10px 0 2px">{{ title }}</h4>
+    <label>Client ID</label>
+    <input name="ppb_{{ b.id }}_{{ m }}_client" value="{{ b[m].client }}" spellcheck="false" autocomplete="off">
+    <label>Secret</label>
+    <input name="ppb_{{ b.id }}_{{ m }}_secret" type="password" value="" spellcheck="false" autocomplete="new-password"
+           placeholder="{% if b[m].has_secret %}Saved{% if b[m].tail %}, ends in {{ b[m].tail }}{% endif %}. Type a new one to replace it.{% else %}Not saved yet{% endif %}">
+    {% if b[m].client or b[m].has_secret %}<label style="display:flex;gap:6px;align-items:center;margin-top:4px"><input type="checkbox" name="ppb_{{ b.id }}_{{ m }}_clear" value="1" style="width:auto"> Remove {{ b.name }}'s {{ m }} keys</label>{% endif %}
+    {% endfor %}
+  </details>
+  {% endfor %}
+  {% endif %}
+  <p class="small muted">Switching between Sandbox and Live waits until no order has a PayPal hold from the other set of keys. The switch covers the main keys and every brand's keys.</p>
   <button class="btn primary">Save PayPal keys</button>
 </form>
 <div class="panel narrow">

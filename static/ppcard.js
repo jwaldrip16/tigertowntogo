@@ -1,23 +1,27 @@
 // Dispatch types the customer's card into PayPal's own card boxes.
 // The number goes straight to PayPal; this site never sees or saves it.
 (function(){
-  let sdk = null;
-  function loadSdk(){
-    if (sdk) return sdk;
-    sdk = fetch('/api/paypal/client').then(function(r){ return r.json(); }).then(function(c){
+  // One PayPal card form per set of keys: each brand can have its own PayPal account.
+  const sdks = {};
+  function loadSdk(code){
+    return fetch('/api/paypal/client' + (code ? '?code=' + encodeURIComponent(code) : ''))
+      .then(function(r){ return r.json(); }).then(function(c){
       if (!c.enabled) throw new Error('PayPal is not set up yet. Add your PayPal keys first.');
-      return new Promise(function(res, rej){
+      if (sdks[c.client_id]) return sdks[c.client_id];
+      const ns = 'ppCF' + Object.keys(sdks).length;
+      sdks[c.client_id] = new Promise(function(res, rej){
         const s = document.createElement('script');
         s.src = 'https://www.paypal.com/sdk/js?client-id=' + encodeURIComponent(c.client_id) +
                 '&currency=USD&intent=authorize&components=card-fields';
-        s.setAttribute('data-namespace', 'ppCF');
-        s.onload = function(){ res(window.ppCF); };
-        s.onerror = function(){ sdk = null; rej(new Error('Could not load the PayPal card form. Check the connection and try again.')); };
+        s.setAttribute('data-namespace', ns);
+        s.onload = function(){ res(window[ns]); };
+        s.onerror = function(){ delete sdks[c.client_id]; rej(new Error('Could not load the PayPal card form. Check the connection and try again.')); };
         document.head.appendChild(s);
       });
+      return sdks[c.client_id];
     });
-    return sdk;
   }
+
   function esc(x){ return String(x == null ? '' : x).replace(/[&<>"]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
   function open(o){
     o = o || {};
@@ -46,7 +50,7 @@
       box.remove(); if (o.onClose) o.onClose();
     }
     box.querySelector('#ppcfClose').onclick = close;
-    loadSdk().then(function(pp){
+    loadSdk(o.code).then(function(pp){
       if (!document.body.contains(box)) return;
       const cf = pp.CardFields({
         createOrder: async function(){

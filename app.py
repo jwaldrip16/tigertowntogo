@@ -1,6 +1,6 @@
 
 import urllib.error
-import base64, difflib, hashlib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
+import base64, contextlib, contextvars, difflib, hashlib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
 import dbx
 from flask import Flask, g, has_request_context, request, session, redirect, url_for, render_template, jsonify, send_from_directory, flash, get_flashed_messages
 import presets
@@ -566,6 +566,11 @@ def init_db():
                    ("pp_state", "TEXT"), ("pp_captured_cents", "INTEGER"), ("pp_source", "TEXT"),
                    ("pp_error", "TEXT"), ("pp_auth_at", "TEXT")):
         ensure_column(con, "orders", _c, _d)
+    # Which PayPal keys took an order's payment: a brand's id, or 0 for the main keys.
+    ensure_column(con, "orders", "pp_acct", "INTEGER")
+    con.execute("UPDATE orders SET pp_acct=0 WHERE pp_acct IS NULL AND (pp_state IS NOT NULL OR pp_order_id IS NOT NULL)")
+    ensure_column(con, "saved_cards", "pp_acct", "INTEGER NOT NULL DEFAULT 0")
+    ensure_column(con, "gift_cards", "pp_acct", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "orders", "manual_at", "TEXT")
     ensure_column(con, "orders", "manual_by", "TEXT")
     ensure_column(con, "orders", "driver_paged_at", "TEXT")
@@ -3619,60 +3624,158 @@ def add_extra_charge(o, cents, label, ref):
 PP_MODES = ("sandbox", "live")
 PP_KEYS = ("pp_mode", "pp_sandbox_client", "pp_sandbox_secret", "pp_live_client", "pp_live_secret")
 PP_SOURCES = {"venmo": "Venmo", "paypal": "PayPal", "card": "card"}   # venmo kept only for old orders
-_pp_tok = {"t": "", "exp": 0.0, "who": ""}
+_pp_toks = {}
+# The PayPal keys in use right now: a brand's id, 0 for the main keys, None = the page's brand.
+_PP_ACCT = contextvars.ContextVar("pp_acct", default=None)
 _pp_lock = threading.Lock()
 _pp_last_sweep = [0.0]
 
-def _pp_settings():
+def _pp_settings(keys=PP_KEYS):
     """The saved PayPal keys. Works inside a page request or a background job."""
-    q = "SELECT key, value FROM settings WHERE key IN (%s)" % ",".join("?" * len(PP_KEYS))
+    keys = tuple(keys)
+    q = "SELECT key, value FROM settings WHERE key IN (%s)" % ",".join("?" * len(keys))
     try:
-        rows = db().execute(q, PP_KEYS).fetchall()
+        rows = db().execute(q, keys).fetchall()
     except RuntimeError:          # no request running
         con = dbx.connect(DB_PATH)
         try:
-            rows = con.execute(q, PP_KEYS).fetchall()
+            rows = con.execute(q, keys).fetchall()
         finally:
             con.close()
     except Exception:
         rows = []
     return {r[0]: (r[1] or "").strip() for r in rows}
 
-def pp_conf():
+# Each brand can have its own PayPal keys (its own PayPal account), saved as pp_b<brand id>_<mode>_client
+# and _secret. A brand without its own keys uses the main keys. One Sandbox/Live switch covers all of them.
+def _pp_bkeys(sid):
+    return ["pp_b%d_%s_%s" % (int(sid), m, f) for m in PP_MODES for f in ("client", "secret")]
+
+def pp_brand_keys(sid):
+    """A brand's own saved keys as {"sandbox_client": .., "sandbox_secret": .., "live_client": .., ...}."""
+    pre = "pp_b%d_" % int(sid)
+    return {k[len(pre):]: v for k, v in _pp_settings(_pp_bkeys(sid)).items()}
+
+def pp_brand_ready(sid, mode=None):
+    """The brand has its own client ID and secret for the mode in use."""
+    try:
+        sid = int(sid or 0)
+    except (TypeError, ValueError):
+        return False
+    if not sid:
+        return False
+    if mode is None:
+        mode = _pp_settings().get("pp_mode")
+        mode = mode if mode in PP_MODES else "sandbox"
+    b = pp_brand_keys(sid)
+    return bool(b.get(mode + "_client") and b.get(mode + "_secret"))
+
+def _pp_page_acct():
+    """On a brand's website, that brand; on staff pages and background jobs, the main keys."""
+    try:
+        if has_request_context():
+            s = current_site()
+            return int(s["id"]) if s else 0
+    except Exception:
+        pass
+    return 0
+
+def pp_conf(acct=None):
     v = _pp_settings()
     mode = v.get("pp_mode") if v.get("pp_mode") in PP_MODES else "sandbox"
-    cid, sec = v.get("pp_%s_client" % mode, ""), v.get("pp_%s_secret" % mode, "")
-    return {"mode": mode, "client": cid, "secret": sec,
+    cid, sec, used = v.get("pp_%s_client" % mode, ""), v.get("pp_%s_secret" % mode, ""), 0
+    if acct is None:
+        acct = _PP_ACCT.get()
+    if acct is None:
+        acct = _pp_page_acct()
+    try:
+        acct = int(acct or 0)
+    except (TypeError, ValueError):
+        acct = 0
+    if acct:
+        b = pp_brand_keys(acct)
+        if b.get(mode + "_client") and b.get(mode + "_secret"):
+            cid, sec, used = b[mode + "_client"], b[mode + "_secret"], acct
+    return {"mode": mode, "client": cid, "secret": sec, "acct": used,
             "base": "https://api-m.paypal.com" if mode == "live" else "https://api-m.sandbox.paypal.com",
             "all": v}
 
-def pp_client_id():
-    return pp_conf()["client"]
+def pp_client_id(acct=None):
+    return pp_conf(acct)["client"]
 
-def pp_enabled():
-    c = pp_conf()
+def pp_enabled(acct=None):
+    c = pp_conf(acct)
     return bool(c["client"] and c["secret"])
+
+def pp_any_enabled():
+    """Main keys or any brand's keys are set, so something may need charging."""
+    if pp_enabled(0):
+        return True
+    try:
+        ids = [r[0] for r in db().execute("SELECT id FROM sites").fetchall()]
+    except Exception:
+        ids = []
+    return any(pp_brand_ready(i) for i in ids)
+
+def pp_region_acct(rid):
+    """Which keys a new payment uses for a restaurant in this region: its brand's own, else the main ones."""
+    try:
+        s = site_of_region(rid)
+    except Exception:
+        s = None
+    return int(s["id"]) if (s and pp_brand_ready(s["id"])) else 0
+
+def pp_new_acct(o):
+    r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+    return pp_region_acct(_rv(r, "region_id") if r else None)
+
+def pp_order_acct(o):
+    """The keys this order's PayPal money went through (holds, charges, refunds must use the same ones)."""
+    if "pp_acct" in o.keys() and o["pp_acct"] is not None and (o["pp_state"] or o["pp_order_id"]):
+        return int(o["pp_acct"])
+    return pp_new_acct(o)
+
+@contextlib.contextmanager
+def pp_for(acct):
+    tok = _PP_ACCT.set(int(acct or 0))
+    try:
+        yield
+    finally:
+        _PP_ACCT.reset(tok)
 
 def pp_token(conf=None):
     c = conf or pp_conf()
     who = c["mode"] + ":" + c["client"] + ":" + hashlib.sha256(c["secret"].encode()).hexdigest()
     with _pp_lock:
-        if _pp_tok["t"] and _pp_tok["who"] == who and time.time() < _pp_tok["exp"] - 60:
-            return _pp_tok["t"]
+        t = _pp_toks.get(who)
+        if t and time.time() < t[1] - 60:
+            return t[0]
         auth = base64.b64encode((c["client"] + ":" + c["secret"]).encode()).decode()
         req = urllib.request.Request(c["base"] + "/v1/oauth2/token", data=b"grant_type=client_credentials",
                                      headers={"Authorization": "Basic " + auth,
                                               "Content-Type": "application/x-www-form-urlencoded"})
         j = json.loads(urllib.request.urlopen(req, timeout=15).read())
-        _pp_tok["t"], _pp_tok["exp"], _pp_tok["who"] = j["access_token"], time.time() + int(j.get("expires_in", 3000)), who
-        return _pp_tok["t"]
+        _pp_toks[who] = (j["access_token"], time.time() + int(j.get("expires_in", 3000)))
+        return j["access_token"]
 
 def pp_settings_view():
     """What the owner sees in Settings. Secrets never leave the server; only the last 4 characters."""
-    c = pp_conf(); v = c["all"]; out = {"mode": c["mode"], "on": bool(c["client"] and c["secret"])}
+    c = pp_conf(0); v = c["all"]; out = {"mode": c["mode"], "on": bool(c["client"] and c["secret"])}
     for m in PP_MODES:
         sec = v.get("pp_%s_secret" % m, "")
         out[m] = {"client": v.get("pp_%s_client" % m, ""), "has_secret": bool(sec), "tail": sec[-4:] if len(sec) >= 8 else ""}
+    out["brands"] = []
+    try:
+        sites = db().execute("SELECT id, name FROM sites ORDER BY name").fetchall() if brands_on() else []
+    except Exception:
+        sites = []
+    for st in sites:
+        b = pp_brand_keys(st["id"]); row = {"id": st["id"], "name": st["name"], "ready": pp_brand_ready(st["id"], c["mode"])}
+        for m in PP_MODES:
+            sec = b.get(m + "_secret", "")
+            row[m] = {"client": b.get(m + "_client", ""), "has_secret": bool(sec), "tail": sec[-4:] if len(sec) >= 8 else ""}
+        row["own"] = any(row[m]["client"] or row[m]["has_secret"] for m in PP_MODES)
+        out["brands"].append(row)
     return out
 
 def pp_test_keys(mode, cid, sec):
@@ -3849,12 +3952,13 @@ def pay_rail_name(wallet):
 def pp_api(method, path, body=None, request_id=None):
     """Returns (http status, json). Never raises."""
     try:
-        h = {"Authorization": "Bearer " + pp_token(), "Content-Type": "application/json",
+        c = pp_conf()
+        h = {"Authorization": "Bearer " + pp_token(c), "Content-Type": "application/json",
              "Prefer": "return=representation"}
         if request_id:
             h["PayPal-Request-Id"] = request_id
         data = json.dumps(body).encode() if body is not None else (b"" if method == "POST" else None)
-        req = urllib.request.Request(pp_conf()["base"] + path, data=data, headers=h, method=method)
+        req = urllib.request.Request(c["base"] + path, data=data, headers=h, method=method)
         resp = urllib.request.urlopen(req, timeout=20)
         raw = resp.read()
         return resp.status, (json.loads(raw) if raw else {})
@@ -3888,14 +3992,14 @@ def pp_tip_window_min():
         v = 60
     return max(0, min(v, 1440))
 
-def pp_settle(o, why="after delivery"):
+def _pp_settle(o, why="after delivery"):
     """Charge the held payment for the order's current total (late tip included)."""
     if (o["pp_state"] or "") != "authorized" or not o["pp_auth_id"]:
         return {"ok": False, "error": "No PayPal hold on this order."}
     auth = int(o["pp_auth_cents"] or 0)
     due = int(o["total_cents"] or 0) - credits_cents(o) - int(o["refunded_cents"] or 0)
     if due <= 0:
-        return pp_void(o, "nothing owed")
+        return _pp_void(o, "nothing owed")
     amt = min(due, pp_cap_cents(auth))
     st, j = pp_api("POST", "/v2/payments/authorizations/" + o["pp_auth_id"] + "/capture",
                    {"amount": pp_money(amt), "final_capture": True, "invoice_id": o["code"]},
@@ -3920,7 +4024,7 @@ def pp_settle(o, why="after delivery"):
     log("payment", o["code"] + " PayPal charge failed: " + msg)
     return {"ok": False, "error": msg}
 
-def pp_void(o, why="cancelled"):
+def _pp_void(o, why="cancelled"):
     if (o["pp_state"] or "") != "authorized" or not o["pp_auth_id"]:
         return {"ok": False, "error": "No PayPal hold on this order."}
     st, j = pp_api("POST", "/v2/payments/authorizations/" + o["pp_auth_id"] + "/void")
@@ -3929,7 +4033,7 @@ def pp_void(o, why="cancelled"):
         if o["dispatch_status"] not in ("delivered", "cancelled"):
             # Order is still open: it is unpaid again, so a new card can go on.
             db().execute("""UPDATE orders SET pp_state=NULL, pp_auth_id=NULL, pp_auth_cents=NULL, pp_order_id=NULL,
-                            pp_source=NULL, payment_status='unpaid', paid_at=NULL, pay_method=NULL, pay_ref=NULL
+                            pp_source=NULL, pp_acct=NULL, payment_status='unpaid', paid_at=NULL, pay_method=NULL, pay_ref=NULL
                             WHERE id=?""", (o["id"],))
             if o["dispatch_status"] == "scheduled":
                 # a future order must not go to the kitchen without a card on it
@@ -3945,7 +4049,15 @@ def pp_void(o, why="cancelled"):
 
 @app.get("/api/paypal/client")
 def api_pp_client():
-    return jsonify({"ok": True, "enabled": pp_enabled(), "client_id": pp_client_id(), "env": pp_conf()["mode"]})
+    """The PayPal client ID for an order (its brand's keys) or, with no order, for this page."""
+    acct = None
+    code = (request.args.get("code") or "").strip()
+    if code:
+        o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
+        if o:
+            acct = pp_order_acct(o)
+    c = pp_conf(acct)
+    return jsonify({"ok": True, "enabled": bool(c["client"] and c["secret"]), "client_id": c["client"], "env": c["mode"]})
 
 @app.post("/api/paypal/replace-card")
 def api_pp_replace_card():
@@ -3980,7 +4092,7 @@ def api_pp_replace_card():
 
 def pp_sweep(force=False):
     """Charge delivered orders once the tip window is over; release holds on cancelled ones."""
-    if not pp_enabled():
+    if not pp_any_enabled():
         return
     if not force and time.time() - _pp_last_sweep[0] < 30:
         return
@@ -4001,7 +4113,7 @@ def pp_can_pay(o, st=None):
     """A card can go on this order through PayPal: open, not cash, nothing held or charged yet."""
     if st is None:
         st = (o["pp_state"] or "") if "pp_state" in o.keys() else ""
-    return bool(pp_enabled() and st not in ("authorized", "captured")
+    return bool(pp_enabled(pp_order_acct(o)) and st not in ("authorized", "captured")
                 and not is_cash(o)
                 and (o["payment_status"] or "") not in ("paid", "cash_due")
                 and o["dispatch_status"] not in ("delivered", "cancelled"))
@@ -4010,7 +4122,7 @@ def pp_info(o):
     """Payment bits the tracking page and the dispatch card need."""
     st = (o["pp_state"] or "") if "pp_state" in o.keys() else ""
     owed = balance_cents(o) if st == "captured" else 0
-    return {"enabled": pp_enabled(), "state": st, "source": PP_SOURCES.get(o["pp_source"] or "", ""),
+    return {"enabled": pp_enabled(pp_order_acct(o)), "state": st, "source": PP_SOURCES.get(o["pp_source"] or "", ""),
             "pay_url": "/pay/" + o["code"],
             "can_pay": pp_can_pay(o, st),
             "tip_editable": st in ("authorized", "captured") and o["dispatch_status"] != "cancelled",
@@ -4031,18 +4143,23 @@ def pay_page(code):
     amount = info["owed"] if kind == "balance" else money(o["total_cents"])
     return render_template("pay.html", order=o, code=code, kind=kind, amount=amount, info=info,
                            rname=(o["pickup_name"] or (r["name"] if r else "")),
-                           pp_ready=pp_enabled(), client_id=pp_client_id(),
+                           pp_ready=pp_enabled(pp_order_acct(o)), client_id=pp_client_id(pp_order_acct(o)),
                            is_dispatch=bool(dispatcher_required()))
 
 @app.post("/api/paypal/create")
 def api_pp_create():
-    if not pp_enabled():
-        return jsonify({"ok": False, "error": "PayPal is not set up yet."}), 400
     b = request.get_json(force=True)
     o = db().execute("SELECT * FROM orders WHERE code=?", ((b.get("code") or "").strip(),)).fetchone()
     if not o:
         return jsonify({"ok": False, "error": "Order not found."}), 404
     kind = "balance" if b.get("kind") == "balance" else "order"
+    acct = pp_new_acct(o) if (kind == "order" and (o["pp_state"] or "") not in ("authorized", "captured")) else pp_order_acct(o)
+    if not pp_enabled(acct):
+        return jsonify({"ok": False, "error": "PayPal is not set up yet."}), 400
+    with pp_for(acct):
+        return _pp_create(o, b, kind, acct)
+
+def _pp_create(o, b, kind, acct):
     if kind == "order":
         if not pp_can_pay(o):
             return jsonify({"ok": False, "error": "This order is already paid."}), 400
@@ -4064,7 +4181,7 @@ def api_pp_create():
     if st not in (200, 201) or not j.get("id"):
         return jsonify({"ok": False, "error": pp_err(j, "PayPal could not start the payment.")}), 400
     if kind == "order":
-        db().execute("UPDATE orders SET pp_order_id=? WHERE id=?", (j["id"], o["id"]))
+        db().execute("UPDATE orders SET pp_order_id=?, pp_acct=? WHERE id=?", (j["id"], acct, o["id"]))
         db().commit()
     return jsonify({"ok": True, "id": j["id"]})
 
@@ -4080,13 +4197,18 @@ def delivered_lock(o):
 
 @app.post("/api/paypal/approve")
 def api_pp_approve():
-    if not pp_enabled():
-        return jsonify({"ok": False, "error": "PayPal is not set up yet."}), 400
     b = request.get_json(force=True)
     o = db().execute("SELECT * FROM orders WHERE code=?", ((b.get("code") or "").strip(),)).fetchone()
     ppid = (b.get("id") or "").strip()
     if not o or not ppid:
         return jsonify({"ok": False, "error": "Order not found."}), 404
+    acct = pp_order_acct(o)
+    if not pp_enabled(acct):
+        return jsonify({"ok": False, "error": "PayPal is not set up yet."}), 400
+    with pp_for(acct):
+        return _pp_approve(o, b, ppid, acct)
+
+def _pp_approve(o, b, ppid, acct):
     if b.get("kind") == "balance":
         st, j = pp_api("POST", "/v2/checkout/orders/" + ppid + "/capture", request_id="bal-" + ppid)
         cap = (((j.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or [{}])[0]
@@ -4114,13 +4236,13 @@ def api_pp_approve():
     db().execute("""UPDATE orders SET pp_auth_id=?, pp_auth_cents=?, pp_state='authorized', pp_source=?,
                     pp_error=NULL, pp_auth_at=? WHERE id=?""", (auth["id"], cents, src, now(), o["id"]))
     db().commit()
-    saved = pp_keep_vaulted(o, j)
+    saved = pp_keep_vaulted(o, j, acct)
     o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
     mark_paid(o, src if src in ("venmo", "paypal") else "card_paypal", auth["id"], cents)
     return jsonify({"ok": True, "held": money(cents), "source": PP_SOURCES.get(src, "PayPal"),
                     "saved_card": saved})
 
-def pp_refund(o, cents, note=""):
+def _pp_refund(o, cents, note=""):
     """Refund money PayPal already charged, newest-first over the main charge and any
     Pay the rest charges. Returns (ok, refund ids, error)."""
     extras = [x for x in json.loads(o["extra_charges"] or "[]") if str(x.get("label", "")).startswith("Rest of tip")]
@@ -4154,6 +4276,18 @@ def pp_refund(o, cents, note=""):
         return False, refs, "only " + money(int(cents) - want) + " could be refunded through PayPal."
     log("payment", o["code"] + " refunded " + money(cents) + " through " + PP_SOURCES.get(o["pp_source"] or "", "PayPal"))
     return True, refs, ""
+
+def pp_settle(o, why="after delivery"):
+    with pp_for(pp_order_acct(o)):
+        return _pp_settle(o, why)
+
+def pp_void(o, why="cancelled"):
+    with pp_for(pp_order_acct(o)):
+        return _pp_void(o, why)
+
+def pp_refund(o, cents, note=""):
+    with pp_for(pp_order_acct(o)):
+        return _pp_refund(o, cents, note)
 
 @app.post("/api/paypal/settle")
 def api_pp_settle():
@@ -4557,7 +4691,7 @@ def checkout():
                 return jsonify({"ok": False, "error": row["name"] + " is only available " + avail_label(row) +
                                 ". Take it out of your bag or pick a time when it is available."}), 400
     card = None
-    use_pp = (bool(payload.get("paypal")) or placed_by == "customer") and pp_enabled()
+    use_pp = (bool(payload.get("paypal")) or placed_by == "customer") and pp_enabled(pp_region_acct(_rv(r, "region_id")))
     _credit_try = bool(payload.get("gift_code") or payload.get("redeem_rewards") or payload.get("saved_card_id"))
     if placed_by == "customer" and not use_pp and not _credit_try:
         card, card_err = check_card(payload.get("card"))
@@ -5322,7 +5456,8 @@ def _payout_send(row_id):
                        "amount": {"value": "%.2f" % (int(r["cents"]) / 100.0), "currency": "USD"},
                        "receiver": r["receiver"], "note": short[:4000],
                        "sender_item_id": r["sender_id"], "recipient_wallet": wallet}]}
-    st, j = pp_api("POST", "/v1/payments/payouts", body, request_id=r["sender_id"])
+    with pp_for(0):    # driver payouts always come from the main PayPal account
+        st, j = pp_api("POST", "/v1/payments/payouts", body, request_id=r["sender_id"])
     now = dt.datetime.now().isoformat(timespec="seconds")
     if st in (200, 201) and (j.get("batch_header") or {}).get("payout_batch_id"):
         bh = j["batch_header"]
@@ -5351,7 +5486,8 @@ def _payout_check(r):
         return _payout_send(r["id"])
     if not r["batch_id"]:
         return r
-    st, j = pp_api("GET", "/v1/payments/payouts/" + r["batch_id"])
+    with pp_for(0):
+        st, j = pp_api("GET", "/v1/payments/payouts/" + r["batch_id"])
     now = dt.datetime.now().isoformat(timespec="seconds")
     if st == 200:
         it = (j.get("items") or [{}])[0]
@@ -5365,7 +5501,7 @@ def _payout_check(r):
     return db().execute("SELECT * FROM driver_payouts WHERE id=?", (r["id"],)).fetchone()
 
 def payout_sweep(force=False):
-    if not (pp_enabled() or br_enabled()):
+    if not (pp_enabled(0) or br_enabled()):
         return
     if not force and time.time() - _payout_last[0] < 60:
         return
@@ -5398,7 +5534,7 @@ def auto_driver_pay_sweep(force=False):
     + flat), by PayPal or Venmo, once the customer's payment is settled and the delay has passed.
     Anything it can't do (no PayPal or Venmo on file, over the limit, a PayPal error) is left
     on the order for a dispatcher, and it never pays the same trip twice."""
-    if not setting("auto_driver_pay") or not (pp_enabled() or br_enabled()):
+    if not setting("auto_driver_pay") or not (pp_enabled(0) or br_enabled()):
         return
     if not force and time.time() - _autopay_last[0] < 60:
         return
@@ -5475,7 +5611,7 @@ def api_driver_pay():
     if not o:
         return jsonify({"ok": False, "error": "Order not found."}), 404
     if b.get("op") == "check":
-        if not (pp_enabled() or br_enabled()):
+        if not (pp_enabled(0) or br_enabled()):
             return jsonify({"ok": False, "error": "PayPal and Branch keys are not set up yet."}), 400
         for r in db().execute("""SELECT * FROM driver_payouts WHERE order_id=? AND status IN
                                  ('SENDING','UNKNOWN','PENDING','PROCESSING','NEW','ONHOLD','UNCLAIMED')""",
@@ -5555,7 +5691,7 @@ def extra_pay_payload(driver_id=None):
              "status": r["status"] or "", "open": (r["status"] or "") in PAYOUT_OPEN,
              "label": PAYOUT_LABEL.get(r["status"] or "", (r["status"] or "").lower()), "error": r["error"] or "",
              "by": r["created_by"] or "", "at": (r["created_at"] or "").replace("T", " ")[:16]} for r in rows]
-    return {"ok": True, "paypal_ready": pp_enabled(), "drivers": drivers, "history": hist}
+    return {"ok": True, "paypal_ready": pp_enabled(0), "drivers": drivers, "history": hist}
 
 
 @app.get("/dispatch/driver-pay")
@@ -5578,7 +5714,7 @@ def api_driver_extra():
         r = db().execute("SELECT * FROM driver_payouts WHERE id=?", (b.get("id"),)).fetchone()
         if not r:
             return jsonify({"ok": False, "error": "That payment is not on file."}), 404
-        if (r["status"] or "") in PAYOUT_OPEN and pp_enabled():
+        if (r["status"] or "") in PAYOUT_OPEN and pp_enabled(0):
             _payout_check(r)
         return jsonify(extra_pay_payload(b.get("driver_id") or None))
     if op != "pay":
@@ -9612,8 +9748,46 @@ def dispatch_settings():
                     pp_msgs.append(("ok" if _ok else "bad", _msg))
                 elif bool(_c) != bool(_sv) and (_c or _sv):
                     pp_msgs.append(("bad", "The %s keys need both a client ID and a secret." % _m))
+            # Each brand's own keys (blank = the brand uses the main keys above)
+            _sites = db().execute("SELECT id, name FROM sites ORDER BY name").fetchall() if brands_on() else []
+            for _st in _sites:
+                if ("ppb_%d_present" % _st["id"]) not in request.form:
+                    continue
+                _bcur = pp_brand_keys(_st["id"]); _bnew = dict(_bcur)
+                for _m in PP_MODES:
+                    _f = "ppb_%d_%s_" % (_st["id"], _m)
+                    _bnew[_m + "_client"] = (request.form.get(_f + "client") or "").strip()[:200]
+                    _sv = (request.form.get(_f + "secret") or "").strip()[:200]
+                    if request.form.get(_f + "clear"):
+                        _bnew[_m + "_client"], _bnew[_m + "_secret"] = "", ""
+                    elif _sv:
+                        _bnew[_m + "_secret"] = _sv
+                for _m in PP_MODES:
+                    _was = (_bcur.get(_m + "_client", ""), _bcur.get(_m + "_secret", ""))
+                    _now = (_bnew.get(_m + "_client", ""), _bnew.get(_m + "_secret", ""))
+                    if _was != _now and _was[0] and _m == _mode:
+                        _held = [r[0] for r in db().execute(
+                            "SELECT code FROM orders WHERE pp_state='authorized' AND pp_acct=? ORDER BY id DESC LIMIT 20",
+                            (_st["id"],)).fetchall()]
+                        if _held:
+                            pp_msgs.append(("bad", "%s: kept the old %s keys. These orders have a PayPal hold made with them, "
+                                            "so charge or release them first: %s" % (_st["name"], _m, ", ".join(_held))))
+                            _bnew[_m + "_client"], _bnew[_m + "_secret"] = _was
+                            continue
+                    for _f2 in ("client", "secret"):
+                        db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                                     ("pp_b%d_%s_%s" % (_st["id"], _m, _f2), _bnew.get(_m + "_" + _f2, "")))
+                    if _now[0] and _now[1] and _now != _was:
+                        _ok, _msg = pp_test_keys(_m, _now[0], _now[1])
+                        pp_msgs.append(("ok" if _ok else "bad", _st["name"] + ": " + _msg))
+                    elif bool(_now[0]) != bool(_now[1]):
+                        pp_msgs.append(("bad", "%s: the %s keys need both a client ID and a secret." % (_st["name"], _m)))
+            db().commit()
             if not (_new.get("pp_%s_client" % _mode) and _new.get("pp_%s_secret" % _mode)):
-                pp_msgs.append(("bad", "PayPal is off: there are no %s keys saved, so customers cannot pay online." % _mode))
+                if any(pp_brand_ready(_st["id"], _mode) for _st in _sites):
+                    pp_msgs.append(("bad", "No main %s keys: brands without their own keys cannot take PayPal payments." % _mode))
+                else:
+                    pp_msgs.append(("bad", "PayPal is off: there are no %s keys saved, so customers cannot pay online." % _mode))
         if "br_present" in request.form and is_owner(session.get("dispatcher_id")):
             _op = request.form.get("br_op") or "save"
             try:
@@ -13507,8 +13681,8 @@ def customer_public(c):
     if not c:
         return None
     rr = reward_rules()
-    cards = db().execute("SELECT id, brand, last4, expiry FROM saved_cards WHERE customer_id=? ORDER BY id DESC",
-                         (c["id"],)).fetchall()
+    cards = db().execute("SELECT id, brand, last4, expiry FROM saved_cards WHERE customer_id=? AND COALESCE(pp_acct,0)=? "
+                         "ORDER BY id DESC", (c["id"], pp_conf()["acct"])).fetchall()
     pts = int(c["points"] or 0)
     tp = tier_points(c["id"])
     tier = tier_for(tp)
@@ -13637,7 +13811,11 @@ def checkout_credits(payload, placed_by, dg, subtotal, total):
         sc = db().execute("SELECT * FROM saved_cards WHERE id=? AND customer_id=?", (int(sid), cust["id"])).fetchone()
         if not sc:
             return dict(out, error="That saved card was not found. Pick another card.")
-        if not pp_enabled():
+        _rr = db().execute("SELECT * FROM restaurants WHERE id=?", (payload.get("restaurant_id"),)).fetchone()
+        _acct = pp_region_acct(_rv(_rr, "region_id") if _rr else None)
+        if int(sc["pp_acct"] or 0) != _acct:
+            return dict(out, error="That card is saved for another of our brands. Pick another card or pay with a new one.")
+        if not pp_enabled(_acct):
             return dict(out, error="Cards on file are not available right now.")
         out["saved_card"] = sc
     out["save_card"] = bool(payload.get("save_card")) and bool(cust) and placed_by == "customer" and not out["saved_card"]
@@ -13705,22 +13883,22 @@ def pp_vault_source(o):
         return None
     attrs = {"vault": {"store_in_vault": "ON_SUCCESS"}, "verification": {"method": "SCA_WHEN_REQUIRED"}}
     c = db().execute("SELECT pp_customer_id FROM customers WHERE id=?", (o["customer_id"],)).fetchone()
-    if c and c["pp_customer_id"]:
+    if c and c["pp_customer_id"] and not pp_conf()["acct"]:   # PayPal's customer ID belongs to the main keys
         attrs["customer"] = {"id": c["pp_customer_id"]}
     return {"card": {"attributes": attrs}}
 
-def pp_keep_vaulted(o, j):
+def pp_keep_vaulted(o, j, acct=0):
     """After PayPal approves a card the customer asked us to save, keep PayPal's token (never the number)."""
     try:
         card = (j.get("payment_source") or {}).get("card") or {}
         v = (card.get("attributes") or {}).get("vault") or {}
         if not (v.get("id") and o["customer_id"]):
             return None
-        db().execute("""INSERT OR IGNORE INTO saved_cards (customer_id, vault_id, brand, last4, expiry, created_at)
-                        VALUES (?,?,?,?,?,?)""", (o["customer_id"], v["id"], (card.get("brand") or "card").lower(),
-                        card.get("last_digits") or "", card.get("expiry") or "", now()))
+        db().execute("""INSERT OR IGNORE INTO saved_cards (customer_id, vault_id, brand, last4, expiry, created_at, pp_acct)
+                        VALUES (?,?,?,?,?,?,?)""", (o["customer_id"], v["id"], (card.get("brand") or "card").lower(),
+                        card.get("last_digits") or "", card.get("expiry") or "", now(), int(acct or 0)))
         pc = (v.get("customer") or {}).get("id")
-        if pc:
+        if pc and not acct:
             db().execute("UPDATE customers SET pp_customer_id=? WHERE id=? AND pp_customer_id IS NULL", (pc, o["customer_id"]))
         db().commit()
         return {"brand": card.get("brand") or "Card", "last4": card.get("last_digits") or ""}
@@ -13728,7 +13906,13 @@ def pp_keep_vaulted(o, j):
         return None
 
 def pp_charge_saved(o, sc):
-    """Put the hold on a card the customer keeps on file (same hold-then-charge-after-delivery as checkout)."""
+    """Put the hold on a card the customer keeps on file (same hold-then-charge-after-delivery as checkout).
+    A saved card only works with the PayPal keys it was saved under."""
+    acct = int(sc["pp_acct"] or 0) if "pp_acct" in sc.keys() else 0
+    with pp_for(acct):
+        return _pp_charge_saved(o, sc, acct)
+
+def _pp_charge_saved(o, sc, acct):
     cents = due_cents(o)
     st, j = pp_api("POST", "/v2/checkout/orders", {
         "intent": "AUTHORIZE",
@@ -13740,8 +13924,8 @@ def pp_charge_saved(o, sc):
         log("payment", o["code"] + " card on file declined: " + pp_err(j, "declined"))
         return False, "Your card on file didn't go through. Finish paying with another card on the next page."
     db().execute("""UPDATE orders SET pp_order_id=?, pp_auth_id=?, pp_auth_cents=?, pp_state='authorized',
-                    pp_source='card', pp_error=NULL, pp_auth_at=? WHERE id=?""",
-                 (j.get("id"), auth["id"], cents, now(), o["id"]))
+                    pp_source='card', pp_error=NULL, pp_auth_at=?, pp_acct=? WHERE id=?""",
+                 (j.get("id"), auth["id"], cents, now(), acct, o["id"]))
     db().commit()
     o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
     mark_paid(o, "card_paypal", auth["id"], cents)
@@ -13941,7 +14125,8 @@ def api_account_card_delete():
     if not sc:
         return jsonify({"ok": False, "error": "Card not found."}), 404
     try:
-        pp_api("DELETE", "/v3/vault/payment-tokens/" + sc["vault_id"])
+        with pp_for(int(sc["pp_acct"] or 0)):
+            pp_api("DELETE", "/v3/vault/payment-tokens/" + sc["vault_id"])
     except Exception:
         pass
     db().execute("DELETE FROM saved_cards WHERE id=?", (sc["id"],))
@@ -14022,17 +14207,22 @@ def api_gift_pp_create():
     g = _gift_by_ref((request.get_json(force=True) or {}).get("ref"))
     if not g or g["status"] != "pending":
         return jsonify({"ok": False, "error": "That gift card is already paid or was not found."}), 400
-    st, j = pp_api("POST", "/v2/checkout/orders", {
+    acct = pp_conf()["acct"]
+    with pp_for(acct):
+        st, j = _gift_pp_order(g)
+    if st not in (200, 201) or not j.get("id"):
+        return jsonify({"ok": False, "error": pp_err(j, "PayPal could not start the payment.")}), 400
+    db().execute("UPDATE gift_cards SET pp_order_id=?, pp_acct=? WHERE id=?", (j["id"], acct, g["id"]))
+    db().commit()
+    return jsonify({"ok": True, "id": j["id"]})
+
+def _gift_pp_order(g):
+    return pp_api("POST", "/v2/checkout/orders", {
         "intent": "CAPTURE",
         "purchase_units": [{"reference_id": "GIFT-" + g["ref"], "custom_id": "GIFT-" + g["ref"],
                             "description": "Gift card " + money(g["initial_cents"]), "amount": pp_money(g["initial_cents"])}],
         "application_context": {"shipping_preference": "NO_SHIPPING", "user_action": "PAY_NOW",
                                 "brand_name": (setting("business_name", str) or "Fleet Foot Delivery")[:120]}})
-    if st not in (200, 201) or not j.get("id"):
-        return jsonify({"ok": False, "error": pp_err(j, "PayPal could not start the payment.")}), 400
-    db().execute("UPDATE gift_cards SET pp_order_id=? WHERE id=?", (j["id"], g["id"]))
-    db().commit()
-    return jsonify({"ok": True, "id": j["id"]})
 
 @app.post("/api/gift/pp-approve")
 def api_gift_pp_approve():
@@ -14044,7 +14234,8 @@ def api_gift_pp_approve():
         return jsonify({"ok": True, "card": gift_public(g, True)})
     if (b.get("id") or "") != (g["pp_order_id"] or ""):
         return jsonify({"ok": False, "error": "That payment is for something else."}), 400
-    st, j = pp_api("POST", "/v2/checkout/orders/" + g["pp_order_id"] + "/capture", request_id="gift-" + g["pp_order_id"])
+    with pp_for(int(g["pp_acct"] or 0) if "pp_acct" in g.keys() else 0):
+        st, j = pp_api("POST", "/v2/checkout/orders/" + g["pp_order_id"] + "/capture", request_id="gift-" + g["pp_order_id"])
     cap = (((j.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or [{}])[0]
     if st not in (200, 201) or cap.get("status") not in ("COMPLETED", "PENDING"):
         return jsonify({"ok": False, "error": pp_err(j, "The payment did not go through.")}), 400
