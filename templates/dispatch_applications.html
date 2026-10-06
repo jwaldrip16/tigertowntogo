@@ -2,9 +2,15 @@
 <h1>Applications</h1>
 <div class="row"><a class="chip {{ 'on' if kind == 'driver' else '' }}" href="?kind=driver">Drivers ({{ apps|selectattr('kind','equalto','driver')|list|length }})</a>
   <a class="chip {{ 'on' if kind == 'restaurant' else '' }}" href="?kind=restaurant">Restaurants ({{ apps|selectattr('kind','equalto','restaurant')|list|length }})</a></div>
+{% if owner and apps|selectattr('kind','equalto',kind)|list %}
+<div class="row mt"><label class="small"><input type="checkbox" id="pickAll" onchange="document.querySelectorAll('.apick').forEach(x=>x.checked=this.checked)"> Select all</label>
+  <button class="btn tiny" onclick="delPicked()">Delete selected</button>
+  <button class="btn tiny" onclick="delStatus('declined')">Delete all declined</button>
+  <button class="btn tiny" onclick="delStatus('approved')">Delete all approved</button></div>
+{% endif %}
 {% for a in apps if a.kind == kind %}
 <div class="panel mt">
-  <div class="row" style="justify-content:space-between"><b>{{ a.name }}</b>
+  <div class="row" style="justify-content:space-between"><b>{% if owner %}<input type="checkbox" class="apick" value="{{ a.id }}" data-status="{{ a.status }}"> {% endif %}{{ a.name }}</b>
     <span class="pill {{ {'new':'amber','contacted':'grey','approved':'green','declined':'grey'}[a.status] }}">{{ a.status|capitalize }}</span></div>
   <div class="small muted">{{ a.created }} &middot; {{ a.regions }}{% if a.updated_by %} &middot; last changed by {{ a.updated_by }}{% endif %}</div>
   <p class="small"><a href="tel:{{ a.tel }}">{{ a.phone }}</a> &middot; <a href="mailto:{{ a.email }}">{{ a.email }}</a><br>
@@ -13,12 +19,16 @@
   {% if a.d.note %}<br><i>{{ a.d.note }}</i>{% endif %}</p>
   <div class="row"><select id="st{{ a.id }}">{% for s in ['new','contacted','approved','declined'] %}<option value="{{ s }}" {{ 'selected' if a.status == s else '' }}>{{ s|capitalize }}</option>{% endfor %}</select>
     <input id="nt{{ a.id }}" value="{{ a.notes }}" placeholder="Notes"><button class="btn tiny primary" onclick="upd({{ a.id }})">Save</button>
-    <button class="btn tiny" onclick="del({{ a.id }})">Delete</button></div>
+    {% if owner %}<button class="btn tiny" onclick="del({{ a.id }})">Delete</button>{% endif %}</div>
 </div>
 {% else %}<p class="muted mt">No {{ kind }} applications yet.</p>{% endfor %}
 <p class="muted small mt">Approved a driver or restaurant? Add them on the Manage page.</p>
 {% endblock %}
 {% block scripts %}<script>
 async function upd(id){ const r = await jpost('/api/dispatch/application-update',{id:id,status:document.getElementById('st'+id).value,notes:document.getElementById('nt'+id).value}); if(!r.ok){ alert(r.error); return; } location.reload(); }
-async function del(id){ if(!confirm('Delete this application?')) return; const r = await jpost('/api/dispatch/application-delete',{id:id}); if(!r.ok){ alert(r.error); return; } location.reload(); }
+async function delIds(ids, what){ if(!ids.length){ alert('Nothing to delete.'); return; } if(!confirm('Delete '+what+'? This can\'t be undone.')) return;
+  const r = await jpost('/api/dispatch/application-delete',{ids:ids}); if(!r.ok){ alert(r.error); return; } location.reload(); }
+function del(id){ delIds([id], 'this application'); }
+function delPicked(){ const ids=[...document.querySelectorAll('.apick:checked')].map(x=>+x.value); delIds(ids, ids.length+' application'+(ids.length==1?'':'s')); }
+function delStatus(st){ const ids=[...document.querySelectorAll('.apick')].filter(x=>x.dataset.status==st).map(x=>+x.value); delIds(ids, 'all '+ids.length+' '+st+' {{ kind }} application'+(ids.length==1?'':'s')); }
 </script>{% endblock %}

@@ -13907,7 +13907,7 @@ def dispatch_applications():
                     "tel": tel_digits(a["phone"]), "email": a["email"] or "", "status": a["status"], "notes": a["notes"] or "",
                     "regions": "Any area" if rids == "any" else ", ".join(names.get(x, "Area " + x) for x in rids.split(",") if x),
                     "created": (a["created_at"] or "").replace("T", " ")[:16], "updated_by": a["updated_by"] or "", "d": d})
-    return render_template("dispatch_applications.html", apps=out, kind=request.args.get("kind") or "driver")
+    return render_template("dispatch_applications.html", apps=out, kind=request.args.get("kind") or "driver", owner=is_owner())
 
 @app.post("/api/dispatch/application-update")
 def api_dispatch_application_update():
@@ -13932,9 +13932,21 @@ def api_dispatch_application_delete():
         return jsonify({"ok": False}), 403
     if not is_owner():
         return jsonify({"ok": False, "error": "Only an owner can delete an application."}), 403
-    db().execute("DELETE FROM applications WHERE id=?", (int((request.get_json(force=True) or {}).get("id") or 0),))
-    db().commit()
-    return jsonify({"ok": True})
+    b = request.get_json(force=True) or {}
+    ids = [int(x) for x in (b.get("ids") or [b.get("id")]) if str(x or "").isdigit()]
+    if not ids:
+        return jsonify({"ok": False, "error": "Pick an application to delete."}), 400
+    con = db()
+    gone = []
+    for i in ids[:500]:
+        a = con.execute("SELECT id, kind, name FROM applications WHERE id=?", (i,)).fetchone()
+        if a:
+            con.execute("DELETE FROM applications WHERE id=?", (i,))
+            gone.append(("restaurant" if a["kind"] == "restaurant" else "driver") + " application from " + (a["name"] or "?"))
+    con.commit()
+    for g in gone:
+        log("application", "Deleted " + g + " by " + (session.get("dispatcher_name") or "owner"))
+    return jsonify({"ok": True, "deleted": len(gone)})
 
 
 # ---------------------------------------------------------------- customer password reset
