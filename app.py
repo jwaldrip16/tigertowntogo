@@ -527,7 +527,8 @@ def init_db():
     ensure_column(con, "regions", "base_miles", "REAL")           # blank = the business's first miles
     ensure_column(con, "regions", "per_mile_cents", "INTEGER")    # blank = the business per-mile fee
     ensure_column(con, "regions", "tz", "TEXT")                   # blank = the app's time zone (APP_TZ)
-    ensure_column(con, "regions", "faq_text", "TEXT")             # blank = the business FAQ
+    ensure_column(con, "regions", "faq_text", "TEXT")
+    ensure_column(con, "regions", "auto_kitchen", "INTEGER DEFAULT 0")   # 1 = Send to kitchen happens on its own             # blank = the business FAQ
     ensure_column(con, "restaurants", "min_order_cents", "INTEGER")  # blank = use the region's
     ensure_column(con, "restaurants", "max_miles", "REAL")           # blank = use the region's
     ensure_column(con, "drivers", "active", "INTEGER DEFAULT 1")
@@ -634,6 +635,10 @@ def init_db():
     ensure_column(con, "orders", "sched_hold", "TEXT")
     ensure_column(con, "orders", "redo_driver_id", "INTEGER")
     ensure_column(con, "orders", "token", "TEXT")
+    ensure_column(con, "orders", "primary_no", "TEXT")
+    ensure_column(con, "orders", "primary_seq", "INTEGER")
+    ensure_column(con, "orders", "primary_day", "TEXT")
+    ensure_column(con, "orders", "auto_kitchen_at", "TEXT")   # when the region's automatic Send to kitchen fired
     ensure_column(con, "restaurants", "cuisine", "TEXT")
     con.execute("UPDATE drivers SET roster='scheduled' WHERE roster IS NULL OR roster=''")
     con.commit()
@@ -2618,6 +2623,148 @@ def new_code():
     code = "FF" + dt.datetime.now().strftime("%H%M%S") + str(secrets.randbelow(900) + 100)
     return code
 
+# ---- Order numbers -------------------------------------------------------------------
+# Primary number: what the restaurant and driver call the order. Brand letters plus a count
+# that starts at 1 for each restaurant (TT1, TT2 at Acre; TT1 at the next place). The FF code
+# stays as the secondary number: unique across the whole system, used on tracking links.
+PRIMARY_STYLES = {
+    "plain":  "Letters then number: TT1, TT2",
+    "dash":   "Letters, dash, number: TT-1, TT-2",
+    "padded": "Letters then padded number: TT0001",
+    "dashpad": "Letters, dash, padded number: TT-0001",
+}
+SECONDARY_STYLES = {
+    "time":     "Prefix + time + 3 random digits: FF135508123 (current)",
+    "sequence": "Prefix + running number: FF000001",
+    "date":     "Prefix + date + count for the day: FF261006-1",
+}
+
+
+def _ordset(key, default=""):
+    try:
+        row = db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        v = (row["value"] if row is not None else "") or ""
+        return v.strip() or default
+    except Exception:
+        return default
+
+
+def default_prefix(name):
+    n = (name or "").lower().replace(" ", "")
+    if "tiger" in n:
+        return "TT"
+    if "crimson" in n:
+        return "CTG"
+    if "bulldawg" in n or "bulldog" in n:
+        return "BF"
+    words = re.findall(r"[A-Za-z0-9]+", name or "")
+    return ("".join(w[0] for w in words).upper() or "R")[:5]
+
+
+def clean_prefix(v):
+    return re.sub(r"[^A-Za-z0-9]", "", v or "").upper()[:6]
+
+
+def brand_prefix(site_id=None, name=None):
+    """Letters for one brand's restaurant order numbers. site_id None/0 = the main business."""
+    key = "primary_prefix_%d" % int(site_id) if site_id else "primary_prefix_main"
+    if name is None:
+        if site_id:
+            row = db().execute("SELECT name FROM sites WHERE id=?", (site_id,)).fetchone()
+            name = row["name"] if row else ""
+        else:
+            name = _ordset("business_name", "")
+    return clean_prefix(_ordset(key, "")) or default_prefix(name)
+
+
+def primary_on():
+    return _ordset("primary_on", "1") != "0"
+
+
+def format_primary(prefix, n):
+    style = _ordset("primary_style", "plain")
+    try:
+        digits = max(1, min(8, int(_ordset("primary_digits", "4"))))
+    except ValueError:
+        digits = 4
+    num = str(n).zfill(digits) if style in ("padded", "dashpad") else str(n)
+    return prefix + ("-" if style in ("dash", "dashpad") else "") + num
+
+
+def primary_group(rid):
+    """Which count an order joins: the restart marks (Settings > Order numbers > Start over)
+    plus today's date when numbers start over daily. A new group starts again at 1."""
+    day = dt.datetime.now().strftime("%Y-%m-%d") if _ordset("primary_reset", "never") == "daily" else ""
+    ep = _ordset("primary_epoch", "0") + "." + _ordset("primary_epoch_r%d" % int(rid or 0), "0")
+    return ("" if ep == "0.0" else ep + "|") + day
+
+
+def reset_numbering(rid=None, secondary=True):
+    """Start order numbers over (after test orders). rid = one restaurant only; None = every one."""
+    stamp = str(int(time.time()))
+    if rid:
+        db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", ("primary_epoch_r%d" % int(rid), stamp))
+    else:
+        db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('primary_epoch',?)", (stamp,))
+        if secondary:
+            row = db().execute("SELECT MAX(id) m FROM orders").fetchone()
+            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('secondary_base',?)", (str(int(row["m"] or 0)),))
+            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('secondary_reset_at',?)",
+                         (dt.datetime.now().isoformat(timespec="seconds"),))
+    db().commit()
+
+
+def assign_primary(order_id):
+    """Give a new order its restaurant order number. Counts per restaurant, optionally starting
+    over each day (Settings > Order numbers)."""
+    if not primary_on():
+        return None
+    o = db().execute("SELECT id, restaurant_id, region_id, primary_no FROM orders WHERE id=?", (order_id,)).fetchone()
+    if not o or (o["primary_no"] or "").strip():
+        return o["primary_no"] if o else None
+    so = site_of_region(o["region_id"]) if o["region_id"] else None
+    if so is None:
+        r = db().execute("SELECT region_id FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+        so = site_of_region(r["region_id"]) if r and r["region_id"] else None
+    prefix = brand_prefix(so["id"] if so is not None else None, so["name"] if so is not None else None)
+    day = primary_group(o["restaurant_id"])
+    row = db().execute("""SELECT MAX(primary_seq) m FROM orders WHERE restaurant_id=? AND COALESCE(primary_day,'')=?
+                          AND id<>?""", (o["restaurant_id"], day, order_id)).fetchone()
+    n = int((row["m"] if row and row["m"] else 0)) + 1
+    no = format_primary(prefix, n)
+    db().execute("UPDATE orders SET primary_no=?, primary_seq=?, primary_day=? WHERE id=?", (no, n, day, order_id))
+    return no
+
+
+def make_order_code():
+    """Secondary (system) order number, unique across every order. Format from Settings > Order numbers."""
+    prefix = clean_prefix(_ordset("secondary_prefix", "FF")) or "FF"
+    style = _ordset("secondary_style", "time")
+    now = dt.datetime.now()
+    for attempt in range(50):
+        if style == "sequence":
+            try:
+                digits = max(3, min(10, int(_ordset("secondary_digits", "6"))))
+            except ValueError:
+                digits = 6
+            row = db().execute("SELECT MAX(id) m FROM orders").fetchone()
+            try:
+                base = int(_ordset("secondary_base", "0"))
+            except ValueError:
+                base = 0
+            code = prefix + str(max(1, int(row["m"] or 0) - base + 1 + attempt)).zfill(digits)
+        elif style == "date":
+            base = prefix + now.strftime("%y%m%d") + "-"
+            row = db().execute("SELECT COUNT(*) c FROM orders WHERE code LIKE ? AND created_at>=?",
+                               (base + "%", _ordset("secondary_reset_at", "0"))).fetchone()
+            code = base + str(int(row["c"] or 0) + 1 + attempt)
+        else:
+            code = prefix + now.strftime("%H%M%S") + str(secrets.randbelow(900) + 100)
+        if not db().execute("SELECT 1 FROM orders WHERE code=?", (code,)).fetchone():
+            return code
+    return prefix + now.strftime("%H%M%S") + secrets.token_hex(3).upper()
+
+
 STATUS_WORDS = {
     ("order", "placed"): "Order placed",
     ("kitchen", "waiting"): "Waiting on payment",
@@ -2808,6 +2955,7 @@ def order_dict(o):
     return {
         "id": o["id"], "code": o["code"], "site_name": (_so["name"] if _so is not None else ""),
         "region_id": int(_rv(o, "region_id") or 0), "region_label": region_label(_rv(o, "region_id")),
+        "primary_no": (_rv(o, "primary_no") or ""),
         "site_phone": (nice_phone(_so["phone"] or "") if _so is not None and (_so["phone"] or "").strip() else ""),
         "site_logo": site_logo_url(_so),
         "eta_min": _e["eta_min"], "eta_clock": _e["eta_clock"], "eta_note": _e["eta_note"],
@@ -4507,9 +4655,7 @@ def checkout():
         # Card order: the kitchen never sees it until dispatch marks the card paid.
         kitchen_status, dstat = "waiting", "awaiting_payment"
         hold_reason = "card on file, run it" if card else "waiting on card"
-    code = "FF" + dt.datetime.now().strftime("%H%M%S") + str(secrets.randbelow(900) + 100)
-    while db().execute("SELECT 1 FROM orders WHERE code=?", (code,)).fetchone():
-        code = "FF" + dt.datetime.now().strftime("%H%M%S") + str(secrets.randbelow(900) + 100)
+    code = make_order_code()
     cur = db().execute("""INSERT INTO orders(code,restaurant_id,customer_name,customer_phone,address,
         address_note,dispatch_note,lat,lng,items,subtotal_cents,fee_cents,item_fee_cents,tax_cents,
         tip_cents,total_cents,miles,issue,issue_note,cloned_from,address_ok,source,ref_code,token,
@@ -4530,6 +4676,11 @@ def checkout():
         ("" if address_ok else " (address not verified, waiting on dispatch approval)") +
         (" (from " + from_code + (": " + issue_label if issue_label else "") + ")" if from_code else ""))
     oid = cur.lastrowid
+    try:
+        assign_primary(oid)
+        db().commit()
+    except Exception as _pe:
+        log("order", "restaurant order number skipped: %s" % _pe)
     if True:  # every order waits for Send to kitchen, paid or not
         db().execute("""UPDATE orders SET kitchen_go=0, kitchen_sent_at=NULL,
             hold_reason=CASE WHEN kitchen_status='pending' THEN 'tap Send to kitchen' ELSE hold_reason END,
@@ -4650,18 +4801,51 @@ def api_approve_address():
                     "sent_to_kitchen": (db().execute("SELECT kitchen_status FROM orders WHERE id=?", (o["id"],)).fetchone()[0] == "pending") and o["kitchen_status"] == "waiting",
                     "waiting_on_payment": unpaid_card})
 
-@app.route("/track/<code>")
+def _norm_no(v):
+    return re.sub(r"[^A-Za-z0-9]", "", v or "").upper()
+
+
+def orders_by_primary(num, days=45):
+    """Recent orders whose restaurant order number matches (TT12, TT-12 and tt12 all match)."""
+    n = _norm_no(num)
+    if not n:
+        return []
+    since = (dt.datetime.now() - dt.timedelta(days=days)).isoformat(timespec="seconds")
+    rows = db().execute("""SELECT * FROM orders WHERE primary_no IS NOT NULL AND primary_no<>'' AND created_at>=?
+                           ORDER BY id DESC""", (since,)).fetchall()
+    return [r for r in rows if _norm_no(r["primary_no"]) == n]
+
+
+@app.route("/track/<code>", methods=["GET", "POST"])
 def track(code):
-    o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
+    code = (code or "").strip()
+    o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone() or \
+        db().execute("SELECT * FROM orders WHERE UPPER(code)=?", (code.upper(),)).fetchone()
+    if o and o["code"] != code:
+        return redirect("/track/" + o["code"])
     if not o:
+        # Restaurant order numbers (TT12) are short and easy to guess, so the tracking page,
+        # which shows the address, also asks for the last 4 digits of the phone on the order.
+        matches = orders_by_primary(code)
+        if matches:
+            last4 = re.sub(r"\D", "", request.values.get("phone4", ""))[-4:]
+            err = ""
+            if last4:
+                hit = next((m for m in matches if phone_digits(m["customer_phone"])[-4:] == last4), None)
+                if hit:
+                    return redirect("/track/" + hit["code"])
+                err = "That doesn't match the phone number on order %s." % matches[0]["primary_no"]
+            return render_template("track.html", order=None, code=code, need_phone=True,
+                                   primary=matches[0]["primary_no"], phone_err=err)
         return render_template("track.html", order=None, code=code)
     if host_site() is None:
         _ts = site_of_region(o["region_id"])
         if _ts is not None:
             g._site_forced = _ts   # the order's brand logo, name and phone on its tracking page
-    return render_template("track.html", order={"code": o["code"]}, code=code)
+    return render_template("track.html", order={"code": o["code"],
+                           "primary_no": (o["primary_no"] if "primary_no" in o.keys() else "") or ""}, code=code)
 
-TRACK_FIELDS = ("code", "multi_group", "note", "credits", "dispatch_status", "kitchen_status", "restaurant", "restaurant_nav", "address",
+TRACK_FIELDS = ("code", "primary_no", "multi_group", "note", "credits", "dispatch_status", "kitchen_status", "restaurant", "restaurant_nav", "address",
                 "scheduled_label", "needs_address_approval", "timeline", "timer_seconds",
                 "queue_position", "hold_reason", "miles", "subtotal", "fee", "service", "service_cents",
                 "tax", "tip", "total", "delivered_time", "lines", "uses_app", "manual_state",
@@ -5423,6 +5607,7 @@ def api_board():
     activity_mark("dispatcher", session.get("dispatcher_id"), "active")
     activity_sync_drivers()
     credit_sweep()
+    auto_kitchen_sweep()
     pp_sweep()      # charge delivered PayPal/Venmo orders once the tip window is over
     payout_sweep()  # update driver pay that is still going through PayPal
     auto_driver_pay_sweep()  # pay drivers for delivered trips when auto pay is on
@@ -5789,16 +5974,46 @@ def api_send_kitchen():
         return jsonify({"ok": False, "error": "This is a future order. It comes to the board for sending at its release time."}), 400
     if not o["address_ok"]:
         return jsonify({"ok": False, "error": "Approve the address first."}), 400
+    release_to_kitchen(o, session.get("dispatcher_name") or "dispatch")
+    auto_assign()
+    return jsonify({"ok": True})
+
+
+def release_to_kitchen(o, who):
     db().execute("UPDATE orders SET kitchen_go=1, confirm_state=CASE WHEN confirm_state='waiting' THEN 'confirmed' ELSE confirm_state END WHERE id=?", (o["id"],))
     if o["kitchen_status"] == "waiting":
         db().execute("""UPDATE orders SET kitchen_status='pending',
                         hold_reason=CASE WHEN dispatch_status IN ('held','queued') THEN 'waiting on kitchen' ELSE hold_reason END
                         WHERE id=?""", (o["id"],))
     db().commit()
-    log("order", o["code"] + (" sent to the kitchen by " if order_uses_app(o) else " released to call in by ")
-        + (session.get("dispatcher_name") or "dispatch"))
-    auto_assign()
-    return jsonify({"ok": True})
+    log("order", o["code"] + (" sent to the kitchen by " if order_uses_app(o) else " released to call in by ") + who)
+
+
+def auto_kitchen_sweep():
+    """Regions with automatic Send to kitchen: release each placed order once it could be sent
+    by hand (paid or cash, address approved, not a future order, new-customer call done).
+    Each order is released automatically only once, so an order dispatch pulls back stays back."""
+    try:
+        if not db().execute("SELECT 1 FROM regions WHERE COALESCE(auto_kitchen,0)=1 LIMIT 1").fetchone():
+            return 0
+        rows = db().execute("""SELECT o.* FROM orders o LEFT JOIN restaurants r ON r.id=o.restaurant_id
+            LEFT JOIN regions g ON g.id=COALESCE(NULLIF(o.region_id,0), r.region_id)
+            WHERE COALESCE(g.auto_kitchen,0)=1 AND COALESCE(o.kitchen_go,0)=0 AND o.kitchen_status='waiting'
+              AND o.dispatch_status NOT IN ('cancelled','delivered','awaiting_payment','scheduled')
+              AND COALESCE(o.address_ok,1)=1 AND COALESCE(o.confirm_state,'')<>'waiting'
+              AND o.auto_kitchen_at IS NULL""").fetchall()
+    except Exception as e:
+        log("order", "automatic send to kitchen skipped: %s" % e)
+        return 0
+    for o in rows:
+        db().execute("UPDATE orders SET auto_kitchen_at=? WHERE id=?", (now(), o["id"]))
+        release_to_kitchen(o, "automatic send (region setting)")
+    if rows:
+        try:
+            auto_assign()
+        except Exception:
+            pass
+    return len(rows)
 
 @app.post("/api/order/cash")
 def api_order_cash():
@@ -6099,6 +6314,10 @@ def api_dispatch_order_edit_load(oid):
                     "items": json.loads(o["items"] or "[]"),
                     "fee_cents": o["fee_cents"], "tip_cents": o["tip_cents"],
                     "ref": o["ref_code"] or "",
+                    "primary_no": (o["primary_no"] if "primary_no" in o.keys() else "") or "",
+                    "customer_name": o["customer_name"] or "", "customer_phone": o["customer_phone"] or "",
+                    "address": o["address"] or "", "address_note": o["address_note"] or "",
+                    "miles": o["miles"] or 0,
                     "menu": menu_payload(o["restaurant_id"]) if o["restaurant_id"] else []})
 
 
@@ -6118,6 +6337,50 @@ def api_order_edit():
         db().execute("UPDATE orders SET ref_code=? WHERE id=?", (clean_ref(data.get("ref")), o["id"]))
     if "token" in data:
         db().execute("UPDATE orders SET token=? WHERE id=?", (clean_token(data.get("token")), o["id"]))
+    # Customer details: name, phone, address can be fixed after the order is placed.
+    changed, addr_msg = [], ""
+    if "customer_name" in data:
+        nm = " ".join(str(data.get("customer_name") or "").split())[:80]
+        if not nm:
+            return jsonify({"ok": False, "error": "The customer needs a name."}), 400
+        if nm != (o["customer_name"] or ""):
+            db().execute("UPDATE orders SET customer_name=? WHERE id=?", (nm, o["id"])); changed.append("name")
+    if "customer_phone" in data:
+        ph = phone_digits(data.get("customer_phone"))
+        if len(ph) != 10:
+            return jsonify({"ok": False, "error": "Enter a 10-digit phone number."}), 400
+        if ph != phone_digits(o["customer_phone"]):
+            db().execute("UPDATE orders SET customer_phone=? WHERE id=?", (ph, o["id"])); changed.append("phone")
+    if "address_note" in data:
+        an = str(data.get("address_note") or "").strip()[:200]
+        if an != (o["address_note"] or ""):
+            db().execute("UPDATE orders SET address_note=? WHERE id=?", (an, o["id"])); changed.append("apt/note")
+    new_fee_from_address = None
+    if "address" in data:
+        ad = " ".join(str(data.get("address") or "").split())[:200]
+        if not ad:
+            return jsonify({"ok": False, "error": "The order needs an address."}), 400
+        if ad != (o["address"] or ""):
+            gq = geocode(ad)
+            if gq.get("ok") and gq.get("lat") is not None:
+                src_lat = o["pickup_lat"] if (o["pickup_lat"] is not None) else None
+                src_lng = o["pickup_lng"] if (o["pickup_lng"] is not None) else None
+                if src_lat is None:
+                    rr = db().execute("SELECT lat, lng, region_id FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+                    src_lat, src_lng = (rr["lat"], rr["lng"]) if rr else (None, None)
+                mi = round(haversine_miles(src_lat, src_lng, gq["lat"], gq["lng"]) * ROAD_FACTOR, 2) if src_lat is not None else (o["miles"] or 0)
+                db().execute("UPDATE orders SET address=?, lat=?, lng=?, miles=?, address_ok=1 WHERE id=?",
+                             (gq.get("formatted") or ad, gq["lat"], gq["lng"], mi, o["id"]))
+                rid_fee = o["region_id"] if "region_id" in o.keys() else None
+                new_fee_from_address = fee_for_miles(mi, rid_fee)
+                addr_msg = "New address is %.1f mi away. Delivery fee for that distance is %s." % (mi, money(new_fee_from_address))
+            else:
+                db().execute("UPDATE orders SET address=?, address_ok=0 WHERE id=?", (ad, o["id"]))
+                addr_msg = "Saved, but that address couldn't be found on the map, so the driver map and miles weren't updated."
+            changed.append("address")
+    if changed and data.get("recalc_fee") and new_fee_from_address is not None:
+        data["fee_cents"] = new_fee_from_address
+    o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
     items = data.get("items")
     if items is None:
         items = json.loads(o["items"])
@@ -6135,9 +6398,10 @@ def api_order_edit():
                     tax_cents=?, service_cents=?, tip_cents=?, total_cents=?, discount_cents=? WHERE id=?""",
                  (json.dumps(items), subtotal, fee, ifee, tax, service, tip, total, disc, o["id"]))
     db().commit()
-    log("edit", o["code"] + " edited by dispatch")
+    who = (db().execute("SELECT name FROM dispatchers WHERE id=?", (session.get("dispatcher_id"),)).fetchone() or {"name": "dispatch"})["name"]
+    log("edit", o["code"] + " edited by " + who + (" (changed customer " + ", ".join(changed) + ")" if changed else ""))
     dupe = ref_in_use(clean_ref(data.get("ref")), o["id"]) if "ref" in data else None
-    return jsonify({"ok": True, "dupe": dupe, "subtotal": money(subtotal), "fee": money(fee),
+    return jsonify({"ok": True, "dupe": dupe, "changed": changed, "address_msg": addr_msg, "subtotal": money(subtotal), "fee": money(fee),
                     "item_fee": money(ifee), "tax": money(tax),
                     "service": money(service), "tip": money(tip), "total": money(total)})
 
@@ -6171,6 +6435,51 @@ def api_blocked():
     rows = db().execute("SELECT * FROM blocked_customers ORDER BY created_at DESC").fetchall()
     return jsonify({"ok": True, "blocked": [{"phone": r["phone"], "name": r["name"],
                                              "reason": r["reason"]} for r in rows]})
+
+
+def ordnum_view():
+    """Settings > Order numbers: current choices, brand letters, restaurants for a single reset."""
+    sites = db().execute("SELECT id, name FROM sites ORDER BY sort, id").fetchall() if brands_on() else []
+    main = _ordset("business_name", "Main business")
+    return {"on": primary_on(), "style": _ordset("primary_style", "plain"), "digits": _ordset("primary_digits", "4"),
+            "reset": _ordset("primary_reset", "never"), "sec_prefix": _ordset("secondary_prefix", "FF"),
+            "sec_style": _ordset("secondary_style", "time"), "sec_digits": _ordset("secondary_digits", "6"),
+            "styles": PRIMARY_STYLES, "sec_styles": SECONDARY_STYLES,
+            "brands": [{"field": "primary_prefix_main", "name": main + " (main business)",
+                        "value": _ordset("primary_prefix_main", ""), "default": default_prefix(main),
+                        "example": format_primary(brand_prefix(None, main), 1)}] +
+                      [{"field": "primary_prefix_%d" % x["id"], "name": x["name"],
+                        "value": _ordset("primary_prefix_%d" % x["id"], ""), "default": default_prefix(x["name"]),
+                        "example": format_primary(brand_prefix(x["id"], x["name"]), 1)} for x in sites],
+            "restaurants": [dict(id=r["id"], name=r["name"]) for r in
+                            db().execute("SELECT id, name FROM restaurants WHERE slug<>'oneoff' ORDER BY name").fetchall()]}
+
+
+app.jinja_env.globals["ordnum_view"] = ordnum_view
+
+
+def autokitchen_view():
+    return [{"id": r["id"], "label": region_label(r["id"]), "on": bool(r["auto_kitchen"])}
+            for r in db().execute("SELECT id, COALESCE(auto_kitchen,0) auto_kitchen FROM regions ORDER BY name").fetchall()]
+
+
+app.jinja_env.globals["autokitchen_view"] = autokitchen_view
+
+
+@app.post("/api/dispatch/reset-numbering")
+def api_reset_numbering():
+    """Owner only: start order numbers over, e.g. after test orders."""
+    if not dispatcher_required() or not is_owner(session.get("dispatcher_id")):
+        return jsonify({"ok": False, "error": "Only an owner can start order numbers over."}), 403
+    b = request.get_json(silent=True) or {}
+    rid = int(b.get("restaurant_id") or 0) or None
+    if rid and not db().execute("SELECT 1 FROM restaurants WHERE id=?", (rid,)).fetchone():
+        return jsonify({"ok": False, "error": "Unknown restaurant."}), 400
+    reset_numbering(rid, secondary=not rid)
+    who = (db().execute("SELECT name FROM dispatchers WHERE id=?", (session.get("dispatcher_id"),)).fetchone() or {"name": ""})["name"]
+    rname = db().execute("SELECT name FROM restaurants WHERE id=?", (rid,)).fetchone()["name"] if rid else "every restaurant"
+    log("settings", "%s started order numbers over for %s" % (who, rname))
+    return jsonify({"ok": True, "message": "Order numbers start over at 1 for %s on the next order." % rname})
 
 
 @app.get("/dispatch/new-order")
@@ -9294,6 +9603,27 @@ def dispatch_settings():
             g.pop("_flags", None)
             g.pop("_site", None)
             g.pop("_hsite", None)
+        if "autokitchen_present" in request.form and is_owner(session.get("dispatcher_id")):
+            for x in db().execute("SELECT id FROM regions").fetchall():
+                db().execute("UPDATE regions SET auto_kitchen=? WHERE id=?",
+                             (1 if request.form.get("auto_kitchen_%d" % x["id"]) else 0, x["id"]))
+            db().commit()
+            auto_kitchen_sweep()
+        if "ordnum_present" in request.form and is_owner(session.get("dispatcher_id")):
+            f = request.form
+            vals = {"primary_on": "1" if f.get("primary_on") else "0",
+                    "primary_style": f.get("primary_style") if f.get("primary_style") in PRIMARY_STYLES else "plain",
+                    "primary_digits": str(max(1, min(8, int(f.get("primary_digits") or 4)))) if (f.get("primary_digits") or "4").isdigit() else "4",
+                    "primary_reset": "daily" if f.get("primary_reset") == "daily" else "never",
+                    "secondary_prefix": clean_prefix(f.get("secondary_prefix")) or "FF",
+                    "secondary_style": f.get("secondary_style") if f.get("secondary_style") in SECONDARY_STYLES else "time",
+                    "secondary_digits": str(max(3, min(10, int(f.get("secondary_digits") or 6)))) if (f.get("secondary_digits") or "6").isdigit() else "6",
+                    "primary_prefix_main": clean_prefix(f.get("primary_prefix_main"))}
+            for x in db().execute("SELECT id FROM sites").fetchall():
+                vals["primary_prefix_%d" % x["id"]] = clean_prefix(f.get("primary_prefix_%d" % x["id"]))
+            for k, v in vals.items():
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, v))
+            db().commit()
         if "cashgps_present" in request.form:
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('allow_cash',?)",
                          ("1" if request.form.get("allow_cash") else "0",))
@@ -10216,6 +10546,7 @@ def api_rest_orders():
     else:
         # finished orders stay on the tablet until dispatch presses Close for the day
         done_sql, arg = "COALESCE(delivered_at, created_at) > ?", (setting("driver_done_cleared_at", str) or "")
+    auto_kitchen_sweep()
     rows = db().execute("""SELECT * FROM orders WHERE restaurant_id=? AND kitchen_status NOT IN ('waiting','scheduled')
                            AND dispatch_status NOT IN ('awaiting_payment','scheduled')
                            AND (dispatch_status NOT IN ('delivered','cancelled') OR """ + done_sql + """)

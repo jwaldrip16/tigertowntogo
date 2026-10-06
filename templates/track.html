@@ -1,8 +1,20 @@
 {% extends "base.html" %}{% block body %}
 {% if not order %}
-<h1>Order {{ code }}</h1><p>We could not find that order code.</p>
+{% if need_phone %}
+<h1>Order {{ primary }}</h1>
+<p>To see this order, enter the last 4 digits of the phone number it was placed with.</p>
+<form method="post" class="row" style="gap:6px">
+  <input name="phone4" inputmode="numeric" maxlength="4" pattern="[0-9]{4}" placeholder="Last 4 digits" required style="width:140px">
+  <button class="btn primary">Track order</button>
+</form>
+{% if phone_err %}<p class="bad small">{{ phone_err }}</p>{% endif %}
 {% else %}
-<h1>Order {{ order.code }}</h1>
+<h1>Order {{ code }}</h1><p>We could not find that order number. You can track with either number on your receipt: the restaurant order number (like TT12) or the system number (like FF135508123).</p>
+{% endif %}
+{% else %}
+{% if order.primary_no %}<h1>Order {{ order.primary_no }}</h1>
+<p class="muted small" id="ordNos">Restaurant order number <b>{{ order.primary_no }}</b> &middot; System number <b>{{ order.code }}</b>. Either one tracks this order.</p>
+{% else %}<h1>Order {{ order.code }}</h1>{% endif %}
 <div class="panel" id="confirmBox" style="display:none;border-left:4px solid #E8590C"></div>
 <div class="panel" id="live"></div>
 <div class="panel mt" id="payBox" style="display:none"></div>
@@ -144,7 +156,7 @@ async function tick(){
                 o.dispatch_status==='enroute' ? 'Your order is on the way.' :
                 o.kitchen_status==='ready' ? 'Your food is ready for pickup by your driver.' :
                 o.kitchen_status==='preparing' ? 'The restaurant is preparing your order.' : '';
-    if (stg && window._ffStage !== undefined && window._ffStage !== stg) ffNotify.show('Order '+(o.code||''), stg, 'track');
+    if (stg && window._ffStage !== undefined && window._ffStage !== stg) ffNotify.show('Order '+(o.primary_no||o.code||''), stg, 'track');
     window._ffStage = stg;
   } catch(e){}
   if (o.dispatch_status==='awaiting_payment' || o.kitchen_status==='waiting'){
@@ -177,7 +189,7 @@ async function tick(){
   if ((o.timeline||[]).length)
     html += '<details class="trail"><summary>Order history</summary><ul class="trail">'+
       o.timeline.map(t=>'<li><span class="ts">'+t.time+'</span> '+t.label+'</li>').join('')+
-      '</ul><p class="muted small">Quote order '+o.code+' and any time above when you call dispatch.</p></details>';
+      '</ul><p class="muted small">Quote order '+(o.primary_no ? o.primary_no+' ('+o.code+')' : o.code)+' and any time above when you call dispatch.</p></details>';
   if (o.timer_seconds !== null && o.kitchen_status==='preparing')
     html += '<p class="big">Kitchen timer: '+Math.max(0,Math.ceil(o.timer_seconds/60))+' min left</p>';
   if (o.queue_position)

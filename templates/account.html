@@ -36,7 +36,7 @@
 <div class="panel" id="orders">
   <h2 style="margin-top:0">Recent orders</h2>
   {% for o in orders %}<div style="border-bottom:1px solid #eee;padding:8px 0">
-    <div class="small row" style="justify-content:space-between"><a href="/track/{{ o['code'] }}">{{ o['code'] }}</a>
+    <div class="small row" style="justify-content:space-between"><a href="/track/{{ o['code'] }}">{% if o['primary_no'] %}{{ o['primary_no'] }} <span class="muted">({{ o['code'] }})</span>{% else %}{{ o['code'] }}{% endif %}</a>
     <span>{{ o['rname'] or '' }}</span><span>{{ money(o['total_cents']) }}</span><span class="muted">{{ o['dispatch_status'] }}</span>
     {% if o['pts'] %}<span class="pill green">+{{ o['pts'] }}</span>{% endif %}</div>
     {% if o['dispatch_status'] == 'delivered' %}{% if o['stars'] %}<div class="small muted">You rated it {{ '★' * o['stars'] }}</div>{% else %}

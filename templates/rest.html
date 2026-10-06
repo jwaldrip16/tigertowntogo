@@ -24,8 +24,8 @@ function drawLate(list, mode){
   if (!list.length){ bar.classList.add('hidden'); bar.innerHTML = ''; return; }
   bar.innerHTML = '<b>Not accepted yet</b>' + list.map(function(x){
     const msg = mode === 'rest'
-      ? 'Order ' + x.code + ' is waiting for you to accept (' + x.minutes + ' min)'
-      : 'Tap Received on order ' + x.code + ' (' + x.minutes + ' min)';
+      ? 'Order ' + (x.primary_no || x.code) + ' is waiting for you to accept (' + x.minutes + ' min)'
+      : 'Tap Received on order ' + (x.primary_no || x.code) + ' (' + x.minutes + ' min)';
     return '<div class="lateline' + (x.loud ? ' loud' : '') + '">' + msg + '</div>';
   }).join('');
   bar.classList.remove('hidden');
@@ -170,7 +170,7 @@ async function load(force){
   document.getElementById('cntActive').textContent = active.length ? '('+active.length+')' : '';
   document.getElementById('cntDone').textContent = done.length ? '('+done.length+')' : '';
   document.getElementById('ordersDone').innerHTML = done.length ? done.map(o=>
-    '<div class="panel slim"><div class="row between"><div><strong>'+o.code+'</strong> '+
+    '<div class="panel slim"><div class="row between"><div><strong>'+(o.primary_no||o.code)+'</strong> '+(o.primary_no ? '<span class="muted small">'+o.code+'</span> ' : '')+
     (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+o.customer+
     '<div class="muted small">'+o.lines.join(', ')+'</div>'+
     '<div class="small">Delivery fee '+o.fee+' &middot; Tip '+o.tip+'</div></div>'+
@@ -181,7 +181,7 @@ async function load(force){
   document.getElementById('orders').innerHTML = active.length ? active.map(o=>{
     const t = (o.timer_seconds!==null && o.kitchen_status==='preparing')
       ? '<span class="pill amber">'+Math.max(0,Math.ceil(o.timer_seconds/60))+' min left</span>' : '';
-    return '<div class="order"><div class="order-head"><strong>'+o.code+'</strong> '+
+    return '<div class="order"><div class="order-head"><strong>'+(o.primary_no||o.code)+'</strong> '+(o.primary_no ? '<span class="muted small">'+o.code+'</span> ' : '')+
       (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+
       '<span class="pill '+(o.kitchen_status==='ready'?'green':o.kitchen_status==='preparing'?'amber':'red')+
       '">'+o.kitchen_status+'</span> '+t+
@@ -281,7 +281,7 @@ function newTicketAlert(orders){
     const top = waiting[waiting.length-1];
     if (top && top.code !== NOTIFIED){
       NOTIFIED = top.code;
-      try { ffNotify.show('New order ' + top.code,
+      try { ffNotify.show('New order ' + (top.primary_no || top.code),
             'For ' + (top.customer || 'a customer') + '. Confirm it and start the timer.', 'ticket'); } catch(e){}
     }
     // Chimes every 5 seconds until the order is accepted. Sound can't be switched off while one is waiting.

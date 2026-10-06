@@ -238,6 +238,53 @@ async function setLogo(inp){
 </form>
 {% set G = gps_settings_ctx() %}
 <form class="panel narrow" method="post">
+  {% if owner_view %}{% set AK = autokitchen_view() %}
+  <input type="hidden" name="autokitchen_present" value="1">
+  <h2 id="autokitchen">Send to kitchen automatically</h2>
+  <p class="small muted">For a checked region, Send to kitchen happens on its own once an order is placed and ready to go: paid, address approved, and any new-customer confirm call done. Future orders go at their release time. If you pull an order back, it isn't sent again on its own. Unchecked regions still wait for someone to tap Send to kitchen.</p>
+  {% for r in AK %}<label><input type="checkbox" name="auto_kitchen_{{ r.id }}" value="1" {% if r.on %}checked{% endif %}> {{ r.label }}</label>
+  {% else %}<p class="muted small">Add a region first.</p>{% endfor %}
+{% endif %}
+{% if owner_view %}{% set ON = ordnum_view() %}
+  <input type="hidden" name="ordnum_present" value="1">
+  <h2 id="ordernumbers">Order numbers</h2>
+  <p class="small muted">Each order gets two numbers. The restaurant order number (primary) is what the restaurant and driver see first: the brand's letters plus a count that starts at 1 for each restaurant. The system number (secondary) stays unique across every order and is used on tracking links.</p>
+  <label><input type="checkbox" name="primary_on" value="1" {% if ON.on %}checked{% endif %}> Give orders a restaurant order number</label>
+  <label>Restaurant order number format
+    <select name="primary_style">{% for k, v in ON.styles.items() %}<option value="{{ k }}" {% if ON.style == k %}selected{% endif %}>{{ v }}</option>{% endfor %}</select></label>
+  <label>Digits for padded numbers <input type="number" name="primary_digits" min="1" max="8" value="{{ ON.digits }}" style="width:80px"></label>
+  <label>Count
+    <select name="primary_reset"><option value="never" {% if ON.reset != 'daily' %}selected{% endif %}>Keeps counting up</option>
+      <option value="daily" {% if ON.reset == 'daily' %}selected{% endif %}>Starts over at 1 every day</option></select></label>
+  <h3>Brand letters</h3>
+  {% for b in ON.brands %}
+  <label>{{ b.name }} <input name="{{ b.field }}" value="{{ b.value }}" placeholder="{{ b.default }}" maxlength="6" style="width:90px;text-transform:uppercase">
+    <span class="muted small">first order looks like {{ b.example }}</span></label>
+  {% endfor %}
+  <h3>System number (secondary)</h3>
+  <label>Letters <input name="secondary_prefix" value="{{ ON.sec_prefix }}" maxlength="6" style="width:90px;text-transform:uppercase"></label>
+  <label>Format
+    <select name="secondary_style">{% for k, v in ON.sec_styles.items() %}<option value="{{ k }}" {% if ON.sec_style == k %}selected{% endif %}>{{ v }}</option>{% endfor %}</select></label>
+  <label>Digits for a running number <input type="number" name="secondary_digits" min="3" max="10" value="{{ ON.sec_digits }}" style="width:80px"></label>
+  <p class="small muted">Format changes apply to new orders. Orders already placed keep their numbers.</p>
+  <h3>Start numbering over</h3>
+  <p class="small muted">Use this after test orders. The next order starts again at 1. Starting over for every restaurant also restarts a running or daily system number. Test orders that are still on file keep their numbers, so delete them first if you want a system number to reuse 1.</p>
+  <div class="row" style="gap:6px;flex-wrap:wrap">
+    <select id="resetRest"><option value="">Every restaurant</option>{% for r in ON.restaurants %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select>
+    <button type="button" class="btn danger" onclick="resetNumbering()">Start over at 1</button>
+  </div>
+  <script>
+  async function resetNumbering(){
+    const sel = document.getElementById('resetRest');
+    const who = sel.value ? sel.options[sel.selectedIndex].text : 'every restaurant';
+    if (!confirm('Start order numbers over at 1 for ' + who + '? Do this only after test orders.')) return;
+    const r = await fetch('/api/dispatch/reset-numbering', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({restaurant_id: sel.value || null})});
+    const j = await r.json().catch(()=>({}));
+    alert(j.message || j.error || 'Could not start numbering over.');
+  }
+  </script>
+{% endif %}
   <input type="hidden" name="cashgps_present" value="1">
   <h2>Payments</h2>
   <label><input type="checkbox" name="allow_cash" value="1" {% if G.allow_cash %}checked{% endif %}> Take cash orders</label>
