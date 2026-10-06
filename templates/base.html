@@ -14,12 +14,20 @@ async function jpost(url, data){
 async function jget(url){ const r = await fetch(url); return r.json(); }
 function money(c){ return '$' + (c/100).toFixed(2); }
 </script>
+{% if not (request.path.startswith('/dispatch') or request.path.startswith('/driver') or request.path.startswith('/restaurant')) %}
+<link rel="manifest" href="/manifest/customer.json">
+<meta name="theme-color" content="#e53935">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{{ biz_name }}">
+<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scope:"/"}).catch(function(){});}</script>
+{% endif %}
 {% block head %}{% endblock %}
 </head>
 {% set staff_area = request.path.startswith('/dispatch') or request.path.startswith('/driver') or request.path.startswith('/restaurant') %}
 <body class="{% if not portal and not staff_area %}cust {% endif %}{% block bodyclass %}{% endblock %}">
 <header class="topbar">
-  <a class="brand" href="{% if portal == 'dispatch' %}/dispatch{% elif portal == 'driver' %}/driver{% elif portal == 'kitchen' %}/restaurant{% elif staff_area %}{{ request.path }}{% else %}/{% endif %}"><img class="brandlogo" src="{{ logo_url }}" alt="">{{ biz_name }}{% if portal %} {{ portal|capitalize if portal != "kitchen" else "Kitchen" }}{% endif %}</a>
+  <a class="brand" href="{% if portal == 'dispatch' %}/dispatch{% elif portal == 'driver' %}/driver{% elif portal == 'kitchen' %}/restaurant{% elif staff_area %}{{ request.path }}{% else %}/{% endif %}"><img class="brandlogo" src="{{ '/static/brand/logo-default.png' if (portal or staff_area) else logo_url }}" alt="">{{ biz_name }}{% if portal %} {{ portal|capitalize if portal != "kitchen" else "Kitchen" }}{% endif %}</a>
   <nav>
     {% if portal == 'dispatch' %}
       <a href="/dispatch">Board</a>
@@ -32,12 +40,15 @@ function money(c){ return '$' + (c/100).toFixed(2); }
       <a href="/dispatch/gps-log">GPS log</a>
       <a href="/dispatch/settings">Settings</a>
       <a href="/dispatch/account">Account</a>
+      {% if owner_user %}<a href="/dispatch/invoices">Invoices</a>{% endif %}
+      {% if dev_user %}<a href="/dispatch/companies">Companies</a>{% endif %}
       <a href="/dispatch/logout">Sign out</a>
     {% elif portal == 'driver' %}
       <a href="/driver">My run</a>
       <a href="/driver/logout">Sign out</a>
     {% elif portal == 'kitchen' %}
       <a href="/restaurant">Orders</a>
+      <a href="/restaurant/invoices">Invoices</a>
       <a href="/restaurant/logout">Sign out</a>
     {% elif not portal and not staff_area %}
       <a href="/account">Accounts</a>
@@ -65,7 +76,7 @@ function money(c){ return '$' + (c/100).toFixed(2); }
     <p>&copy; {{ year }} {{ biz_name }}. All rights reserved. &middot; <a href="/faq">FAQ's</a> &middot; <a href="/drive">Drive with us</a> &middot; <a href="/partner">Partner with us</a></p>
   </div>
 </footer>{% endif %}
-<div class="poweredby">Powered by FleetFoot Delivery</div>
+<div class="poweredby"><img src="/static/brand/logo-default.png" alt="" style="height:22px;width:auto;vertical-align:middle;margin-right:6px">Powered by Fleet Foot Delivery</div>
 <script src="{{ url_for('static', filename='alert.js') }}"></script>
 <script src="{{ url_for('static', filename='notify.js') }}"></script>
 <script>

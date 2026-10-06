@@ -1,5 +1,5 @@
 {
-  "name": "Fleet Delivery Tracker",
+  "name": "Fleet Foot Delivery Tracker",
   "short_name": "Tracker",
   "start_url": "/dispatch/map",
   "scope": "/dispatch/map",

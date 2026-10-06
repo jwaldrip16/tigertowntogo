@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ title }}</title>
+<link rel="manifest" href="/manifest/{{ manifest }}.json">
+<meta name="theme-color" content="{% if which == 'driver' %}#0f172a{% else %}#7c2d12{% endif %}">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="{{ title }}">
+<link rel="icon" type="image/png" href="/brand/icon-32.png">
+<link rel="apple-touch-icon" href="/brand/icon-180.png">
+<style>
+*{box-sizing:border-box}body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f5f6f8;color:#1f2937}
+.wrap{max-width:460px;margin:0 auto;padding:28px 18px 40px}
+.head{text-align:center;margin-bottom:18px}.head img{width:84px;height:84px;object-fit:contain}
+.head h1{font-size:22px;margin:8px 0 4px}.head p{margin:0;color:#6b7280;font-size:15px}
+.card{background:#fff;border-radius:14px;box-shadow:0 2px 12px rgba(0,0,0,.07);padding:16px;margin-bottom:14px}
+label{font-size:13px;font-weight:600;color:#374151;display:block;margin-bottom:6px}
+input{width:100%;font-size:17px;padding:12px;border:1px solid #d1d5db;border-radius:10px}
+.row{display:flex;gap:8px}.row input{flex:1}
+button{font-size:16px;padding:12px 16px;border:0;border-radius:10px;background:{% if which == 'driver' %}#0f172a{% else %}#7c2d12{% endif %};color:#fff;font-weight:600}
+.list{margin-top:10px;max-height:46vh;overflow:auto}
+.co{display:block;width:100%;text-align:left;background:#fff;color:#111827;border:1px solid #e5e7eb;margin-top:8px;font-weight:600}
+.co small{display:block;font-weight:400;color:#6b7280;font-size:13px;margin-top:2px}
+.err{color:#b91c1c;font-size:14px;margin-top:8px;min-height:1em}.muted{color:#6b7280;font-size:14px;text-align:center}
+#opening{display:none;text-align:center}#opening a{color:#2563eb}
+</style></head><body>
+<div class="wrap">
+  <div class="head"><img src="{{ logo }}" alt=""><h1>{{ title }}</h1><p>Pick the delivery company you work with.</p></div>
+  <div id="opening" class="card"><p>Opening <b id="openName"></b>&hellip;</p><p><a href="#" id="switchNow">Switch company</a></p></div>
+  <div id="picker">
+    <div class="card">
+      <label for="code">Company code</label>
+      <div class="row"><input id="code" autocomplete="off" autocapitalize="none" placeholder="Code from your manager"><button id="go">Go</button></div>
+      <div class="err" id="err"></div>
+    </div>
+    <div class="card">
+      <label for="q">Or find your company</label>
+      <input id="q" placeholder="Search by name" autocomplete="off">
+      <div class="list" id="list"><p class="muted">Loading&hellip;</p></div>
+    </div>
+  </div>
+</div>
+<script>
+(function(){
+  var WHICH = {{ which|tojson }}, LOGIN = {{ login_path|tojson }}, KEY = 'ff_company_' + WHICH;
+  var all = [];
+  function target(c){
+    return c.url.replace(/\/+$/,'') + LOGIN + '?hub=' + encodeURIComponent(location.origin) +
+           '&app=' + WHICH + '&co=' + encodeURIComponent(c.name);
+  }
+  function open(c){
+    try{ localStorage.setItem(KEY, JSON.stringify({name:c.name, code:c.code, url:c.url})); }catch(e){}
+    location.href = target(c);
+  }
+  function showPicker(){
+    document.getElementById('opening').style.display='none';
+    document.getElementById('picker').style.display='block';
+  }
+  var params = new URLSearchParams(location.search);
+  if (params.get('switch') === '1') {
+    try{ localStorage.removeItem(KEY); }catch(e){}
+    history.replaceState(null,'',location.pathname);
+  } else {
+    var saved = null; try{ saved = JSON.parse(localStorage.getItem(KEY)||'null'); }catch(e){}
+    if (saved && saved.url) {
+      document.getElementById('picker').style.display='none';
+      document.getElementById('opening').style.display='block';
+      document.getElementById('openName').textContent = saved.name;
+      document.getElementById('switchNow').onclick = function(ev){ ev.preventDefault();
+        try{ localStorage.removeItem(KEY); }catch(e){} showPicker(); };
+      setTimeout(function(){ location.href = target(saved); }, 400);
+    }
+  }
+  function draw(){
+    var q = document.getElementById('q').value.trim().toLowerCase(), box = document.getElementById('list');
+    var rows = all.filter(function(c){ return !q || c.name.toLowerCase().indexOf(q) >= 0; });
+    box.innerHTML = '';
+    if (!rows.length){ box.innerHTML = '<p class="muted">' + (all.length ? 'No match. Try your company code.' : 'Enter your company code above.') + '</p>'; return; }
+    rows.forEach(function(c){
+      var b = document.createElement('button'); b.className='co';
+      b.textContent = c.name; var s=document.createElement('small'); s.textContent = c.url.replace(/^https?:\/\//,''); b.appendChild(s);
+      b.onclick = function(){ open(c); }; box.appendChild(b);
+    });
+  }
+  fetch('/api/hub/companies').then(function(r){return r.json();}).then(function(j){ all = (j && j.companies) || []; draw(); })
+    .catch(function(){ document.getElementById('list').innerHTML='<p class="muted">Could not load the list. Use your company code.</p>'; });
+  document.getElementById('q').oninput = draw;
+  function byCode(){
+    var code = document.getElementById('code').value.trim(), err = document.getElementById('err'); err.textContent='';
+    if (!code) { err.textContent = 'Enter your company code.'; return; }
+    fetch('/api/hub/find?code=' + encodeURIComponent(code)).then(function(r){return r.json();}).then(function(j){
+      if (j.ok) open(j.company); else err.textContent = j.error || 'No company with that code.';
+    }).catch(function(){ err.textContent = 'No connection. Try again.'; });
+  }
+  document.getElementById('go').onclick = byCode;
+  document.getElementById('code').onkeydown = function(e){ if (e.key === 'Enter') byCode(); };
+  if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js',{scope:'/'}).catch(function(){}); }
+})();
+</script>
+</body></html>

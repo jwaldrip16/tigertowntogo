@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{{ inv.number }} {{ inv.restaurant }}</title>
+<style>
+body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;color:#111827;margin:0;background:#f3f4f6}
+.page{max-width:780px;margin:24px auto;background:#fff;padding:36px 40px;box-shadow:0 2px 14px rgba(0,0,0,.08)}
+.top{display:flex;justify-content:space-between;align-items:flex-start;gap:20px}
+.top img{height:70px;width:auto}.biz{font-size:14px;color:#4b5563;margin-top:6px}
+h1{font-size:28px;margin:0;text-align:right}.meta{text-align:right;font-size:14px;color:#374151;line-height:1.6}
+.two{display:flex;gap:40px;margin:26px 0 18px}.two h4{margin:0 0 4px;font-size:12px;text-transform:uppercase;color:#6b7280;letter-spacing:.04em}
+.two p{margin:0;font-size:15px;line-height:1.5}
+table{width:100%;border-collapse:collapse;font-size:14px}th{text-align:left;border-bottom:2px solid #111827;padding:6px 4px}
+td{border-bottom:1px solid #e5e7eb;padding:6px 4px}.r{text-align:right}
+.tot{margin-left:auto;margin-top:14px;width:300px;font-size:15px}.tot td{border:0;padding:4px}
+.tot .grand td{font-size:18px;font-weight:700;border-top:2px solid #111827;padding-top:8px}
+.stamp{display:inline-block;margin-top:18px;padding:8px 14px;border:3px solid #15803d;color:#15803d;font-weight:700;border-radius:6px;transform:rotate(-3deg)}
+.stamp.unpaid{border-color:#b45309;color:#b45309}.stamp.void{border-color:#6b7280;color:#6b7280}
+.note{margin-top:18px;font-size:14px;color:#374151;white-space:pre-wrap}
+.bar{max-width:780px;margin:16px auto 0;display:flex;gap:10px}.bar a,.bar button{font-size:15px;padding:9px 14px;border-radius:8px;border:1px solid #d1d5db;background:#fff;color:#111827;text-decoration:none;cursor:pointer}
+.foot{margin-top:28px;font-size:12px;color:#9ca3af;text-align:center}
+@media print{body{background:#fff}.bar{display:none}.page{box-shadow:none;margin:0;padding:0}}
+</style></head><body>
+<div class="bar"><a href="{{ '/dispatch/invoices' if viewer == 'owner' else '/restaurant/invoices' }}">Back</a><button onclick="window.print()">Print or save as PDF</button></div>
+<div class="page">
+  <div class="top">
+    <div><img src="/static/brand/logo-default.png" alt="Fleet Foot Delivery"><div class="biz"><b>{{ biz }}</b>{% if biz_address %}<br>{{ biz_address }}{% endif %}</div></div>
+    <div><h1>Invoice</h1><div class="meta">{{ inv.number }}<br>Made {{ (inv.created_at or '')[:10] }}<br>Orders delivered {{ inv.period_start }} to {{ inv.period_end }}</div></div>
+  </div>
+  <div class="two">
+    <div><h4>Pay to</h4><p><b>{{ rest.name if rest else inv.restaurant }}</b>{% if rest and rest.address %}<br>{{ rest.address }}{% endif %}{% if rest and rest.phone %}<br>{{ rest.phone }}{% endif %}</p></div>
+    <div><h4>From</h4><p><b>{{ biz }}</b>{% if biz_address %}<br>{{ biz_address }}{% endif %}</p></div>
+  </div>
+  <table><thead><tr><th>Order</th><th>Delivered</th><th class="r">Food</th>{% if inv.include_tax %}<th class="r">Tax</th>{% endif %}</tr></thead><tbody>
+  {% for l in lines %}<tr><td>{{ l.code }}</td><td>{{ l.day }}</td><td class="r">{{ l.food }}</td>{% if inv.include_tax %}<td class="r">{{ l.tax }}</td>{% endif %}</tr>
+  {% else %}<tr><td colspan="4">No orders on this invoice.</td></tr>{% endfor %}
+  </tbody></table>
+  <table class="tot">
+    <tr><td>Food ({{ inv.order_count }} order{{ '' if inv.order_count == 1 else 's' }})</td><td class="r">{{ inv.food }}</td></tr>
+    {% if inv.include_tax %}<tr><td>Sales tax</td><td class="r">{{ inv.tax }}</td></tr>{% endif %}
+    {% if inv.commission_cents %}<tr><td>Less commission ({{ '%g' % inv.commission_pct }}%)</td><td class="r">-{{ inv.commission }}</td></tr>{% endif %}
+    {% if inv.adjust_cents %}<tr><td>Adjustment{% if inv.adjust_note %}: {{ inv.adjust_note }}{% endif %}</td><td class="r">{{ inv.adjust }}</td></tr>{% endif %}
+    <tr class="grand"><td>Total due to restaurant</td><td class="r">{{ inv.total }}</td></tr>
+  </table>
+  {% if inv.status == 'paid' %}<div class="stamp">PAID{% if inv.pay_method == 'check' %} BY CHECK #{{ inv.check_number }}{% else %} BY {{ inv.method_label|upper }}{% endif %} &middot; {{ inv.paid_at }}</div>
+  {% elif inv.status == 'void' %}<div class="stamp void">VOID</div>
+  {% else %}<div class="stamp unpaid">NOT PAID YET</div>{% endif %}
+  {% if inv.notes %}<div class="note">{{ inv.notes }}</div>{% endif %}
+  <div class="foot">Powered by Fleet Foot Delivery</div>
+</div>
+</body></html>

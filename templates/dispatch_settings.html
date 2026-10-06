@@ -70,6 +70,7 @@ async function setLogo(inp){
   <label><input type="checkbox" name="confirm_call" value="1" {{ 'checked' if s.get('confirm_call','1') == '1' else '' }}> New customers' website orders: ask them to call dispatch to confirm before the order goes to the kitchen</label>
   <div class="muted small">Existing customers never have to call. New customers see your dispatch number with a Call button, and the order waits on the board with a "Waiting for confirm call" tag until you tap Customer called or Send to kitchen. Mark customers existing on the Customers page.</div>
   <h2>Customer website</h2>
+  {% if is_owner_view is not defined or is_owner_view %}<p><a class="btn small" href="/dispatch/import-website">Copy a whole website</a> <span class="muted small">Bring in the name, logo, photos, text, contact info and FAQs from a site you own.</span></p>{% endif %}
   <input type="hidden" name="site_present" value="1">
   <label>Home page headline</label><input name="home_headline" maxlength="120" value="{{ s.get('home_headline','') }}">
   <label>Business email (shown in the footer and FAQ's)</label><input name="business_email" type="email" value="{{ s.get('business_email','') }}">
@@ -139,7 +140,7 @@ async function setLogo(inp){
   <input name="auto_pay_cap" inputmode="decimal" value="{{ '%.2f' % (((s['auto_pay_cap_cents'] or 2500)|int) / 100) }}">
   <label>Wait this many minutes after delivery before paying (0 to 1440), so late tips and fixes are included</label>
   <input name="auto_pay_delay_min" type="number" min="0" max="1440" value="{{ s['auto_pay_delay_min'] if s['auto_pay_delay_min'] is not none else 15 }}">
-  <div class="muted small">Auto pay sends the trip's suggested pay by PayPal or Venmo once the customer's payment is settled. Drivers paid by bank, drivers with nothing on file, and failed payments are left for you on the order.</div>
+  <div class="muted small">Auto pay sends the trip's suggested pay by PayPal or Venmo once the customer's payment is settled. Drivers paid by check, drivers with no PayPal email or Venmo phone on file, and failed payments are left for you on the order.</div>
   <label>Share of the tip the driver gets (%)</label>
   <input name="driver_pay_tip_pct" type="number" min="0" max="100" value="{{ s['driver_pay_tip_pct'] if s['driver_pay_tip_pct'] is not none else 100 }}">
   <label>Flat amount added per trip ($)</label>

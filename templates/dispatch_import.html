@@ -1,8 +1,8 @@
 {% extends "base.html" %}{% block body %}
-<div class="head"><h1>Import restaurants</h1><div><a class="btn small" href="/dispatch/restaurants">Back to restaurants</a></div></div>
+<div class="head"><h1>Import restaurants</h1><div><a class="btn small" href="/dispatch/import-website">Copy a whole website</a> <a class="btn small" href="/dispatch/restaurants">Back to restaurants</a></div></div>
 <div class="panel">
-  <h2>Import from a Zuppler website</h2>
-  <p class="muted">Type the address of any ordering website that runs on Zuppler (for example tigertowntogo.com). I'll read every restaurant on it with photos, logos, hours, minimum order, menus, prices, sizes and add-ons, then you pick which ones to bring in. A restaurant you already have with the same name gets updated instead of added twice.</p>
+  <h2>Import from an ordering website</h2>
+  <p class="muted">Type the address of any ordering website that runs on Zuppler, Data Dreamers or DeliverLogic (for example tigertowntogo.com, orderbulldawgfood.com or fetchmedelivery.com). I'll figure out which one it is and read every restaurant on it with logos, hours, menus, prices, sizes and add-ons. Pick the region before you import.</p>
   <form method="post" class="row" style="gap:8px;align-items:center;flex-wrap:wrap">
     <input type="hidden" name="action" value="fetch">
     <input name="site" placeholder="ordering website, e.g. tigertowntogo.com" value="{{ zup.site or site or '' }}" style="min-width:280px;flex:1" {{ 'disabled' if zup.running else '' }}>
@@ -27,7 +27,7 @@
   {% endif %}
   <div class="panel" id="picBox" style="margin:10px 0">
     <b>Pictures</b>
-    <div id="picMsg" class="muted small">{% if remote_pics %}{{ remote_pics }} pictures still load from the Zuppler site.{% else %}All pictures are saved on your own server.{% endif %}</div>
+    <div id="picMsg" class="muted small">{% if remote_pics %}{{ remote_pics }} pictures still load from the other site.{% else %}All pictures are saved on your own server.{% endif %}</div>
     {% if remote_pics %}<button type="button" class="btn" onclick="copyPics()">Copy pictures to my server</button>{% endif %}
   </div>
   <script>
@@ -35,7 +35,7 @@
     const r = await fetch('/api/dispatch/picture-copy', {method: post ? 'POST' : 'GET'}); const j = await r.json();
     const m = document.getElementById('picMsg');
     if (j.running){ m.textContent = 'Copying pictures... ' + j.copied + ' done, ' + j.left + ' left.'; setTimeout(()=>picStatus(false), 3000); }
-    else if (j.left){ m.textContent = j.left + ' pictures still load from the Zuppler site' + (j.failed ? ' (' + j.failed + ' could not be copied, try again later).' : '.'); }
+    else if (j.left){ m.textContent = j.left + ' pictures still load from the other site' + (j.failed ? ' (' + j.failed + ' could not be copied, try again later).' : '.'); }
     else { m.textContent = 'All pictures are saved on your own server.'; }
   }
   function copyPics(){ picStatus(true); }
@@ -44,7 +44,7 @@
   {% set off = rows|selectattr('min_ok','equalto',false)|list %}
   <div class="panel" style="margin:10px 0">
     <b>Minimum orders</b>
-    <div class="muted small">{% if off %}{{ off|length }} restaurant{{ '' if off|length == 1 else 's' }} here {{ 'has' if off|length == 1 else 'have' }} a different minimum than the Zuppler site (marked in red below).{% else %}Every restaurant here matches the old TigerTownToGo minimum.{% endif %}</div>
+    <div class="muted small">{% if off %}{{ off|length }} restaurant{{ '' if off|length == 1 else 's' }} here {{ 'has' if off|length == 1 else 'have' }} a different minimum than the imported site (marked in red below).{% else %}Every restaurant here matches the old TigerTownToGo minimum.{% endif %}</div>
     {% if off %}<form method="post" style="margin-top:6px"><input type="hidden" name="action" value="match_min"><button class="btn primary">Match all minimums</button></form>{% endif %}
   </div>
   {% if not rows %}{% else %}

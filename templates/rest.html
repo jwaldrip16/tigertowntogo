@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block head %}
-<link rel="manifest" href="/static/manifest-kitchen.json">
+<script src="/static/hubswitch.js" defer></script>
+<link rel="manifest" href="/manifest/kitchen.json">
 <meta name="theme-color" content="#7c2d12">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -29,7 +30,7 @@ function drawLate(list, mode){
   }).join('');
   bar.classList.remove('hidden');
 }
-if("serviceWorker" in navigator){navigator.serviceWorker.register("/static/sw.js").catch(function(){});}</script>
+if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scope:"/"}).catch(function(){});}</script>
 {% endblock %}
 {% block body %}
 <div id="flash" class="flashbar hidden">New order</div>

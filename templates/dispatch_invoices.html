@@ -1,0 +1,94 @@
+{% extends "base.html" %}{% block title %}Restaurant invoices{% endblock %}{% block body %}
+<div class="panel">
+  <h1>Restaurant invoices</h1>
+  <p class="muted">Make an invoice for what you owe a restaurant for its food. It adds up the restaurant's delivered orders in the dates you pick that aren't already on another invoice. Pay it by check or PayPal, then mark it paid. The restaurant sees its invoices in the kitchen app.</p>
+  <div class="card" style="padding:14px;margin:14px 0">
+    <h3 style="margin-top:0">New invoice</h3>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:8px">
+      <label class="small">Restaurant<select id="ivRest">{% for r in rests %}<option value="{{ r.id }}">{{ r.name }}</option>{% endfor %}</select></label>
+      <label class="small">From<input id="ivStart" type="date" value="{{ today }}"></label>
+      <label class="small">To<input id="ivEnd" type="date" value="{{ today }}"></label>
+      <label class="small">Commission you keep (%)<input id="ivPct" type="number" min="0" max="100" step="0.5" value="0"></label>
+      <label class="small">Adjustment ($, use - to subtract)<input id="ivAdj" inputmode="decimal" placeholder="0.00"></label>
+      <label class="small">Adjustment reason<input id="ivAdjNote" maxlength="120" placeholder="Optional"></label>
+    </div>
+    <label class="small"><input type="checkbox" id="ivTax" checked> Include sales tax collected on the food</label>
+    <textarea id="ivNotes" rows="2" maxlength="500" placeholder="Note on the invoice (optional)" style="width:100%;margin-top:6px"></textarea>
+    <div id="ivSum" class="small" style="margin:8px 0"></div>
+    <button class="btn" type="button" onclick="ivPreview()">Preview total</button>
+    <button class="btn primary" type="button" onclick="ivCreate()">Create invoice</button>
+    <span class="bad" id="ivErr"></span>
+  </div>
+  <table class="tbl" style="width:100%">
+    <thead><tr><th>Invoice</th><th>Restaurant</th><th>Dates</th><th>Total</th><th>Status</th><th></th></tr></thead>
+    <tbody id="ivRows"></tbody>
+  </table>
+</div>
+<div id="payBox" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:50">
+  <div class="card" style="max-width:380px;margin:12vh auto;padding:18px;background:#fff">
+    <h3 style="margin-top:0" id="payTitle">Mark paid</h3>
+    <label class="small">How you paid<select id="payHow" onchange="payHowChanged()"><option value="check">Pay by check</option><option value="paypal">PayPal</option></select></label>
+    <label class="small" id="payChkWrap">Check number<input id="payChk" maxlength="20" inputmode="numeric"></label>
+    <label class="small" id="payRefWrap" style="display:none">PayPal transaction ID (optional)<input id="payRef" maxlength="60"></label>
+    <label class="small">Date paid<input id="payDate" type="date" value="{{ today }}"></label>
+    <div style="margin-top:10px"><button class="btn primary" onclick="paySave()">Save</button> <button class="btn" onclick="payClose()">Cancel</button> <span class="bad" id="payErr"></span></div>
+  </div>
+</div>
+<script>
+var IV = {{ invoices|tojson }}, PAYID = 0;
+function e(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function ivBody(op){return {op:op, restaurant_id:document.getElementById('ivRest').value, start:document.getElementById('ivStart').value,
+  end:document.getElementById('ivEnd').value, commission_pct:document.getElementById('ivPct').value, adjust:document.getElementById('ivAdj').value,
+  adjust_note:document.getElementById('ivAdjNote').value, include_tax:document.getElementById('ivTax').checked?'1':'0', notes:document.getElementById('ivNotes').value};}
+async function ivPreview(){
+  document.getElementById('ivErr').textContent='';
+  var j=await jpost('/api/dispatch/invoices', ivBody('preview'));
+  if(!j.ok){document.getElementById('ivErr').textContent=j.error;return;}
+  var s=j.summary;
+  document.getElementById('ivSum').innerHTML=s.orders+' delivered order'+(s.orders==1?'':'s')+'. Food '+s.food_cents+(document.getElementById('ivTax').checked?' + tax '+s.tax_cents:'')+
+    ' - commission '+s.commission_cents+' + adjustment '+s.adjust_cents+' = <b>'+s.total_cents+'</b>';
+}
+async function ivCreate(){
+  document.getElementById('ivErr').textContent='';
+  var j=await jpost('/api/dispatch/invoices', ivBody('create'));
+  if(!j.ok){document.getElementById('ivErr').textContent=j.error;return;}
+  IV.unshift(j.invoice); draw(); document.getElementById('ivSum').textContent='Created '+j.invoice.number+' for '+j.invoice.total+'.';
+}
+function status(v){
+  if(v.status==='paid') return '<span class="pill green">Paid'+(v.pay_method==='check'?' by check #'+e(v.check_number):' by '+e(v.method_label))+' '+e(v.paid_at||'')+'</span>';
+  if(v.status==='void') return '<span class="pill grey">Void</span>';
+  return '<span class="pill amber">Unpaid</span>';
+}
+function draw(){
+  var tb=document.getElementById('ivRows'); tb.innerHTML='';
+  if(!IV.length){tb.innerHTML='<tr><td colspan="6" class="muted">No invoices yet.</td></tr>';return;}
+  IV.forEach(function(v){
+    var act='<a class="btn small" href="/dispatch/invoices/'+v.id+'" target="_blank">View / print</a> ';
+    if(v.status==='unpaid') act+='<button class="btn small primary" onclick="payOpen('+v.id+')">Mark paid</button> <button class="btn small" onclick="ivOp('+v.id+',\'void\')">Void</button>';
+    if(v.status==='paid') act+='<button class="btn small" onclick="ivOp('+v.id+',\'unpay\')">Mark unpaid</button>';
+    var tr=document.createElement('tr');
+    tr.innerHTML='<td>'+e(v.number)+'</td><td>'+e(v.restaurant)+'</td><td>'+e(v.period_start)+' to '+e(v.period_end)+'</td><td>'+e(v.total)+'</td><td>'+status(v)+'</td><td style="white-space:nowrap">'+act+'</td>';
+    tb.appendChild(tr);
+  });
+}
+function rep(inv){IV=IV.map(function(x){return x.id===inv.id?inv:x;});draw();}
+async function ivOp(id,op){
+  if(op==='void'&&!confirm('Void this invoice? Its orders can go on a new invoice.'))return;
+  if(op==='unpay'&&!confirm('Mark this invoice unpaid?'))return;
+  var j=await jpost('/api/dispatch/invoices',{op:op,id:id}); if(!j.ok){alert(j.error);return;} rep(j.invoice);
+}
+function payHowChanged(){var c=document.getElementById('payHow').value==='check';
+  document.getElementById('payChkWrap').style.display=c?'block':'none';document.getElementById('payRefWrap').style.display=c?'none':'block';}
+function payOpen(id){PAYID=id;var v=IV.find(function(x){return x.id===id;});
+  document.getElementById('payTitle').textContent='Mark '+v.number+' paid ('+v.total+' to '+v.restaurant+')';
+  document.getElementById('payHow').value='check';payHowChanged();document.getElementById('payChk').value='';document.getElementById('payRef').value='';
+  document.getElementById('payErr').textContent='';document.getElementById('payBox').style.display='block';}
+function payClose(){document.getElementById('payBox').style.display='none';}
+async function paySave(){
+  var j=await jpost('/api/dispatch/invoices',{op:'pay',id:PAYID,method:document.getElementById('payHow').value,
+    check_number:document.getElementById('payChk').value,ref:document.getElementById('payRef').value,paid_on:document.getElementById('payDate').value});
+  if(!j.ok){document.getElementById('payErr').textContent=j.error;return;} rep(j.invoice); payClose();
+}
+draw();
+</script>
+{% endblock %}

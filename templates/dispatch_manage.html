@@ -128,9 +128,9 @@ async function load(){
     '<input id="dk'+d.id+'" value="'+esc(d.pin)+'" placeholder="Password / PIN"'+dis+'>'+
     (L ? '' : '<button class="btn tiny" onclick="saveDriver('+d.id+')">Save</button>')+'</div>'+
     '<div class="row"><span class="muted small">Pay this driver by</span>'+
-    '<select id="dw'+d.id+'"'+dis+'><option value="paypal"'+(d.payout_wallet!=='venmo'&&d.payout_wallet!=='bank'?' selected':'')+'>PayPal</option>'+
+    '<select id="dw'+d.id+'"'+dis+'><option value="paypal"'+(d.payout_wallet!=='venmo'&&d.payout_wallet!=='check'?' selected':'')+'>PayPal</option>'+
     '<option value="venmo"'+(d.payout_wallet==='venmo'?' selected':'')+'>Venmo</option>'+
-    '<option value="bank"'+(d.payout_wallet==='bank'?' selected':'')+'>Bank transfer</option></select>'+
+    '<option value="check"'+(d.payout_wallet==='check'?' selected':'')+'>Check</option></select>'+
     '<input id="de'+d.id+'" value="'+esc(d.payout_email||'')+'" placeholder="PayPal email"'+dis+'>'+
     '<input id="dv'+d.id+'" value="'+esc(d.payout_phone||'')+'" placeholder="Venmo phone (blank = driver phone)"'+dis+'></div>'+
     '<div class="row"><span class="muted small">Bank (for your records)</span>'+

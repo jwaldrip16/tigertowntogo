@@ -711,14 +711,16 @@ function redoGo(id){
 function payBlock(o){
   const p = o.drv_pay; if(!p || o.dispatch_status!=='delivered' || !o.driver_id) return '';
   let h = '<div class="small" style="margin-top:6px">Driver pay: ';
-  h += p.rows.length ? p.rows.map(r=>'<span class="pill '+(r.status==='SUCCESS'||r.status==='BANK_PAID'?'green':(r.error?'red':'amber'))+'">'+
+  h += p.rows.length ? p.rows.map(r=>'<span class="pill '+(r.status==='SUCCESS'||r.status==='BANK_PAID'||r.status==='CHECK_PAID'?'green':(r.error?'red':'amber'))+'">'+
         r.amount+' '+fEsc(r.label)+'</span>'+(r.error?' <span class="muted">'+fEsc(r.error)+'</span>':'')).join(' ')
       : '<span class="pill grey">not paid</span>';
   h += ' <span class="muted">suggested '+p.suggest+(p.to?' to '+fEsc(p.to):'')+'</span>'+
        (p.auto_note?' <span class="pill grey">'+fEsc(p.auto_note)+'</span>':'')+'</div><div class="order-actions">';
-  const bankBtn = ' <button class="btn tiny" onclick="bankPay('+o.id+',\''+(p.paid_cents?(p.owed_cents?('$'+(p.owed_cents/100).toFixed(2)):''):p.suggest)+'\',\''+fEsc(o.driver)+'\')">Paid by bank</button>';
+  const _owe = (p.paid_cents?(p.owed_cents?('$'+(p.owed_cents/100).toFixed(2)):''):p.suggest);
+  const bankBtn = ' <button class="btn tiny" onclick="chequePay('+o.id+',\''+_owe+'\',\''+fEsc(o.driver)+'\')">Paid by check</button>'+
+                  ' <button class="btn tiny" onclick="bankPay('+o.id+',\''+_owe+'\',\''+fEsc(o.driver)+'\')">Paid by bank</button>';
   if (p.open) { h += '<button class="btn tiny" onclick="checkPay('+o.id+')">Check driver pay</button>'; return h + '</div>'; }
-  if (!p.ready) h += '<span class="muted small">Add a PayPal email or Venmo phone for this driver under Restaurants and drivers.</span>';
+  if (!p.ready) h += '<span class="muted small">'+(p.wallet==='check'?'This driver is paid by check. Write the check, then tap Paid by check.':'Add a PayPal email or Venmo phone for this driver under Restaurants and drivers.')+'</span>';
   else if (p.open) h += '<button class="btn tiny" onclick="checkPay('+o.id+')">Check driver pay</button>';
   else if (!p.paid_cents) h += '<button class="btn tiny primary" onclick="payDriver('+o.id+',false,\''+p.suggest+'\',\''+fEsc(o.driver)+'\',\''+fEsc(p.to)+'\')">Pay driver '+p.suggest+'</button>';
   else h += '<button class="btn tiny" onclick="payDriver('+o.id+',true,\''+(p.owed_cents?('$'+(p.owed_cents/100).toFixed(2)):'')+'\',\''+fEsc(o.driver)+'\',\''+fEsc(p.to)+'\')">Pay extra</button>';
@@ -731,6 +733,16 @@ async function payDriver(id, extra, amt, name, to){
   const res = await jpost('/api/dispatch/driver-pay', {order_id:id, amount:a, extra:!!extra});
   if (!res.ok) alert(res.error||'Payment did not go through.');
   else alert('Sent '+res.amount+' to '+res.to+'. PayPal says: '+(res.status==='SUCCESS'?'paid':'on its way')+'.');
+  board(true);
+}
+async function chequePay(id, amt, name){
+  let a = prompt('Amount of the check you wrote '+name+' for this trip ($):', String(amt||'').replace('$',''));
+  if (a===null) return; a = a.trim(); if(!a) return;
+  const ref = prompt('Check number:', '');
+  if (ref===null) return;
+  const res = await jpost('/api/dispatch/driver-pay', {order_id:id, amount:a, extra:true, method:'check', ref:ref.trim()});
+  if (!res.ok) alert(res.error||'That did not save.');
+  else alert('Recorded a '+res.amount+' check to '+name+'.');
   board(true);
 }
 async function bankPay(id, amt, name){

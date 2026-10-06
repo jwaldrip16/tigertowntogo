@@ -1,6 +1,7 @@
 {% extends "base.html" %}
 {% block head %}
-<link rel="manifest" href="/static/manifest-driver.json">
+<script src="/static/hubswitch.js" defer></script>
+<link rel="manifest" href="/manifest/driver.json">
 <meta name="theme-color" content="#0f172a">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -13,7 +14,7 @@
 <script src="/static/keepawake.js"></script>
 <script src="/static/drivernav.js"></script>
 
-<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/static/sw.js").catch(function(){});}</script>
+<script>if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scope:"/"}).catch(function(){});}</script>
 {% endblock %}
 {% block body %}
 <div class="head"><h1>{{ driver_name }}</h1>
@@ -148,13 +149,18 @@
       <div class="navdist" id="navDist"></div></div>
   </div>
   <div class="navmapwrap"><div id="navMap" class="navmap"></div>
-    <button id="navRecenter" class="btn navrecenter hidden" onclick="ffNav.recenter()">Re-center</button></div>
+    <button id="navRecenter" class="btn navrecenter hidden" onclick="ffNav.recenter()">Re-center</button>
+    <div id="navSteps" class="navsteps hidden">
+      <div class="navstepshead"><div><b>Route preview</b><div class="muted" id="navStepSum"></div></div>
+        <button class="btn primary" onclick="ffNav.back()">&#10148; Back to directions</button></div>
+      <div id="navStepList"></div>
+    </div></div>
   <div class="navbot">
     <div class="navinfo"><div><span class="naveta" id="navEta"></span> <span class="muted" id="navLeft"></span></div>
       <div class="navdest" id="navDest"></div></div>
     <div class="navbtns">
       <button class="btn" onclick="openNavPick()">New address</button>
-      <button class="btn" onclick="ffNav.overview()">Overview</button>
+      <button class="btn" id="navOverviewBtn" onclick="ffNav.overview()">Overview</button>
       <button class="btn" id="navVoice" onclick="ffNav.voice()">Voice on</button>
       <button class="btn primary" onclick="ffNav.close()">End</button>
     </div>

@@ -1,0 +1,56 @@
+{% extends "base.html" %}{% block title %}Companies{% endblock %}{% block body %}
+<div class="panel">
+  <h1>Companies in the shared apps</h1>
+  <p class="muted">These are the companies workers can pick in the Fleet Foot Driver and Fleet Foot Kitchen apps. The code is what you give their drivers and restaurants. Turn off "Show in list" to make a company reachable by code only. Only developer accounts see this page.</p>
+  <form id="coForm" class="card" style="margin:14px 0;padding:14px">
+    <input type="hidden" name="id" value="0">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px">
+      <input name="name" placeholder="Company name (Tiger Town To Go)">
+      <input name="code" placeholder="Code (tigertown)">
+      <input name="url" placeholder="Web address (tigertowntogo.com)">
+    </div>
+    <label class="small"><input type="checkbox" name="listed" checked> Show in list</label>
+    <label class="small" style="margin-left:12px"><input type="checkbox" name="active" checked> Active</label>
+    <div style="margin-top:8px"><button class="btn primary" type="submit" id="saveBtn">Add company</button>
+      <button class="btn" type="button" id="cancelBtn" style="display:none">Cancel</button>
+      <span class="bad" id="coErr"></span></div>
+  </form>
+  <table class="tbl" style="width:100%">
+    <thead><tr><th>Company</th><th>Code</th><th>Web address</th><th>Status</th><th></th></tr></thead>
+    <tbody id="coRows"></tbody>
+  </table>
+  <p class="muted small" style="margin-top:14px">App links: <code>{{ request.host_url }}go/driver</code> and <code>{{ request.host_url }}go/kitchen</code></p>
+</div>
+<script>
+var COS = {{ companies|tojson }};
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function draw(){
+  var tb=document.getElementById('coRows'); tb.innerHTML='';
+  if(!COS.length){tb.innerHTML='<tr><td colspan="5" class="muted">No companies yet.</td></tr>';return;}
+  COS.forEach(function(c){
+    var tr=document.createElement('tr');
+    tr.innerHTML='<td>'+esc(c.name)+'</td><td>'+esc(c.code)+'</td><td>'+esc(c.url.replace(/^https?:\/\//,''))+'</td><td>'+
+      (c.active?'Active':'Off')+(c.listed?'':' (code only)')+'</td><td style="white-space:nowrap"><button class="btn small" data-e="'+c.id+'">Edit</button> <button class="btn small" data-d="'+c.id+'">Delete</button></td>';
+    tb.appendChild(tr);
+  });
+}
+var f=document.getElementById('coForm');
+function reset(){f.reset();f.id.value=0;document.getElementById('saveBtn').textContent='Add company';document.getElementById('cancelBtn').style.display='none';document.getElementById('coErr').textContent='';}
+document.getElementById('cancelBtn').onclick=reset;
+document.getElementById('coRows').onclick=async function(e){
+  var id=e.target.getAttribute('data-e'), del=e.target.getAttribute('data-d');
+  if(id){var c=COS.find(function(x){return x.id==id;}); f.id.value=c.id; f.name.value=c.name; f.code.value=c.code; f.url.value=c.url;
+    f.listed.checked=!!c.listed; f.active.checked=!!c.active; document.getElementById('saveBtn').textContent='Save changes';
+    document.getElementById('cancelBtn').style.display='inline-block'; window.scrollTo(0,0);}
+  if(del){var c2=COS.find(function(x){return x.id==del;}); if(!confirm('Remove '+c2.name+' from the shared apps?'))return;
+    var j=await jpost('/api/dispatch/companies',{op:'delete',id:del}); if(j.ok){COS=COS.filter(function(x){return x.id!=del;});draw();reset();}}
+};
+f.onsubmit=async function(e){e.preventDefault();
+  var j=await jpost('/api/dispatch/companies',{op:'save',id:f.id.value,name:f.name.value,code:f.code.value,url:f.url.value,
+    listed:f.listed.checked?'1':'0',active:f.active.checked?'1':'0'});
+  if(!j.ok){document.getElementById('coErr').textContent=j.error||'Could not save.';return;}
+  COS=j.companies; draw(); reset();
+};
+draw();
+</script>
+{% endblock %}

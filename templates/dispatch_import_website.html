@@ -1,0 +1,64 @@
+{% extends "base.html" %}{% block body %}
+<div class="head"><h1>Copy a website</h1><div><a class="btn small" href="/dispatch/settings">Back to settings</a></div></div>
+<div class="panel">
+  <h2>Copy a whole website</h2>
+  <p class="muted">Type the address of a website you own or built for a client (for example tigertowntogo.com). I'll read its name, logo, photos, headline, how it works steps, app section, phone, email, address, social links and FAQs. You'll see everything here first, then pick what to copy into your customer website. For restaurants and menus, use <a href="/dispatch/import-zuppler">Import restaurants</a>.</p>
+  <form method="post">
+    <input type="hidden" name="action" value="read">
+    <input name="site" placeholder="website address, e.g. tigertowntogo.com" value="{{ (data or {}).get('site','') }}" style="min-width:320px">
+    <button class="btn">Read website</button>
+  </form>
+  {% if result and not result.ok %}<div class="flash err">{{ result.error }}</div>{% endif %}
+  {% if result and result.ok and result.done is defined %}
+    <div class="flash">Done. Copied {{ result.done|join(', ') if result.done else 'nothing (nothing was ticked)' }}.{% if result.failed %} I couldn't download: {{ result.failed|join(', ') }}.{% endif %} <a href="/" target="_blank">Open your website</a></div>
+  {% endif %}
+</div>
+{% if data %}
+<form method="post" class="panel">
+  <input type="hidden" name="action" value="apply">
+  <h2>What I found on {{ data.site }}</h2>
+  <p class="muted small">Read from {{ data.pages|length }} page{{ '' if data.pages|length == 1 else 's' }}. Untick anything you don't want, and edit any text before copying.</p>
+  {% set vals = {'dispatch_phone': phone_fmt} %}
+  {% for k, label, n in fields %}{% set v = vals.get(k) or data.get(k) or '' %}{% if v %}
+    <label style="display:block;margin:10px 0"><input type="checkbox" name="use_{{ k }}" value="1" checked> <b>{{ label }}</b><br>
+      {% if n > 120 %}<textarea name="{{ k }}" rows="2" maxlength="{{ n }}" style="width:100%">{{ v }}</textarea>
+      {% else %}<input name="{{ k }}" value="{{ v }}" maxlength="{{ n }}" style="width:100%">{% endif %}</label>
+  {% endif %}{% endfor %}
+  {% for k, label in [('x','X (Twitter)'),('facebook','Facebook'),('instagram','Instagram')] %}{% if data.socials.get(k) %}
+    <label style="display:block;margin:10px 0"><input type="checkbox" name="use_social_{{ k }}" value="1" checked> <b>{{ label }}</b><br>
+      <input name="social_{{ k }}" value="{{ data.socials[k] }}" style="width:100%"></label>
+  {% endif %}{% endfor %}
+  {% if data.logo %}
+    <label style="display:block;margin:10px 0"><input type="checkbox" name="use_logo" value="1" checked> <b>Logo</b><br>
+      <img src="{{ data.logo }}" alt="logo" style="max-height:80px;background:#f3f3f3;padding:6px;border-radius:6px"></label>
+  {% endif %}
+  {% if data.pictures %}
+    <h3>Photos</h3>
+    <p class="muted small">Pick which photo goes at the top of your home page and which goes in the app section. Leave it on "Keep mine" to keep what you have.</p>
+    <div style="display:flex;flex-wrap:wrap;gap:12px">
+    {% for p in data.pictures %}
+      <div style="width:200px"><img src="{{ p }}" alt="photo {{ loop.index }}" style="width:200px;height:130px;object-fit:cover;border-radius:6px">
+        <label class="small"><input type="radio" name="hero_image" value="{{ loop.index0 }}"> Top photo</label>
+        <label class="small"><input type="radio" name="pocket_image" value="{{ loop.index0 }}"> App section</label></div>
+    {% endfor %}
+    </div>
+    <label class="small"><input type="radio" name="hero_image" value="" checked> Keep my top photo</label>
+    <label class="small"><input type="radio" name="pocket_image" value="" checked> Keep my app section photo</label>
+  {% endif %}
+  {% if faqs %}
+    <h3><label><input type="checkbox" name="use_faqs" value="1" checked> FAQs ({{ faqs|length }})</label></h3>
+    <p class="muted small">These replace the FAQs on your website. Untick any you don't want.</p>
+    {% for q, a in faqs %}
+      <div style="margin:8px 0;padding:8px;border:1px solid #e5e5e5;border-radius:6px">
+        <label><input type="checkbox" name="fk{{ loop.index0 }}" value="1" checked> Keep</label>
+        <input name="fq{{ loop.index0 }}" value="{{ q }}" style="width:100%;font-weight:600;margin:4px 0">
+        <textarea name="fa{{ loop.index0 }}" rows="2" style="width:100%">{{ a }}</textarea>
+      </div>
+    {% endfor %}
+  {% endif %}
+  <label style="display:block;margin:14px 0"><input type="checkbox" name="permission" value="1"> I own this website or have the owner's permission to use its text, logo and photos.</label>
+  <button class="btn">Copy to my website</button>
+  <p class="muted small">Pictures are downloaded and saved on your own server. You can change anything later in Settings &gt; Customer website.</p>
+</form>
+{% endif %}
+{% endblock %}

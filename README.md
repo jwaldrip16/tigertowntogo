@@ -1,4 +1,4 @@
-# Fleet Delivery
+# Fleet Foot Delivery
 
 A working four-app delivery platform: customer ordering site, dispatcher portal, driver app and
 restaurant app. One Flask process, one SQLite file, no build step.
@@ -480,7 +480,7 @@ With no key the app uses free OpenStreetMap maps and directions. With Google key
 checks, delivery-fee distance, ETAs and turn-by-turn directions all come from Google.
 
 1. Go to https://console.cloud.google.com and sign in.
-2. Top bar: project picker > New project > name it "Fleet Delivery" > Create.
+2. Top bar: project picker > New project > name it "Fleet Foot Delivery" > Create.
 3. Left menu: Billing > link a billing account (Google needs a card on file; there is a monthly free credit).
 4. Left menu: APIs & Services > Library. Search and press Enable on each of these:
    - Geocoding API  (address checks)

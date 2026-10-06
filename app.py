@@ -225,6 +225,23 @@ def ensure_column(con, table, col, decl):
     if col not in cols:
         con.execute("ALTER TABLE " + table + " ADD COLUMN " + col + " " + decl)
 
+def seed_dev_account(con):
+    """Set DEV_USERNAME and DEV_PASSWORD (and optionally DEV_NAME) on the server to guarantee a
+    developer login exists on this copy. It is created if missing and its password follows the
+    server setting on every start, so the developer can always get back in."""
+    u = (os.environ.get("DEV_USERNAME") or "").strip().lower()
+    pw = (os.environ.get("DEV_PASSWORD") or "").strip()
+    if not u or not pw:
+        return
+    name = (os.environ.get("DEV_NAME") or "Developer").strip() or "Developer"
+    row = con.execute("SELECT id FROM dispatchers WHERE username=?", (u,)).fetchone()
+    if row:
+        con.execute("UPDATE dispatchers SET is_dev=1, password=? WHERE id=?", (pw, row["id"]))
+    else:
+        con.execute("INSERT INTO dispatchers(name,username,password,created_at,is_dev) VALUES(?,?,?,?,1)",
+                    (name, u, pw, dt.datetime.now().isoformat(timespec="seconds")))
+
+
 def init_db():
     con = dbx.connect(DB_PATH)
     con.executescript(SCHEMA)
@@ -240,6 +257,20 @@ def init_db():
     ensure_column(con, "driver_payouts", "ref", "TEXT")
     ensure_column(con, "drivers", "bank_name", "TEXT")
     ensure_column(con, "drivers", "bank_last4", "TEXT")
+    # Bank transfer is no longer a saved (auto pay) way to pay a driver: PayPal or Venmo only.
+    con.execute("UPDATE drivers SET payout_wallet='paypal' WHERE LOWER(COALESCE(payout_wallet,''))='bank'")
+    con.execute("""CREATE TABLE IF NOT EXISTS rest_invoices (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, restaurant_id INTEGER NOT NULL,
+        period_start TEXT, period_end TEXT, order_count INTEGER DEFAULT 0,
+        food_cents INTEGER DEFAULT 0, tax_cents INTEGER DEFAULT 0, include_tax INTEGER DEFAULT 1,
+        commission_pct REAL DEFAULT 0, commission_cents INTEGER DEFAULT 0,
+        adjust_cents INTEGER DEFAULT 0, adjust_note TEXT, total_cents INTEGER DEFAULT 0,
+        status TEXT DEFAULT 'unpaid', pay_method TEXT, check_number TEXT, pay_ref TEXT,
+        paid_at TEXT, paid_by TEXT, notes TEXT, created_at TEXT, created_by TEXT)""")
+    ensure_column(con, "orders", "rest_invoice_id", "INTEGER")
+    con.execute("""CREATE TABLE IF NOT EXISTS companies (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, code TEXT UNIQUE NOT NULL,
+        url TEXT NOT NULL, listed INTEGER DEFAULT 1, active INTEGER DEFAULT 1, created_at TEXT)""")
     cur = con.execute("SELECT COUNT(*) c FROM restaurants")
     if cur.fetchone()["c"] == 0:
         seed(con)
@@ -254,7 +285,7 @@ def init_db():
                  ("tier_vip_points", "750"), ("tier_elite_points", "1500"), ("bonus_weekday", "1"),
                  ("bonus_starter_pct", "50"), ("bonus_vip_pct", "100"), ("bonus_elite_pct", "200"),
                  ("gift_min_cents", "1000"), ("gift_max_cents", "50000"),
-                 ("business_name", "Fleet Delivery"),
+                 ("business_name", "Fleet Foot Delivery"),
                  ("business_address", "216 S 8th St, Opelika, AL 36801"),
                  ("order_tokens", "Online,App,Phone call,Third party"),
                  ]:
@@ -450,6 +481,8 @@ def init_db():
     ensure_column(con, "orders", "region_id", "INTEGER")
     ensure_column(con, "availability", "region_ids", "TEXT")
     ensure_column(con, "dispatchers", "is_owner", "INTEGER DEFAULT 0")
+    ensure_column(con, "dispatchers", "is_dev", "INTEGER DEFAULT 0")
+    seed_dev_account(con)
     ensure_column(con, "messages", "region_id", "INTEGER")
     con.execute("""CREATE TABLE IF NOT EXISTS dispatcher_availability (id INTEGER PRIMARY KEY AUTOINCREMENT,
                    dispatcher_id INTEGER NOT NULL, dow INTEGER NOT NULL, start_time TEXT NOT NULL,
@@ -559,7 +592,7 @@ def init_db():
     con.close()
 
 
-# The Fleet Delivery store list. Blank address means dispatch has to fill it in
+# The Fleet Foot Delivery store list. Blank address means dispatch has to fill it in
 # under Dispatch > Manage before that store can take an order.
 TTG_LIST = [
     ('Popeyes Chicken', 'popeyeschicken', 'American, Sandwiches', '1999 Opelika Road, Auburn, AL 36830', '', 32.628878, -85.4396338),
@@ -620,12 +653,15 @@ TTG_LIST = [
 
 
 def topup_restaurants(con):
-    """Add any Fleet Delivery store that is not on file yet. Runs once, never
+    """Add any Fleet Foot Delivery store that is not on file yet. Runs once, never
     overwrites a store a dispatcher has already edited, and never re-adds a deleted one."""
     ensure_column(con, "restaurants", "cuisine", "TEXT")
     # renamed brand: the house store keeps its sign-in code, only the name changes
-    con.execute("UPDATE restaurants SET name='Fleet Delivery' WHERE slug='tigertowntogo' AND name=?",
-                ("Tiger Town " + "To Go",))
+    con.execute("UPDATE restaurants SET name='Fleet Foot Delivery' WHERE slug='tigertowntogo' AND name IN (?,?)",
+                ("Tiger Town " + "To Go", "Fleet " + "Delivery"))
+    # renamed app: a business name still on the old default picks up the new one
+    con.execute("UPDATE settings SET value='Fleet Foot Delivery' WHERE key='business_name' AND value=?",
+                ("Fleet " + "Delivery",))
     done = con.execute("SELECT value FROM settings WHERE key='store_list_loaded'").fetchone()
     if done and done["value"] == "1":
         return
@@ -667,11 +703,11 @@ def topup_restaurants(con):
 
 def seed(con):
     hours = json.dumps(DEFAULT_HOURS)
-    # Real Auburn / Opelika businesses, the kind of list Fleet Delivery carries.
+    # Real Auburn / Opelika businesses, the kind of list Fleet Foot Delivery carries.
     # Addresses, phones and coordinates are real; the menu items below are sample
     # lines you edit per store from Dispatch > Manage > Menu items.
     rows = [
-        ("Fleet Delivery", "tigertowntogo", "1111", "216 S 8th St, Opelika, AL 36801",
+        ("Fleet Foot Delivery", "tigertowntogo", "1111", "216 S 8th St, Opelika, AL 36801",
          "334-209-2844", 32.6470902, -85.3774403, hours, 20),
         ("Niffer's Place", "niffers", "1111", "1151 Opelika Rd, Auburn, AL 36830",
          "334-821-3118", 32.6211822, -85.4573359, hours, 20),
@@ -1300,11 +1336,120 @@ def dispatcher_view_regions(did):
 
 
 def is_owner(did=None):
+    """Owners and developers: full access to the business. (Developers still can't delete
+    orders, or change them unless an owner allows it; see dev_guard.)"""
     did = did if did is not None else session.get("dispatcher_id")
     if not did:
         return False
-    r = db().execute("SELECT is_owner FROM dispatchers WHERE id=?", (did,)).fetchone()
-    return bool(r and r["is_owner"])
+    r = db().execute("SELECT is_owner, COALESCE(is_dev,0) AS is_dev FROM dispatchers WHERE id=?", (did,)).fetchone()
+    return bool(r and (r["is_owner"] or r["is_dev"]))
+
+
+def is_dev(did=None):
+    did = did if did is not None else session.get("dispatcher_id")
+    if not did:
+        return False
+    r = db().execute("SELECT COALESCE(is_dev,0) AS d FROM dispatchers WHERE id=?", (did,)).fetchone()
+    return bool(r and r["d"])
+
+
+def is_real_owner(did=None):
+    """An owner account that is not a developer: the business itself."""
+    did = did if did is not None else session.get("dispatcher_id")
+    if not did:
+        return False
+    r = db().execute("SELECT is_owner, COALESCE(is_dev,0) AS d FROM dispatchers WHERE id=?", (did,)).fetchone()
+    return bool(r and r["is_owner"] and not r["d"])
+
+
+def dev_can_edit_orders():
+    return (setting("dev_order_edit") or 0) == 1
+
+
+# Order changes a developer needs the owner's permission for.
+DEV_ORDER_EDIT_PATHS = {
+    "/api/order/approve-address", "/api/order/status", "/api/order/mark-paid", "/api/order/send-kitchen",
+    "/api/order/cash", "/api/order/credit", "/api/order/discount", "/api/order/refund", "/api/order/timer",
+    "/api/order/edit", "/api/order/note", "/api/order/hold", "/api/order/send-to-driver", "/api/order/reopen",
+    "/api/order/card-save", "/api/paypal/replace-card", "/api/dispatch/assign", "/api/dispatch/reorder",
+    "/api/dispatch/future-cancel", "/api/dispatch/future-release", "/api/dispatch/confirm-call",
+}
+# Never allowed for a developer, permission or not.
+DEV_NO_DELETE_PATHS = {"/api/dispatch/delete-orders", "/api/dispatch/purge-orders"}
+
+
+@app.before_request
+def dev_guard():
+    if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
+        return None
+    path = request.path or ""
+    if path not in DEV_NO_DELETE_PATHS and path not in DEV_ORDER_EDIT_PATHS:
+        return None
+    if not session.get("dispatcher_id") or not is_dev():
+        return None
+    if path in DEV_NO_DELETE_PATHS:
+        return jsonify({"ok": False, "error": "Developer accounts can't delete orders."}), 403
+    if not dev_can_edit_orders():
+        return jsonify({"ok": False, "error": "Developer accounts can't change orders until an owner turns on "
+                                              "\"Let developers change orders\" on the Dispatcher accounts page."}), 403
+    return None
+
+
+# --- pause switch for non-payment ------------------------------------------
+# Set SERVICE_SUSPENDED=1 in Railway to pause this copy of the platform. Customers,
+# drivers, dispatchers and kitchens see a "paused" page; a signed-in developer keeps
+# full access. Nothing is deleted. Remove the variable (or set it to 0) to turn it back on.
+# Optional SUSPEND_MESSAGE replaces the wording on the paused page.
+SUSPEND_OPEN_PREFIXES = ("/static/", "/brand/", "/media/", "/uploads/", "/.well-known/", "/manifest/")
+SUSPEND_OPEN_PATHS = {"/dispatch/login", "/dispatch/logout", "/favicon.ico", "/robots.txt", "/sw.js"}
+
+
+def service_suspended():
+    return (os.environ.get("SERVICE_SUSPENDED") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def suspend_guard():
+    if not service_suspended():
+        return None
+    path = request.path or "/"
+    if path in SUSPEND_OPEN_PATHS or path.startswith(SUSPEND_OPEN_PREFIXES):
+        return None
+    try:
+        if session.get("dispatcher_id") and is_dev():
+            return None
+    except Exception:
+        pass
+    msg = (os.environ.get("SUSPEND_MESSAGE") or "").strip() or \
+        "Online ordering is temporarily unavailable. Please check back soon."
+    if path.startswith("/api/") or request.is_json or "application/json" in (request.headers.get("Accept") or ""):
+        resp = jsonify({"ok": False, "suspended": True, "error": msg})
+    else:
+        try:
+            biz = (setting("business_name", str) or "Fleet Foot Delivery").strip() or "Fleet Foot Delivery"
+            logo = logo_url()
+        except Exception:
+            biz, logo = "Fleet Foot Delivery", DEFAULT_LOGO
+        e = lambda s: (s or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+        html = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                '<meta name="robots" content="noindex"><title>' + e(biz) + ' - temporarily unavailable</title>'
+                '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;'
+                'font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f5f6f8;color:#222}'
+                '.card{background:#fff;max-width:440px;margin:24px;padding:36px 28px;border-radius:16px;'
+                'box-shadow:0 4px 20px rgba(0,0,0,.08);text-align:center}'
+                'img{width:96px;height:96px;object-fit:contain;margin-bottom:12px}'
+                'h1{font-size:22px;margin:0 0 10px}p{font-size:16px;line-height:1.5;color:#555;margin:0}</style>'
+                '</head><body><div class="card"><img src="' + e(logo) + '" alt="">'
+                '<h1>' + e(biz) + '</h1><p>' + e(msg) + '</p></div></body></html>')
+        resp = app.response_class(html, mimetype="text/html")
+    resp.status_code = 503
+    resp.headers["Retry-After"] = "3600"
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+# Runs before every other check so nothing slips past while paused.
+app.before_request_funcs.setdefault(None, []).insert(0, suspend_guard)
 
 
 def covers(region_ids, order_region):
@@ -1726,7 +1871,7 @@ def short_staff_alert():
         if not short:
             return
         cut = (dt.datetime.now() - dt.timedelta(minutes=int(every))).strftime("%Y-%m-%d %H:%M:%S")
-        biz = (setting("business_name", str) or "Fleet Delivery").strip() or "Fleet Delivery"
+        biz = (setting("business_name", str) or "Fleet Foot Delivery").strip() or "Fleet Foot Delivery"
         rows = con.execute("""SELECT * FROM drivers WHERE roster='unavailable' AND COALESCE(active,1)=1
                               AND status <> 'online'
                               AND (short_alert_at IS NULL OR short_alert_at < ?)""", (cut,)).fetchall()
@@ -3049,7 +3194,7 @@ def api_pp_create():
                             "description": ("Delivery order " if kind == "order" else "Rest of tip, order ") + o["code"],
                             "amount": pp_money(cents)}],
         "application_context": {"shipping_preference": "NO_SHIPPING", "user_action": "PAY_NOW",
-                                "brand_name": (setting("business_name", str) or "Fleet Delivery")[:120]}}
+                                "brand_name": (setting("business_name", str) or "Fleet Foot Delivery")[:120]}}
         | ({"payment_source": pp_vault_source(o)} if (kind == "order" and b.get("card") and pp_vault_source(o)) else {}))
     if st not in (200, 201) or not j.get("id"):
         return jsonify({"ok": False, "error": pp_err(j, "PayPal could not start the payment.")}), 400
@@ -3193,6 +3338,15 @@ def api_track_tip(code):
 @app.context_processor
 def inject_paypal():
     return {"pp_enabled": pp_enabled(), "pp_on": pp_enabled()}
+
+
+@app.context_processor
+def inject_dev_flag():
+    try:
+        on = bool(session.get("dispatcher_id"))
+        return {"dev_user": on and is_dev(), "owner_user": on and is_owner()}
+    except Exception:
+        return {"dev_user": False, "owner_user": False}
 
 
 # ---------------------------------------------------------------- future orders
@@ -4097,7 +4251,7 @@ PAYOUT_LABEL = {"SUCCESS": "paid", "PENDING": "sending", "PROCESSING": "sending"
                 "SENDING": "sending", "ONHOLD": "on hold at PayPal", "UNCLAIMED": "waiting for driver to claim",
                 "UNKNOWN": "not confirmed yet", "FAILED": "failed", "RETURNED": "returned", "BLOCKED": "blocked",
                 "REFUNDED": "returned", "REVERSED": "reversed", "DENIED": "denied", "CANCELED": "cancelled",
-                "ERROR": "failed", "BANK_PAID": "paid by bank"}
+                "ERROR": "failed", "BANK_PAID": "paid by bank", "CHECK_PAID": "paid by check"}
 _payout_last = [0.0]
 
 def _pct_setting(key, default):
@@ -4127,8 +4281,14 @@ def driver_payout_target(d):
         return None
     keys = d.keys()
     wallet = ((d["payout_wallet"] if "payout_wallet" in keys else "") or "paypal").lower()
+    if wallet == "check":
+        return ("CHECK", "CHECK", "Check", "Check")
     if wallet == "bank":
-        return ("BANK", "BANK", bank_label(d), bank_label(d))
+        # only when dispatch picks "Bank transfer (record it)" for one payment; a saved
+        # bank choice is no longer used, so auto pay never treats a driver as bank paid
+        if "_manual_bank" in keys:
+            return ("BANK", "BANK", bank_label(d), bank_label(d))
+        wallet = "paypal"
     if wallet == "venmo":
         ph = digits((d["payout_phone"] if "payout_phone" in keys else "") or d["phone"] or "")
         if len(ph) == 11 and ph.startswith("1"):
@@ -4151,10 +4311,12 @@ def bank_label(d):
 def pay_target_for(d, method):
     """method: '' / default = the driver's saved way, or paypal / venmo / bank for this one payment."""
     m = (method or "").lower()
-    if m not in ("paypal", "venmo", "bank") or not d:
+    if m not in ("paypal", "venmo", "bank", "check") or not d:
         return driver_payout_target(d)
     fake = dict(d)
     fake["payout_wallet"] = m
+    if m == "bank":
+        fake["_manual_bank"] = 1
 
     class _Row(dict):
         def keys(self):
@@ -4185,7 +4347,8 @@ def drv_pay_info(o):
                  else "auto pay goes out about " + str(_int_setting("auto_pay_delay_min", 15, 0, 1440)) + " min after delivery"))
     return {"auto_note": note,
             "paid_cents": paid, "paid": money(paid), "suggest_cents": sug, "suggest": money(sug),
-            "owed_cents": max(0, sug - paid), "to": t[3] if t else "", "ready": bool(t),
+            "owed_cents": max(0, sug - paid), "to": t[3] if t else "", "ready": bool(t) and t[0] != "CHECK",
+            "wallet": ((d["payout_wallet"] if d is not None and "payout_wallet" in d.keys() else "") or "paypal"),
             "open": any((r["status"] or "") in PAYOUT_OPEN for r in rows),
             "rows": [{"id": r["id"], "amount": money(r["cents"]), "status": r["status"] or "",
                       "label": PAYOUT_LABEL.get(r["status"] or "", (r["status"] or "").lower()),
@@ -4196,7 +4359,7 @@ def _payout_send(row_id):
     """Send (or safely re-send, same PayPal-Request-Id) one payout row. Returns the row."""
     r = db().execute("SELECT * FROM driver_payouts WHERE id=?", (row_id,)).fetchone()
     o = db().execute("SELECT code FROM orders WHERE id=?", (r["order_id"],)).fetchone() if r["order_id"] else None
-    brand = (setting("business_name", str) or "Fleet Delivery")[:60]
+    brand = (setting("business_name", str) or "Fleet Foot Delivery")[:60]
     what = ("Pay for trip " + o["code"]) if o else ("Extra pay" + ((": " + r["reason"]) if r["reason"] else ""))
     short = (brand + " trip " + o["code"]) if o else (brand + " extra pay" + ((" - " + r["reason"]) if r["reason"] else ""))
     wallet = "VENMO" if (r["wallet"] or "") == "VENMO" else "PAYPAL"
@@ -4276,7 +4439,7 @@ def _int_setting(key, default, lo, hi):
 def auto_driver_pay_sweep(force=False):
     """Pay each driver automatically for a delivered trip: the suggested trip pay (fee/tip share
     + flat), by PayPal or Venmo, once the customer's payment is settled and the delay has passed.
-    Anything it can't do (no wallet on file, bank drivers, over the limit, a PayPal error) is left
+    Anything it can't do (no PayPal or Venmo on file, over the limit, a PayPal error) is left
     on the order for a dispatcher, and it never pays the same trip twice."""
     if not setting("auto_driver_pay") or not pp_enabled():
         return
@@ -4312,8 +4475,8 @@ def auto_driver_pay_sweep(force=False):
             if not t:
                 note("no PayPal email or Venmo phone on file, pay by hand")
                 continue
-            if t[0] == "BANK":
-                note("driver is paid by bank, pay by hand")
+            if t[0] in ("BANK", "CHECK"):
+                note("driver is paid by " + ("check" if t[0] == "CHECK" else "bank") + ", pay by hand")
                 continue
             if cents > cap:
                 note("over the auto pay limit of " + money(cap) + ", pay by hand")
@@ -4361,8 +4524,8 @@ def api_driver_pay():
         return jsonify({"ok": False, "error": "Drivers can be paid once the trip is delivered."}), 400
     d = db().execute("SELECT * FROM drivers WHERE id=?", (o["driver_id"],)).fetchone()
     t = pay_target_for(d, b.get("method"))
-    if t and t[0] != "BANK" and not pp_enabled():
-        return jsonify({"ok": False, "error": "PayPal keys are not set up yet, so drivers can't be paid by PayPal or Venmo from here. Use Paid by bank instead."}), 400
+    if t and t[0] not in ("BANK", "CHECK") and not pp_enabled():
+        return jsonify({"ok": False, "error": "PayPal keys are not set up yet, so drivers can't be paid by PayPal or Venmo from here. Use Paid by check instead."}), 400
     if not t:
         return jsonify({"ok": False, "error": (d["name"] if d else "This driver") +
                         " has no PayPal email or Venmo phone on file. Add it under Restaurants and drivers."}), 400
@@ -4378,16 +4541,17 @@ def api_driver_pay():
     if info["paid_cents"] and not b.get("extra"):
         return jsonify({"ok": False, "error": "This trip was already paid " + info["paid"] + ". Use Pay extra to send more."}), 400
     now = dt.datetime.now().isoformat(timespec="seconds")
-    if t[0] == "BANK":
+    if t[0] in ("BANK", "CHECK"):
         ref = " ".join(str(b.get("ref") or "").split())[:60]
+        st = t[0] + "_PAID"
         db().execute("""INSERT INTO driver_payouts(order_id,driver_id,cents,wallet,receiver,status,created_at,created_by,
-                        kind,ref) VALUES(?,?,?,?,?,'BANK_PAID',?,?,'trip',?)""",
-                     (o["id"], d["id"], cents, "BANK", t[2], now, session.get("dispatcher_name") or "Dispatch", ref or None))
+                        kind,ref) VALUES(?,?,?,?,?,?,?,?,'trip',?)""",
+                     (o["id"], d["id"], cents, t[0], t[2], st, now, session.get("dispatcher_name") or "Dispatch", ref or None))
         db().commit()
         log("driver pay", (session.get("dispatcher_name") or "Dispatch") + " recorded " + money(cents) +
-            " bank pay to " + d["name"] + " for " + o["code"])
+            (" check pay" + (" #" + ref if ref else "") if t[0] == "CHECK" else " bank pay") + " to " + d["name"] + " for " + o["code"])
         fresh = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
-        return jsonify({"ok": True, "status": "BANK_PAID", "to": t[3], "amount": money(cents), "pay": drv_pay_info(fresh)})
+        return jsonify({"ok": True, "status": st, "to": t[3], "amount": money(cents), "pay": drv_pay_info(fresh)})
     cur = db().execute("""INSERT INTO driver_payouts(order_id,driver_id,cents,wallet,receiver,status,created_at,created_by)
                           VALUES(?,?,?,?,?,'SENDING',?,?)""",
                        (o["id"], d["id"], cents, t[0], t[2], now, session.get("dispatcher_name") or "Dispatch"))
@@ -4472,20 +4636,22 @@ def api_driver_extra():
     t = pay_target_for(d, b.get("method"))
     if not t:
         return jsonify({"ok": False, "error": d["name"] + " has no PayPal email or Venmo phone on file. "
-                        "Add it under Restaurants and drivers, or pick Bank transfer."}), 400
+                        "Add it under Restaurants and drivers, or pick Check to record a check."}), 400
     now = dt.datetime.now().isoformat(timespec="seconds")
-    if t[0] == "BANK":
+    if t[0] in ("BANK", "CHECK"):
         ref = " ".join(str(b.get("ref") or "").split())[:60]
+        st = t[0] + "_PAID"
         db().execute("""INSERT INTO driver_payouts(order_id,driver_id,cents,wallet,receiver,status,created_at,created_by,
-                        kind,reason,ref) VALUES(0,?,?,'BANK',?,'BANK_PAID',?,?,'extra',?,?)""",
-                     (d["id"], cents, t[2], now, who, reason, ref or None))
+                        kind,reason,ref) VALUES(0,?,?,?,?,?,?,?,'extra',?,?)""",
+                     (d["id"], cents, t[0], t[2], st, now, who, reason, ref or None))
         db().commit()
-        log("driver pay", who + " recorded " + money(cents) + " extra bank pay to " + d["name"] + " (" + reason + ")")
+        log("driver pay", who + " recorded " + money(cents) + " extra " + ("check" if t[0] == "CHECK" else "bank") +
+            " pay to " + d["name"] + " (" + reason + ")")
         out = extra_pay_payload(b.get("driver_id"))
-        out.update({"status": "BANK_PAID", "amount": money(cents), "to": t[3]})
+        out.update({"status": st, "amount": money(cents), "to": t[3]})
         return jsonify(out)
     if not pp_enabled():
-        return jsonify({"ok": False, "error": "PayPal keys are not set up yet. Pick Bank transfer to record a bank payment."}), 400
+        return jsonify({"ok": False, "error": "PayPal keys are not set up yet. Pick Check to record a check you wrote."}), 400
     if db().execute("""SELECT 1 FROM driver_payouts WHERE driver_id=? AND kind='extra' AND status IN
                        ('SENDING','UNKNOWN') LIMIT 1""", (d["id"],)).fetchone():
         return jsonify({"ok": False, "error": "An extra payment to " + d["name"] + " is not confirmed yet. Tap Check on it first."}), 400
@@ -5383,9 +5549,10 @@ def api_dispatch_users():
         return jsonify({"ok": False}), 403
     rows = db().execute("SELECT * FROM dispatchers ORDER BY name").fetchall()
     return jsonify({"ok": True, "me": session.get("dispatcher_id"),
-                    "i_am_owner": is_owner(),
+                    "i_am_owner": is_owner(), "i_am_dev": is_dev(), "i_am_real_owner": is_real_owner(),
+                    "dev_order_edit": dev_can_edit_orders(),
                     "users": [{"id": r["id"], "name": r["name"], "username": r["username"],
-                               "owner": bool(r["is_owner"]),
+                               "owner": bool(r["is_owner"]), "dev": bool(r["is_dev"]),
                                "created_at": (r["created_at"] or "")[:10]} for r in rows]})
 
 @app.post("/api/dispatch/user")
@@ -5404,8 +5571,13 @@ def api_dispatch_user_save():
                          (username, uid)).fetchone()
     if clash:
         return jsonify({"ok": False, "error": "That username is already taken."}), 400
+    if uid and is_dev(uid) and not is_dev():
+        return jsonify({"ok": False, "error": "Only a developer can change a developer account."}), 403
     if uid and is_owner(uid) and not is_owner():
         return jsonify({"ok": False, "error": "Only an owner can change an owner account's name, username or password."}), 403
+    make_dev = bool(data.get("developer")) and not uid
+    if make_dev and not is_dev():
+        return jsonify({"ok": False, "error": "Only a developer can create a developer account."}), 403
     if uid:
         if password:
             db().execute("UPDATE dispatchers SET name=?,username=?,password=? WHERE id=?",
@@ -5418,10 +5590,10 @@ def api_dispatch_user_save():
     else:
         if len(password) < 4:
             return jsonify({"ok": False, "error": "Give the new dispatcher a password of at least 4 characters."}), 400
-        cur = db().execute("INSERT INTO dispatchers(name,username,password,created_at) VALUES(?,?,?,?)",
-                           (name, username, password, now()))
+        cur = db().execute("INSERT INTO dispatchers(name,username,password,created_at,is_dev) VALUES(?,?,?,?,?)",
+                           (name, username, password, now(), 1 if make_dev else 0))
         uid = cur.lastrowid
-        log("dispatcher", "created " + username)
+        log("dispatcher", ("created developer " if make_dev else "created ") + username)
     if "owner" in data:
         want = bool(data.get("owner"))
         cur_owner = is_owner(uid)
@@ -5435,16 +5607,34 @@ def api_dispatch_user_save():
     db().commit()
     return jsonify({"ok": True, "id": uid, "name": name, "username": username})
 
+@app.post("/api/dispatch/dev-order-edit")
+def api_dev_order_edit():
+    """Only the business's own owner accounts (not developers) can let developers change orders."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    if not is_real_owner():
+        return jsonify({"ok": False, "error": "Only an owner can change this."}), 403
+    on = 1 if (request.get_json(force=True) or {}).get("on") else 0
+    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('dev_order_edit',?)", (str(on),))
+    log("dispatcher", (session.get("dispatcher_name") or "owner") + (" let developers change orders" if on else " stopped developers changing orders"))
+    db().commit()
+    return jsonify({"ok": True, "on": bool(on)})
+
 @app.post("/api/dispatch/user-delete")
 def api_dispatch_user_delete():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     uid = request.get_json(force=True)["id"]
+    if is_dev(uid):
+        if not is_dev():
+            return jsonify({"ok": False, "error": "Only a developer can remove a developer account."}), 403
+        if db().execute("SELECT COUNT(*) c FROM dispatchers WHERE is_dev=1").fetchone()["c"] <= 1:
+            return jsonify({"ok": False, "error": "This is the only developer account, so it can't be deleted. Add another developer first."}), 400
     if uid == session.get("dispatcher_id"):
         return jsonify({"ok": False, "error": "You cannot remove the account you are signed in with."}), 400
     if db().execute("SELECT COUNT(*) c FROM dispatchers").fetchone()["c"] <= 1:
         return jsonify({"ok": False, "error": "Keep at least one dispatcher account."}), 400
-    if is_owner(uid):
+    if is_owner(uid) and not is_dev(uid):
         if not is_owner():
             return jsonify({"ok": False, "error": "Only an owner can remove an owner account."}), 403
         if db().execute("SELECT COUNT(*) c FROM dispatchers WHERE is_owner=1").fetchone()["c"] <= 1:
@@ -8286,6 +8476,8 @@ def driver_login():
             return redirect(url_for("driver"))
         else:
             err = "No driver with that phone and PIN."
+    if request.method == "GET" and session.get("driver_id"):
+        return redirect(url_for("driver"))
     return render_template("driver_login.html", err=err)
 
 @app.route("/driver/logout")
@@ -8625,7 +8817,7 @@ def api_driver_state():
                     "dispatch_tel": tel_digits(dispatch_phone(driver_phone_region(did))),
                     "dispatch_phone": nice_phone(dispatch_phone(driver_phone_region(did))),
                     "late": [x for x in late_accepts() if x["kind"] == "driver" and x["driver_id"] == did],
-                    "business_name": (setting("business_name", str) or "Fleet Delivery"),
+                    "business_name": (setting("business_name", str) or "Fleet Foot Delivery"),
                     "scheduled": scheduled,
                     "done": [order_dict(o) for o in done],
                     "driver": {"name": d["name"], "status": d["status"],
@@ -8835,6 +9027,8 @@ def rest_login():
             session["restaurant_name"] = row["name"]
             return redirect(url_for("rest_home"))
         err = "Wrong store code or PIN."
+    if request.method == "GET" and session.get("restaurant_id"):
+        return redirect(url_for("rest_home"))
     return render_template("rest_login.html", err=err)
 
 @app.route("/restaurant/logout")
@@ -9253,7 +9447,7 @@ def api_driver_crud():
             return jsonify({"ok": False, "error": "Another driver already uses that phone."}), 400
         if "payout_wallet" in b:
             w = (b.get("payout_wallet") or "").lower()
-            w = w if w in ("venmo", "bank") else "paypal"
+            w = w if w in ("venmo", "check") else "paypal"   # auto pay only sends PayPal / Venmo; check is paid by hand
             bn = " ".join(str(b.get("bank_name") or "").split())[:40]
             l4 = digits(b.get("bank_last4") or "")
             if l4 and len(l4) != 4:
@@ -9466,7 +9660,7 @@ SITE_IMAGES = {"hero_image": "/static/home-hero.jpg", "pocket_image": "/static/h
 
 def site_text(raw=False):
     out = {}
-    biz_name = (setting("business_name", str) or "Fleet Delivery").strip() or "Fleet Delivery"
+    biz_name = (setting("business_name", str) or "Fleet Foot Delivery").strip() or "Fleet Foot Delivery"
     for k, d, _n in SITE_TEXT:
         v = (setting(k, str) or "").strip() or d
         out[k] = v if raw else v.replace("{business}", biz_name)
@@ -9583,6 +9777,422 @@ def brand_icon(size):
         return resp
     except Exception:
         return redirect(DEFAULT_LOGO)
+
+
+# --- phone apps (Google Play / App Store via PWABuilder) ---------------------
+# Each app has its own install manifest. Names follow the business name in Settings,
+# so every client's copy shows its own brand. Enter these links in PWABuilder:
+#   customer  https://<domain>/          driver  https://<domain>/driver
+#   kitchen   https://<domain>/restaurant
+APP_MANIFESTS = {
+    "customer": {"suffix": "", "short": None, "start": "/", "scope": "/", "orientation": "portrait",
+                 "bg": "#ffffff", "theme": "#e53935",
+                 "desc": "Order food delivery from local restaurants, track your driver and earn rewards."},
+    "driver": {"suffix": " Driver", "short": "Driver", "start": "/driver", "scope": "/driver",
+               "orientation": "portrait", "bg": "#0f172a", "theme": "#0f172a",
+               "desc": "Driver app: go online, accept deliveries, navigate and get paid."},
+    "kitchen": {"suffix": " Kitchen", "short": "Kitchen", "start": "/restaurant", "scope": "/restaurant",
+                "orientation": "portrait", "bg": "#7c2d12", "theme": "#7c2d12",
+                "desc": "Restaurant app: receive delivery orders, mark them ready and chat with dispatch."},
+    # the shared staff apps (one store listing for every client company)
+    "hub-driver": {"name": "Fleet Foot Driver", "suffix": "", "short": "FF Driver", "start": "/go/driver",
+                   "scope": "/go/driver", "orientation": "portrait", "bg": "#0f172a", "theme": "#0f172a",
+                   "desc": "Driver app for every delivery company on Fleet Foot Delivery. Pick your company and sign in."},
+    "hub-kitchen": {"name": "Fleet Foot Kitchen", "suffix": "", "short": "FF Kitchen", "start": "/go/kitchen",
+                    "scope": "/go/kitchen", "orientation": "portrait", "bg": "#7c2d12", "theme": "#7c2d12",
+                    "desc": "Restaurant app for every delivery company on Fleet Foot Delivery. Pick your company and sign in."},
+    "tracker": {"suffix": " Tracker", "short": "Tracker", "start": "/dispatch/map", "scope": "/dispatch/map",
+                "orientation": "any", "bg": "#1B2A41", "theme": "#1B2A41",
+                "desc": "Live map of drivers for dispatchers."},
+}
+
+
+@app.get("/manifest/<which>.json")
+def app_manifest(which):
+    m = APP_MANIFESTS.get(which)
+    if not m:
+        return jsonify({"error": "unknown app"}), 404
+    try:
+        biz = (setting("business_name", str) or "Fleet Foot Delivery").strip() or "Fleet Foot Delivery"
+    except Exception:
+        biz = "Fleet Foot Delivery"
+    name = m.get("name") or (biz + m["suffix"])[:45]
+    short = m["short"] or (biz if len(biz) <= 12 else biz.split()[0][:12])
+    icons = [{"src": "/brand/icon-%d.png" % s, "sizes": "%dx%d" % (s, s), "type": "image/png", "purpose": "any"}
+             for s in (192, 512)]
+    icons += [{"src": "/brand/maskable-%d.png" % s, "sizes": "%dx%d" % (s, s), "type": "image/png",
+               "purpose": "maskable"} for s in (192, 512)]
+    body = {
+        "id": m["start"], "name": name, "short_name": short, "description": m["desc"],
+        "start_url": m["start"], "scope": m["scope"], "display": "standalone",
+        "orientation": m["orientation"], "background_color": m["bg"], "theme_color": m["theme"],
+        "lang": "en-US", "dir": "ltr", "categories": ["food", "business"],
+        "prefer_related_applications": False, "icons": icons,
+    }
+    import json as _json
+    resp = app.response_class(_json.dumps(body, indent=2), mimetype="application/manifest+json")
+    resp.headers["Cache-Control"] = "public, max-age=600"
+    return resp
+
+
+@app.get("/brand/maskable-<int:size>.png")
+def brand_maskable(size):
+    """Android adaptive icon: the logo kept inside the safe circle on a solid background."""
+    size = size if size in (192, 512) else 512
+    try:
+        from PIL import Image
+        import io
+        src = Image.open(logo_path()).convert("RGBA")
+        canvas = Image.new("RGBA", (size, size), (255, 255, 255, 255))
+        box = int(size * 0.62)
+        k = box / max(src.size)
+        src = src.resize((max(1, int(src.width * k)), max(1, int(src.height * k))), Image.LANCZOS)
+        canvas.paste(src, ((size - src.width) // 2, (size - src.height) // 2), src)
+        out = io.BytesIO()
+        canvas.convert("RGB").save(out, "PNG")
+        resp = app.response_class(out.getvalue(), mimetype="image/png")
+        resp.headers["Cache-Control"] = "public, max-age=3600"
+        return resp
+    except Exception:
+        return redirect("/brand/icon-%d.png" % size)
+
+
+@app.get("/sw.js")
+def root_service_worker():
+    """Service worker served from the site root so it covers every page (needed for the store apps)."""
+    resp = send_from_directory(APP_DIR_STATIC, "sw.js", mimetype="application/javascript")
+    resp.headers["Service-Worker-Allowed"] = "/"
+    resp.headers["Cache-Control"] = "no-cache"
+    return resp
+
+
+@app.get("/.well-known/assetlinks.json")
+def android_asset_links():
+    """Proves to Android that the Play Store apps belong to this website, so they open full
+    screen with no address bar. Paste the assetlinks.json text PWABuilder gives you for each app
+    into Railway variables ANDROID_ASSETLINKS_CUSTOMER, ANDROID_ASSETLINKS_DRIVER and
+    ANDROID_ASSETLINKS_KITCHEN (any variable starting with ANDROID_ASSETLINKS works)."""
+    import json as _json
+    out = []
+    for k in sorted(os.environ):
+        if not k.startswith("ANDROID_ASSETLINKS"):
+            continue
+        try:
+            v = _json.loads(os.environ[k])
+        except Exception:
+            continue
+        out.extend(v if isinstance(v, list) else [v])
+    resp = app.response_class(_json.dumps(out, indent=2), mimetype="application/json")
+    resp.headers["Cache-Control"] = "public, max-age=300"
+    return resp
+
+
+# --- restaurant invoices (what the business owes each restaurant for its food) ------
+# An owner picks a restaurant and dates; the invoice adds up the food (and tax, if chosen)
+# on that restaurant's delivered orders not already on another invoice, less any
+# commission, plus or minus an adjustment. Paid by check (with the check number) or PayPal.
+# Restaurants see their own invoices in the kitchen app.
+INV_METHODS = {"check": "Check", "paypal": "PayPal"}
+
+
+def inv_number(i):
+    return "INV-%d" % (1000 + int(i))
+
+
+def inv_cents(v):
+    try:
+        return int(round(float(str(v or "0").replace("$", "").replace(",", "").strip() or 0) * 100))
+    except Exception:
+        return None
+
+
+def inv_orders(rid, start, end, invoice_id=None):
+    day = "substr(COALESCE(delivered_at, created_at),1,10)"
+    if invoice_id:
+        q = "SELECT * FROM orders WHERE rest_invoice_id=? ORDER BY " + day + ", id"
+        return db().execute(q, (invoice_id,)).fetchall()
+    q = ("SELECT * FROM orders WHERE restaurant_id=? AND dispatch_status='delivered' AND rest_invoice_id IS NULL"
+         " AND " + day + " BETWEEN ? AND ? ORDER BY " + day + ", id")
+    return db().execute(q, (rid, start, end)).fetchall()
+
+
+def inv_math(rows, include_tax, pct, adjust):
+    food = sum(int(o["subtotal_cents"] or 0) for o in rows)
+    tax = sum(int(o["tax_cents"] or 0) for o in rows) if include_tax else 0
+    comm = int(round(food * pct / 100.0))
+    return {"orders": len(rows), "food_cents": food, "tax_cents": tax, "commission_cents": comm,
+            "adjust_cents": adjust, "total_cents": food + tax - comm + adjust}
+
+
+def inv_dict(r):
+    d = dict(r)
+    d["number"] = inv_number(r["id"])
+    rr = db().execute("SELECT name FROM restaurants WHERE id=?", (r["restaurant_id"],)).fetchone()
+    d["restaurant"] = rr["name"] if rr else "Restaurant"
+    for k in ("food_cents", "tax_cents", "commission_cents", "adjust_cents", "total_cents"):
+        d[k[:-6]] = money(d[k] or 0)
+    d["method_label"] = INV_METHODS.get(d.get("pay_method") or "", "")
+    return d
+
+
+def inv_args(f):
+    rid = int(f.get("restaurant_id") or 0)
+    start = (f.get("start") or "")[:10]
+    end = (f.get("end") or "")[:10]
+    try:
+        dt.date.fromisoformat(start); dt.date.fromisoformat(end)
+    except Exception:
+        return None, "Pick a start and end date."
+    if end < start:
+        return None, "The end date is before the start date."
+    if not db().execute("SELECT 1 FROM restaurants WHERE id=?", (rid,)).fetchone():
+        return None, "Pick a restaurant."
+    try:
+        pct = max(0.0, min(100.0, float(f.get("commission_pct") or 0)))
+    except Exception:
+        return None, "Commission must be a number from 0 to 100."
+    adj = inv_cents(f.get("adjust"))
+    if adj is None:
+        return None, "The adjustment must be a dollar amount, like 12.50 or -5."
+    inc = str(f.get("include_tax", "1")).lower() in ("1", "true", "on", "yes")
+    return {"rid": rid, "start": start, "end": end, "pct": pct, "adj": adj, "inc": inc,
+            "adjust_note": " ".join(str(f.get("adjust_note") or "").split())[:120],
+            "notes": str(f.get("notes") or "").strip()[:500]}, None
+
+
+@app.get("/dispatch/invoices")
+def dispatch_invoices():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    if not is_owner():
+        return redirect("/dispatch")
+    rests = [dict(id=r["id"], name=r["name"]) for r in
+             db().execute("SELECT id, name FROM restaurants WHERE slug<>'oneoff' ORDER BY name COLLATE NOCASE").fetchall()]
+    invs = [inv_dict(r) for r in db().execute("SELECT * FROM rest_invoices ORDER BY id DESC LIMIT 300").fetchall()]
+    return render_template("dispatch_invoices.html", portal="dispatch", rests=rests, invoices=invs,
+                           today=dt.date.today().isoformat())
+
+
+@app.post("/api/dispatch/invoices")
+def api_dispatch_invoices():
+    if not dispatcher_required() or not is_owner():
+        return jsonify({"ok": False, "error": "Only an owner can make or pay restaurant invoices."}), 403
+    f = request.get_json(silent=True) or request.form
+    op = f.get("op", "preview")
+    who = session.get("dispatcher_name") or "Owner"
+    now = dt.datetime.now().isoformat(timespec="seconds")
+    if op in ("preview", "create"):
+        a, err = inv_args(f)
+        if err:
+            return jsonify({"ok": False, "error": err}), 400
+        rows = inv_orders(a["rid"], a["start"], a["end"])
+        m = inv_math(rows, a["inc"], a["pct"], a["adj"])
+        out = {k: money(v) if k.endswith("_cents") else v for k, v in m.items()}
+        if op == "preview":
+            return jsonify({"ok": True, "summary": out})
+        if not rows and not a["adj"]:
+            return jsonify({"ok": False, "error": "No delivered orders for that restaurant in those dates that aren't already on an invoice."}), 400
+        if m["total_cents"] < 0:
+            return jsonify({"ok": False, "error": "The total comes out below $0. Check the commission and adjustment."}), 400
+        cur = db().execute("""INSERT INTO rest_invoices(restaurant_id, period_start, period_end, order_count,
+            food_cents, tax_cents, include_tax, commission_pct, commission_cents, adjust_cents, adjust_note,
+            total_cents, status, notes, created_at, created_by) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,'unpaid',?,?,?)""",
+            (a["rid"], a["start"], a["end"], m["orders"], m["food_cents"], m["tax_cents"], 1 if a["inc"] else 0,
+             a["pct"], m["commission_cents"], a["adj"], a["adjust_note"] or None, m["total_cents"],
+             a["notes"] or None, now, who))
+        iid = cur.lastrowid
+        if rows:
+            db().executemany("UPDATE orders SET rest_invoice_id=? WHERE id=?", [(iid, o["id"]) for o in rows])
+        db().commit()
+        try:
+            log("invoice", who + " made " + inv_number(iid) + " for " + money(m["total_cents"]))
+        except Exception:
+            pass
+        return jsonify({"ok": True, "invoice": inv_dict(db().execute("SELECT * FROM rest_invoices WHERE id=?", (iid,)).fetchone())})
+    iid = int(f.get("id") or 0)
+    r = db().execute("SELECT * FROM rest_invoices WHERE id=?", (iid,)).fetchone()
+    if not r:
+        return jsonify({"ok": False, "error": "That invoice wasn't found."}), 404
+    if op == "pay":
+        if r["status"] == "void":
+            return jsonify({"ok": False, "error": "That invoice was voided."}), 400
+        meth = (f.get("method") or "check").lower()
+        if meth not in INV_METHODS:
+            return jsonify({"ok": False, "error": "Pick Check or PayPal."}), 400
+        chk = "".join(str(f.get("check_number") or "").split())[:20]
+        ref = " ".join(str(f.get("ref") or "").split())[:60]
+        if meth == "check" and not chk:
+            return jsonify({"ok": False, "error": "Enter the check number."}), 400
+        paid = (f.get("paid_on") or dt.date.today().isoformat())[:10]
+        try:
+            dt.date.fromisoformat(paid)
+        except Exception:
+            return jsonify({"ok": False, "error": "Pick the date it was paid."}), 400
+        db().execute("UPDATE rest_invoices SET status='paid', pay_method=?, check_number=?, pay_ref=?, paid_at=?, paid_by=? WHERE id=?",
+                     (meth, chk or None, ref or None, paid, who, iid))
+        txt = "paid by check #" + chk if meth == "check" else "paid by PayPal"
+    elif op == "unpay":
+        db().execute("UPDATE rest_invoices SET status='unpaid', pay_method=NULL, check_number=NULL, pay_ref=NULL, paid_at=NULL, paid_by=NULL WHERE id=?", (iid,))
+        txt = "marked unpaid"
+    elif op == "void":
+        if r["status"] == "paid":
+            return jsonify({"ok": False, "error": "Mark it unpaid first, then void it."}), 400
+        db().execute("UPDATE rest_invoices SET status='void' WHERE id=?", (iid,))
+        db().execute("UPDATE orders SET rest_invoice_id=NULL WHERE rest_invoice_id=?", (iid,))
+        txt = "voided (its orders can go on a new invoice)"
+    else:
+        return jsonify({"ok": False, "error": "Unknown action."}), 400
+    db().commit()
+    try:
+        log("invoice", who + " " + txt + ": " + inv_number(iid))
+    except Exception:
+        pass
+    return jsonify({"ok": True, "invoice": inv_dict(db().execute("SELECT * FROM rest_invoices WHERE id=?", (iid,)).fetchone())})
+
+
+def render_invoice(r, viewer):
+    rest = db().execute("SELECT * FROM restaurants WHERE id=?", (r["restaurant_id"],)).fetchone()
+    lines = []
+    for o in inv_orders(None, None, None, invoice_id=r["id"]):
+        lines.append({"code": o["code"], "day": (o["delivered_at"] or o["created_at"] or "")[:10],
+                      "food": money(o["subtotal_cents"] or 0),
+                      "tax": money(o["tax_cents"] or 0) if r["include_tax"] else ""})
+    try:
+        logo = logo_url()
+    except Exception:
+        logo = DEFAULT_LOGO
+    return render_template("invoice_view.html", inv=inv_dict(r), rest=rest, lines=lines, viewer=viewer,
+                           logo=logo, biz=setting("business_name", str) or "Fleet Foot Delivery",
+                           biz_address=setting("business_address", str) or "")
+
+
+@app.get("/dispatch/invoices/<int:iid>")
+def dispatch_invoice_view(iid):
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    if not is_owner():
+        return redirect("/dispatch")
+    r = db().execute("SELECT * FROM rest_invoices WHERE id=?", (iid,)).fetchone()
+    if not r:
+        return redirect("/dispatch/invoices")
+    return render_invoice(r, "owner")
+
+
+@app.get("/restaurant/invoices")
+def rest_invoices():
+    if not session.get("restaurant_id"):
+        return redirect(url_for("rest_login"))
+    invs = [inv_dict(r) for r in db().execute(
+        "SELECT * FROM rest_invoices WHERE restaurant_id=? AND status<>'void' ORDER BY id DESC LIMIT 200",
+        (session["restaurant_id"],)).fetchall()]
+    return render_template("rest_invoices.html", portal="kitchen", invoices=invs)
+
+
+@app.get("/restaurant/invoices/<int:iid>")
+def rest_invoice_view(iid):
+    if not session.get("restaurant_id"):
+        return redirect(url_for("rest_login"))
+    r = db().execute("SELECT * FROM rest_invoices WHERE id=? AND restaurant_id=? AND status<>'void'",
+                     (iid, session["restaurant_id"])).fetchone()
+    if not r:
+        return redirect("/restaurant/invoices")
+    return render_invoice(r, "kitchen")
+
+
+# --- shared Fleet Foot Driver / Fleet Foot Kitchen apps ----------------------
+# One store app each for every client. The app opens /go/driver or /go/kitchen on this
+# (the main Fleet Foot) site, the worker picks their company once, and from then on the
+# app goes straight to that company's own site. "Switch company" signs them out and
+# brings the picker back. Developers manage the company list at /dispatch/companies.
+HUB_APPS = {"driver": ("Fleet Foot Driver", "/driver/login", "hub-driver"),
+            "kitchen": ("Fleet Foot Kitchen", "/restaurant/login", "hub-kitchen")}
+
+
+def clean_site_url(u):
+    u = (u or "").strip()
+    if not u:
+        return ""
+    if not u.lower().startswith(("http://", "https://")):
+        u = "https://" + u
+    from urllib.parse import urlparse
+    pr = urlparse(u)
+    if not pr.netloc or " " in pr.netloc:
+        return ""
+    return pr.scheme + "://" + pr.netloc.lower()
+
+
+def company_rows(only_active=True):
+    q = "SELECT * FROM companies" + (" WHERE COALESCE(active,1)=1" if only_active else "") + " ORDER BY name COLLATE NOCASE"
+    return [dict(r) for r in db().execute(q).fetchall()]
+
+
+@app.get("/go/<which>")
+def hub_pick(which):
+    if which not in HUB_APPS:
+        return redirect("/go/driver")
+    title, login_path, manifest = HUB_APPS[which]
+    try:
+        logo = logo_url()
+    except Exception:
+        logo = DEFAULT_LOGO
+    return render_template("hub_pick.html", which=which, title=title, login_path=login_path,
+                           manifest=manifest, logo=logo)
+
+
+@app.get("/api/hub/companies")
+def api_hub_companies():
+    rows = [{"name": r["name"], "code": r["code"], "url": r["url"]}
+            for r in company_rows() if (r.get("listed") if r.get("listed") is not None else 1)]
+    return jsonify({"ok": True, "companies": rows})
+
+
+@app.get("/api/hub/find")
+def api_hub_find():
+    code = (request.args.get("code") or "").strip().lower()
+    r = db().execute("SELECT name, code, url FROM companies WHERE code=? AND COALESCE(active,1)=1", (code,)).fetchone()
+    if not r:
+        return jsonify({"ok": False, "error": "No company with that code. Check with your manager."}), 404
+    return jsonify({"ok": True, "company": dict(r)})
+
+
+@app.get("/dispatch/companies")
+def dispatch_companies():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    if not is_dev():
+        return redirect("/dispatch")
+    return render_template("dispatch_companies.html", portal="dispatch", companies=company_rows(False))
+
+
+@app.post("/api/dispatch/companies")
+def api_dispatch_companies():
+    if not dispatcher_required() or not is_dev():
+        return jsonify({"ok": False, "error": "Only a developer account can change the company list."}), 403
+    f = request.get_json(silent=True) or request.form
+    op = f.get("op", "save")
+    cid = int(f.get("id") or 0)
+    if op == "delete":
+        db().execute("DELETE FROM companies WHERE id=?", (cid,))
+        db().commit()
+        return jsonify({"ok": True})
+    name = (f.get("name") or "").strip()[:80]
+    code = "".join(ch for ch in (f.get("code") or "").strip().lower() if ch.isalnum() or ch in "-_")[:40]
+    url = clean_site_url(f.get("url"))
+    if not name or not code or not url:
+        return jsonify({"ok": False, "error": "Enter a company name, a code (letters and numbers) and their web address."}), 400
+    listed = 1 if str(f.get("listed", "1")).lower() in ("1", "true", "on", "yes") else 0
+    active = 1 if str(f.get("active", "1")).lower() in ("1", "true", "on", "yes") else 0
+    dup = db().execute("SELECT id FROM companies WHERE code=? AND id<>?", (code, cid)).fetchone()
+    if dup:
+        return jsonify({"ok": False, "error": "Another company already uses that code."}), 400
+    if cid:
+        db().execute("UPDATE companies SET name=?, code=?, url=?, listed=?, active=? WHERE id=?",
+                     (name, code, url, listed, active, cid))
+    else:
+        db().execute("INSERT INTO companies(name, code, url, listed, active, created_at) VALUES(?,?,?,?,?,?)",
+                     (name, code, url, listed, active, dt.datetime.now().isoformat(timespec="seconds")))
+    db().commit()
+    return jsonify({"ok": True, "companies": company_rows(False)})
 
 
 def seed_brand_photos():
@@ -9772,7 +10382,7 @@ def zuppler_find_channel(site):
                         "url": c.get("url") or site}
         except Exception:
             continue
-    raise ValueError("That website doesn't look like a Zuppler ordering site. Check the address and try again.")
+    raise ValueError("That website doesn't look like a Zuppler, Data Dreamers or DeliverLogic ordering site. Check the address and try again.")
 
 ZUP_REST_Q = """{ restaurant(id: %s) { id name cuisines hoursOfOperation timezone { offset }
   locations { id address { street city state zip nickname geo { lat lng } } }
@@ -9789,6 +10399,19 @@ def _zuppler_worker(site):
     st = ZUP_STATE
     try:
         st.update(stage="Finding the ordering site...", done=0, total=0, error="")
+        import multi_import
+        kind = multi_import.detect(site)
+        if kind in ("datadreamers", "deliverlogic"):
+            pull = multi_import.dd_pull if kind == "datadreamers" else multi_import.dl_pull
+            data = pull(site, st)
+            out = sorted(data["restaurants"], key=lambda z: z["name"].lower())
+            data.update(restaurants=out, pulled=dt.date.today().isoformat(), channel="")
+            tmp = zuppler_file() + ".tmp"
+            with open(tmp, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp, zuppler_file())
+            st.update(stage="Done. Found %d restaurants and %d menu items." % (len(out), sum(len(z["items"]) for z in out)))
+            return
         ch = zuppler_find_channel(site)
         code, origin = ch["permalink"], (ch["url"] or "").rstrip("/") or None
         if origin and not origin.startswith("http"):
@@ -9888,7 +10511,7 @@ def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_
     A restaurant already here with the same name is updated instead of duplicated."""
     data = tigertown_data()
     if not data:
-        return {"ok": False, "error": "Find the restaurants on a Zuppler website first."}
+        return {"ok": False, "error": "Find the restaurants on an ordering website first."}
     con = db()
     have = {}
     for r in con.execute("SELECT * FROM restaurants").fetchall():
@@ -9911,10 +10534,11 @@ def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_
             con.execute("""UPDATE restaurants SET zup_id=?, cuisine=COALESCE(NULLIF(cuisine,''),?),
                            image=CASE WHEN image IS NULL OR image='' THEN ? ELSE image END,
                            logo=?, address=CASE WHEN address IS NULL OR address='' THEN ? ELSE address END,
-                           lat=COALESCE(lat,?), lng=COALESCE(lng,?), hours=?, eta_min=?,
-                           min_order_cents=? WHERE id=?""",
-                        (str(z["zid"]), z["cuisine"], z["photo"], z["logo"], z["address"], z["lat"], z["lng"],
-                         hours, z.get("eta_min"), z.get("min_order_cents") or None, rid))
+                           lat=COALESCE(lat,?), lng=COALESCE(lng,?), hours=?, eta_min=COALESCE(?,eta_min),
+                           phone=CASE WHEN phone IS NULL OR phone='' THEN ? ELSE phone END,
+                           min_order_cents=COALESCE(?,min_order_cents) WHERE id=?""",
+                        (str(z["zid"]), z["cuisine"], z["photo"] or "", z["logo"] or "", z["address"], z["lat"], z["lng"],
+                         hours, z.get("eta_min"), z.get("phone") or "", z.get("min_order_cents") or None, rid))
             updated += 1
         else:
             base = "".join(ch if ch.isalnum() else "-" for ch in z["name"].lower()).strip("-")
@@ -9926,7 +10550,7 @@ def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_
             cur2 = con.execute("""INSERT INTO restaurants(name,slug,pin,address,phone,lat,lng,hours,prep_default,
                                    image,logo,cuisine,zup_id,eta_min,min_order_cents,region_id)
                                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
-                               (z["name"], slug, pin, z["address"] or "Auburn, AL", "", z["lat"], z["lng"], hours,
+                               (z["name"], slug, pin, z["address"] or "Auburn, AL", z.get("phone") or "", z["lat"], z["lng"], hours,
                                 int(z.get("prep") or 15), z["photo"], z["logo"], z["cuisine"], str(z["zid"]),
                                 z.get("eta_min"), z.get("min_order_cents") or None, region_id))
             rid = cur2.lastrowid
@@ -10034,6 +10658,126 @@ def api_picture_copy():
 def dispatch_import_tigertown_old():
     return redirect("/dispatch/import-zuppler")
 
+# ---------------- copy a whole website into the customer website settings ----------------
+WEBCOPY_TEXT = (("business_name", "Business name", 60), ("home_headline", "Big headline", 120),
+                ("home_sub", "Line under the headline", 300), ("how_title", "How it works title", 60),
+                ("how1_t", "Step 1 title", 60), ("how1_p", "Step 1 text", 300),
+                ("how2_t", "Step 2 title", 60), ("how2_p", "Step 2 text", 300),
+                ("how3_t", "Step 3 title", 60), ("how3_p", "Step 3 text", 300),
+                ("pocket_title", "App section title", 80), ("pocket_text", "App section text", 400),
+                ("business_email", "Email", 120), ("business_address", "Address", 160),
+                ("dispatch_phone", "Phone", 20))
+
+
+def webcopy_file():
+    return os.path.join(os.path.dirname(os.path.abspath(DB_PATH)), "website_import.json")
+
+
+def _webcopy_picture(url, logo=False):
+    """Download a picture from the copied site onto your own server. Returns the saved file name."""
+    from PIL import Image
+    import io
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    raw = urllib.request.urlopen(req, timeout=30).read(PHOTO_MAX_BYTES + 1)
+    if len(raw) > PHOTO_MAX_BYTES:
+        raise ValueError("too big")
+    im = Image.open(io.BytesIO(raw))
+    if logo:
+        im = im.convert("RGBA")
+        im.thumbnail((512, 512))
+        name = secrets.token_hex(10) + ".png"
+        im.save(os.path.join(UPLOAD_DIR, name), "PNG", optimize=True)
+    else:
+        im = im.convert("RGB")
+        im.thumbnail((2000, 2000))
+        name = secrets.token_hex(10) + ".jpg"
+        im.save(os.path.join(UPLOAD_DIR, name), "JPEG", quality=85, optimize=True)
+    return name
+
+
+@app.route("/dispatch/import-website", methods=["GET", "POST"])
+def dispatch_import_website():
+    me = session.get("dispatcher_id")
+    if not me:
+        return redirect("/dispatch/login")
+    if not is_owner(me):
+        return "Only an owner can copy a website.", 403
+    import multi_import
+    data, result = None, None
+    try:
+        data = json.load(open(webcopy_file()))
+    except Exception:
+        data = None
+    act = request.form.get("action") if request.method == "POST" else ""
+    if act == "read":
+        site = (request.form.get("site") or "").strip()
+        if not site:
+            result = {"ok": False, "error": "Type the website address."}
+        else:
+            try:
+                data = multi_import.site_pull(site)
+                with open(webcopy_file(), "w") as f:
+                    json.dump(data, f)
+                result = {"ok": True, "read": True}
+            except Exception:
+                result = {"ok": False, "error": "I couldn't open that website. Check the address and try again."}
+    elif act == "apply" and data:
+        if not request.form.get("permission"):
+            result = {"ok": False, "error": "Tick the box to confirm you own this website or have the owner's permission."}
+        else:
+            con, done, failed = db(), [], []
+            def put(k, v):
+                con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, v))
+            for k, label, n in WEBCOPY_TEXT:
+                if request.form.get("use_" + k):
+                    v = " ".join((request.form.get(k) or "").split())[:n]
+                    if k == "dispatch_phone":
+                        v = re.sub(r"\D", "", v)[-10:]
+                    put(k, v)
+                    done.append(label)
+            for k in ("x", "facebook", "instagram"):
+                if request.form.get("use_social_" + k):
+                    v = (request.form.get("social_" + k) or "").strip()[:200]
+                    if v and not v.startswith("http"):
+                        v = "https://" + v
+                    put("social_" + k, v)
+                    done.append({"x": "X (Twitter)", "facebook": "Facebook", "instagram": "Instagram"}[k])
+            if request.form.get("use_faqs"):
+                qs = [(request.form.get("fq%d" % i) or "").strip() for i in range(len(data.get("faqs") or []))]
+                pairs = []
+                for i, (q, a) in enumerate(data.get("faqs") or []):
+                    if request.form.get("fk%d" % i):
+                        pairs.append("Q: %s\nA: %s" % (" ".join((request.form.get("fq%d" % i) or q).split()),
+                                                        " ".join((request.form.get("fa%d" % i) or a).split())))
+                if pairs:
+                    put("faq_text", "\n\n".join(pairs)[:12000])
+                    done.append("%d FAQs" % len(pairs))
+            if request.form.get("use_logo") and data.get("logo"):
+                try:
+                    name = _webcopy_picture(data["logo"], logo=True)
+                    drop_media((setting("logo_image", str) or "").strip())
+                    put("logo_image", name)
+                    done.append("Logo")
+                except Exception:
+                    failed.append("Logo")
+            for key, label in (("hero_image", "Top photo"), ("pocket_image", "App section photo")):
+                pick = request.form.get(key) or ""
+                if pick.isdigit() and int(pick) < len(data.get("pictures") or []):
+                    try:
+                        name = _webcopy_picture(data["pictures"][int(pick)])
+                        drop_media((setting(key, str) or "").strip())
+                        put(key, name)
+                        done.append(label)
+                    except Exception:
+                        failed.append(label)
+            con.commit()
+            log("settings", "Customer website copied from " + (data.get("site") or "a website") + ": " + ", ".join(done))
+            result = {"ok": True, "done": done, "failed": failed}
+    faqs = (data or {}).get("faqs") or []
+    return render_template("dispatch_import_website.html", data=data, result=result, fields=WEBCOPY_TEXT,
+                           faqs=faqs, phone_fmt=nice_phone((data or {}).get("phone") or ""))
+
+
 @app.route("/dispatch/import-zuppler", methods=["GET", "POST"])
 def dispatch_import_zuppler():
     me = session.get("dispatcher_id")
@@ -10046,7 +10790,7 @@ def dispatch_import_zuppler():
     if request.method == "POST" and request.form.get("action") == "fetch":
         site = (request.form.get("site") or "").strip()
         if not site:
-            result = {"ok": False, "error": "Type the Zuppler website address."}
+            result = {"ok": False, "error": "Type the ordering website address."}
         elif not start_zuppler_pull(site):
             result = {"ok": False, "error": "Already reading a website. Wait for it to finish."}
         else:
@@ -10123,7 +10867,7 @@ def inject_portal():
     try:
         _ph = dispatch_phone()
         _d = "".join(c for c in _ph if c.isdigit())
-        biz = {"biz_name": (setting("business_name", str) or "Fleet Delivery").strip() or "Fleet Delivery",
+        biz = {"biz_name": (setting("business_name", str) or "Fleet Foot Delivery").strip() or "Fleet Foot Delivery",
                "biz_address": (setting("business_address", str) or "").strip(),
                "biz_phone": ("(%s) %s-%s" % (_d[:3], _d[3:6], _d[6:])) if len(_d) == 10 else _ph,
                "biz_tel": tel_digits(_d),
@@ -10145,7 +10889,7 @@ def inject_portal():
             biz["allow_cash"] = cash_allowed()
             biz["texting_ok"] = texting_on()
     except Exception:
-        biz = {"biz_name": "Fleet Delivery", "biz_address": "", "biz_phone": "", "biz_tel": "",
+        biz = {"biz_name": "Fleet Foot Delivery", "biz_address": "", "biz_phone": "", "biz_tel": "",
                "tax_bp": 900, "service_bp": 0, "logo_url": DEFAULT_LOGO}
     return {**biz, "portal": current_portal(),
             "portal_name": session.get("dispatcher_name") or session.get("driver_name")
@@ -11252,7 +11996,7 @@ def api_gift_pp_create():
         "purchase_units": [{"reference_id": "GIFT-" + g["ref"], "custom_id": "GIFT-" + g["ref"],
                             "description": "Gift card " + money(g["initial_cents"]), "amount": pp_money(g["initial_cents"])}],
         "application_context": {"shipping_preference": "NO_SHIPPING", "user_action": "PAY_NOW",
-                                "brand_name": (setting("business_name", str) or "Fleet Delivery")[:120]}})
+                                "brand_name": (setting("business_name", str) or "Fleet Foot Delivery")[:120]}})
     if st not in (200, 201) or not j.get("id"):
         return jsonify({"ok": False, "error": pp_err(j, "PayPal could not start the payment.")}), 400
     db().execute("UPDATE gift_cards SET pp_order_id=? WHERE id=?", (j["id"], g["id"]))
@@ -11562,7 +12306,7 @@ A: If there is any problem with your order, you must call us within 15 minutes o
 def faq_items():
     raw = (setting("faq_text", str) or "").strip() or DEFAULT_FAQ
     ph = dispatch_phone()
-    rep_ = {"{business}": (setting("business_name", str) or "Fleet Delivery").strip(), "{phone}": nice_phone(ph) or "dispatch",
+    rep_ = {"{business}": (setting("business_name", str) or "Fleet Foot Delivery").strip(), "{phone}": nice_phone(ph) or "dispatch",
             "{email}": (setting("business_email", str) or "").strip(), "{address}": (setting("business_address", str) or "").strip()}
     items, q, a = [], None, []
     for line in raw.splitlines() + ["Q:"]:
@@ -11785,7 +12529,7 @@ def make_reset_code(c, minutes=15):
 def account_reset():
     step, msg, err = request.form.get("step") or request.args.get("step") or "send", "", ""
     ph = phone_digits(request.form.get("phone") or request.args.get("phone"))
-    biz = (setting("business_name", str) or "Fleet Delivery").strip()
+    biz = (setting("business_name", str) or "Fleet Foot Delivery").strip()
     if request.method == "POST" and step == "send":
         sends = [t for t in session.get("reset_sends", []) if time.time() - t < 3600]
         if len(ph) != 10:

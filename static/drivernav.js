@@ -1,7 +1,7 @@
 /* Built-in turn-by-turn navigation for the driver app. */
 (function(){
   var MAP=null, LINE=null, ME=null, DEST=null, WATCH=null, RT=null, CUR=1, TARGET=null;
-  var FOLLOW=true, OFF=0, LAST_RR=0, SPOKEN={}, VOICE=localStorage.getItem('ff_nav_voice')!=='0', LASTPOS=null, ARRIVED=false;
+  var FOLLOW=true, OVER=false, OFF=0, LAST_RR=0, SPOKEN={}, VOICE=localStorage.getItem('ff_nav_voice')!=='0', LASTPOS=null, ARRIVED=false;
   function $(id){ return document.getElementById(id); }
   function hav(a,b){ var R=6371000,t=Math.PI/180,dl=(b[0]-a[0])*t,dn=(b[1]-a[1])*t;
     var x=Math.sin(dl/2)*Math.sin(dl/2)+Math.cos(a[0]*t)*Math.cos(b[0]*t)*Math.sin(dn/2)*Math.sin(dn/2);
@@ -25,12 +25,37 @@
   function draw(){
     if(!MAP){ MAP=L.map('navMap',{zoomControl:false}); 
       ffBaseMap(MAP);
-      MAP.on('dragstart',function(){ FOLLOW=false; $('navRecenter').classList.remove('hidden'); }); }
+      MAP.on('dragstart',function(){ FOLLOW=false; if(!OVER) $('navRecenter').classList.remove('hidden'); }); }
     if(LINE) MAP.removeLayer(LINE);
     LINE=L.polyline(RT.coords,{color:'#1a73e8',weight:7,opacity:.85}).addTo(MAP);
     if(!DEST) DEST=L.marker(TARGET.ll).addTo(MAP); else DEST.setLatLng(TARGET.ll);
-    if(LASTPOS) MAP.setView(LASTPOS,16); else MAP.fitBounds(LINE.getBounds(),{padding:[30,30]});
+    if(OVER) fitRoute(); else if(LASTPOS&&FOLLOW) MAP.setView(LASTPOS,16); else if(!LASTPOS) MAP.fitBounds(LINE.getBounds(),{padding:[30,30]});
+    if(OVER) listSteps();
   }
+  function fitRoute(){ if(!LINE||!MAP) return; var pnl=$('navSteps'), h=(pnl&&!pnl.classList.contains('hidden'))?pnl.offsetHeight:0;
+    var b=LINE.getBounds(); if(LASTPOS) b.extend(LASTPOS);
+    MAP.fitBounds(b,{paddingTopLeft:[30,30],paddingBottomRight:[30,h+30]}); }
+  function esc(t){ return String(t==null?'':t).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+  function listSteps(){ var el=$('navStepList'); if(!el) return;
+    if(!RT||!RT.steps||!RT.steps.length){ el.innerHTML='<div class="navstepmsg">Directions are still loading. Try again in a moment.</div>'; $('navStepSum').textContent=''; return; }
+    var start=ARRIVED?RT.steps.length-1:Math.min(CUR,RT.steps.length-1), h='';
+    for(var i=start;i<RT.steps.length;i++){ var st=RT.steps[i];
+      var d=(i===start&&LASTPOS)?hav(LASTPOS,[st.lat,st.lng]):((RT.steps[i-1]||{}).dist_m||0);
+      h+='<button type="button" class="navstep'+(i===start?' cur':'')+'" data-i="'+i+'">'+
+         '<span class="navsteparrow">'+arrow(st)+'</span><span class="navsteptxt">'+esc(st.text)+'</span>'+
+         '<span class="navstepdist">'+(d?fmt(d):'')+'</span></button>'; }
+    el.innerHTML=h;
+    var r=remaining(LASTPOS), n=RT.steps.length-start;
+    $('navStepSum').textContent=ARRIVED?'Arrived':(n+(n===1?' step':' steps')+' \u00b7 '+fmt(r[0])+' \u00b7 '+Math.max(1,Math.round(r[1]/60))+' min');
+    var bs=el.querySelectorAll('.navstep');
+    for(var k=0;k<bs.length;k++) bs[k].onclick=function(){ var x=RT.steps[+this.getAttribute('data-i')]; if(!x||!MAP) return;
+      var all=el.querySelectorAll('.navstep'); for(var j=0;j<all.length;j++) all[j].classList.remove('picked'); this.classList.add('picked');
+      var pnl=$('navSteps'), hh=pnl?pnl.offsetHeight:0; MAP.setView([x.lat,x.lng],17,{animate:true});
+      if(hh) MAP.panBy([0,Math.round(hh/2)],{animate:false}); };
+  }
+  function setOver(on){ OVER=!!on; var pnl=$('navSteps'), btn=$('navOverviewBtn');
+    if(pnl) pnl.classList.toggle('hidden',!OVER); if(btn) btn.textContent=OVER?'Back to directions':'Overview';
+    document.body.classList.toggle('navover',OVER); }
   function remaining(p){ if(!RT) return [0,0]; var d=0, t=0;
     for(var i=CUR;i<RT.steps.length;i++){ d+=RT.steps[i].dist_m||0; t+=RT.steps[i].dur_s||0; }
     var s=RT.steps[Math.min(CUR,RT.steps.length-1)], toNext=p?hav(p,[s.lat,s.lng]):0;
@@ -56,7 +81,7 @@
     if(d<25&&CUR<RT.steps.length-1){ CUR++; s=RT.steps[CUR]; d=hav(p,[s.lat,s.lng]); }
     if(d<160&&d>=25) sayOnce('n'+CUR,s.text);
     else if(d<800&&d>=400) sayOnce('f'+CUR,'In '+fmt(d).replace('mi','miles').replace('ft','feet')+', '+s.text);
-    show(p);
+    show(p); if(OVER) listSteps();
     // off the blue line for a few readings in a row: get a new route from here
     if(offRoute(p)>60){ OFF++; if(OFF>=3&&Date.now()-LAST_RR>15000){ OFF=0; fetchRoute(p,true); } } else OFF=0;
   }
@@ -74,7 +99,7 @@
     open:function(t){
       if(WATCH!==null){ try{navigator.geolocation.clearWatch(WATCH);}catch(e){} WATCH=null; }
       if(LINE&&MAP){ MAP.removeLayer(LINE); LINE=null; }
-      TARGET=t; ARRIVED=false; RT=null; CUR=1; FOLLOW=true; SPOKEN={}; OFF=0;
+      TARGET=t; ARRIVED=false; RT=null; CUR=1; FOLLOW=true; SPOKEN={}; OFF=0; setOver(false);
       var rb=$('navReturn'); if(rb) rb.classList.add('hidden');
       $('navBox').classList.remove('hidden'); document.body.classList.add('navopen');
       $('navDest').textContent=t.label+(t.address?' \u00b7 '+t.address:'');
@@ -99,18 +124,23 @@
     show:function(){
       if(!TARGET) return; var b=$('navReturn'); if(b) b.classList.add('hidden');
       $('navBox').classList.remove('hidden'); document.body.classList.add('navopen');
-      setTimeout(function(){ if(MAP){ MAP.invalidateSize(); if(FOLLOW&&LASTPOS) MAP.setView(LASTPOS,Math.max(MAP.getZoom(),16)); } },50);
+      setTimeout(function(){ if(MAP){ MAP.invalidateSize(); if(OVER){ listSteps(); fitRoute(); } else if(FOLLOW&&LASTPOS) MAP.setView(LASTPOS,Math.max(MAP.getZoom(),16)); } },50);
     },
     close:function(){
       var rb=$('navReturn'); if(rb) rb.classList.add('hidden');
-      $('navBox').classList.add('hidden'); document.body.classList.remove('navopen');
+      $('navBox').classList.add('hidden'); document.body.classList.remove('navopen'); setOver(false);
       if(WATCH!==null){ navigator.geolocation.clearWatch(WATCH); WATCH=null; }
       try{ speechSynthesis.cancel(); }catch(e){} try{ if(window.ffAwake) ffAwake.hold(false); }catch(e){}
     },
     target:function(){ return TARGET; },
     isOpen:function(){ var b=$('navBox'); return !!(b&&!b.classList.contains('hidden')); },
-    recenter:function(){ FOLLOW=true; $('navRecenter').classList.add('hidden'); if(LASTPOS&&MAP) MAP.setView(LASTPOS,16); },
+    recenter:function(){ setOver(false); FOLLOW=true; $('navRecenter').classList.add('hidden');
+      if(MAP){ MAP.invalidateSize(); if(LASTPOS) MAP.setView(LASTPOS,16,{animate:true}); } if(RT) show(LASTPOS); },
     voice:function(){ VOICE=!VOICE; localStorage.setItem('ff_nav_voice',VOICE?'1':'0'); paintVoice(); if(!VOICE){ try{speechSynthesis.cancel();}catch(e){} } },
-    overview:function(){ if(LINE&&MAP){ FOLLOW=false; $('navRecenter').classList.remove('hidden'); MAP.fitBounds(LINE.getBounds(),{padding:[30,30]}); } }
+    overview:function(){ if(OVER){ window.ffNav.recenter(); return; }
+      FOLLOW=false; setOver(true); $('navRecenter').classList.add('hidden'); listSteps();
+      setTimeout(function(){ if(MAP){ MAP.invalidateSize(); fitRoute(); } },30); },
+    back:function(){ window.ffNav.recenter(); },
+    previewing:function(){ return OVER; }
   };
 })();

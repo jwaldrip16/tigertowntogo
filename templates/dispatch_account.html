@@ -27,6 +27,7 @@
       <div class="row"><label>Username</label><input id="nUser" placeholder="nicole"></div>
       <div class="row"><label>Password</label><input id="nPass" type="password" placeholder="at least 4 characters"></div>
       <div class="row" id="nOwnerRow" style="display:none"><label><input type="checkbox" id="nOwner"> Owner account (chats with every region, sees all regions)</label></div>
+      <div class="row" id="nDevRow" style="display:none"><label><input type="checkbox" id="nDev"> Developer account (full access, can't delete orders, changes orders only when an owner allows it; the last developer account can't be deleted)</label></div>
       <button class="btn primary" onclick="addUser()">Create dispatcher</button>
       <span class="muted small" id="newMsg"></span>
     </div>
@@ -36,6 +37,13 @@
     <div class="panel">
       <h2>All dispatchers</h2>
       <div id="users"></div>
+    </div>
+    <div class="panel mt" id="devPanel" style="display:none">
+      <h2>Developer access</h2>
+      <p class="muted small">Developer accounts can do everything an owner can, except delete orders.
+      They can only change orders while this is on. Only a developer can remove a developer account, and the last one can't be removed.</p>
+      <label id="devPermRow"><input type="checkbox" id="devPerm" onchange="setDevPerm(this.checked)"> Let developers change orders</label>
+      <div class="muted small" id="devPermMsg"></div>
     </div>
     <div class="panel mt">
       <h2>Dispatcher room</h2>
@@ -57,14 +65,21 @@ async function loadUsers(){
   const res = await jget('/api/dispatch/users');
   if(!res.ok) return;
   document.getElementById('nOwnerRow').style.display = res.i_am_owner ? '' : 'none';
+  document.getElementById('nDevRow').style.display = res.i_am_dev ? '' : 'none';
+  const anyDev = res.users.some(u => u.dev);
+  DEVS = res.users.filter(u => u.dev).length;
+  document.getElementById('devPanel').style.display = (res.i_am_owner && (anyDev || res.i_am_dev)) ? '' : 'none';
+  const dp = document.getElementById('devPerm'); dp.checked = !!res.dev_order_edit; dp.disabled = !res.i_am_real_owner;
+  document.getElementById('devPermMsg').textContent = res.i_am_real_owner ? '' :
+    ('Only the business owner can change this. Right now developers ' + (res.dev_order_edit ? 'can' : 'can\'t') + ' change orders.');
   document.getElementById('users').innerHTML = res.users.map(u =>
     '<div class="card pad"><div class="row between"><div><strong>'+u.name+'</strong>'+
       (u.id===res.me ? ' <span class="pill blue">you</span>' : '')+
-      (u.owner ? ' <span class="pill green">owner</span>' : '')+
+      (u.dev ? ' <span class="pill">developer</span>' : (u.owner ? ' <span class="pill green">owner</span>' : ''))+
       '<div class="muted small">'+u.username+(u.created_at?(' · added '+u.created_at):'')+'</div></div>'+
-      '<div>'+(u.owner && !res.i_am_owner ? '' : '<button class="btn tiny" onclick="editUser('+u.id+',\''+u.name.replace(/'/g,"\\'")+'\',\''+u.username+'\')">Edit</button>')+
-      (res.i_am_owner ? '<button class="btn tiny" onclick="setOwner('+u.id+','+(!u.owner)+')">'+(u.owner?'Remove owner':'Make owner')+'</button>' : '')+
-      (u.id===res.me || (u.owner && !res.i_am_owner) ? '' : '<button class="btn tiny danger" onclick="delUser('+u.id+')">Remove</button>')+
+      '<div>'+((u.owner && !res.i_am_owner) || (u.dev && !res.i_am_dev) ? '' : '<button class="btn tiny" onclick="editUser('+u.id+',\''+u.name.replace(/'/g,"\\'")+'\',\''+u.username+'\')">Edit</button>')+
+      (res.i_am_owner && !u.dev ? '<button class="btn tiny" onclick="setOwner('+u.id+','+(!u.owner)+')">'+(u.owner?'Remove owner':'Make owner')+'</button>' : '')+
+      ((u.dev && !(res.i_am_dev && DEVS>1)) || u.id===res.me || (u.owner && !res.i_am_owner) ? '' : '<button class="btn tiny danger" onclick="delUser('+u.id+')">Remove</button>')+
       '</div></div></div>').join('');
 }
 async function saveMe(){
@@ -76,9 +91,9 @@ async function saveMe(){
 }
 async function addUser(){
   const res = await jpost('/api/dispatch/user', {name:nName.value, username:nUser.value, password:nPass.value,
-    owner: document.getElementById('nOwner').checked});
+    owner: document.getElementById('nOwner').checked, developer: document.getElementById('nDev').checked});
   newMsg.textContent = res.ok ? ('Created ' + res.username + '.') : (res.error || 'Could not create that user.');
-  if(res.ok){ nName.value=''; nUser.value=''; nPass.value=''; document.getElementById('nOwner').checked=false; }
+  if(res.ok){ nName.value=''; nUser.value=''; nPass.value=''; document.getElementById('nOwner').checked=false; document.getElementById('nDev').checked=false; }
   loadUsers();
 }
 async function editUser(id, name, username){
@@ -102,7 +117,13 @@ async function setOwner(id, on){
   if(!res.ok) alert(res.error || 'Could not change that.');
   loadUsers();
 }
+async function setDevPerm(on){
+  const res = await jpost('/api/dispatch/dev-order-edit', {on:on});
+  document.getElementById('devPermMsg').textContent = res.ok ? (on ? 'Developers can change orders now.' : 'Developers can no longer change orders.') : (res.error || 'Could not change that.');
+  loadUsers();
+}
 let USERS = [];
+let DEVS = 0;
 fetch('/api/dispatch/users').then(r=>r.json()).then(r=>{ USERS = r.users || []; });
 function sEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 async function loadStaff(){

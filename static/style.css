@@ -614,3 +614,16 @@ button.rwopt{cursor:pointer}button.rwopt.sel{outline:4px solid #16a34a;outline-o
 .card{position:relative}
 .cardlogo{position:absolute;top:10px;left:10px;width:54px;height:54px;object-fit:contain;background:#fff;border-radius:10px;padding:3px;box-shadow:0 1px 4px rgba(0,0,0,.25)}
 .herologo{display:block;width:80px;height:80px;object-fit:contain;background:#fff;border-radius:12px;padding:4px;margin:0 0 8px;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+
+/* route preview (Overview) */
+.navsteps{position:absolute;left:0;right:0;bottom:0;max-height:50%;overflow-y:auto;-webkit-overflow-scrolling:touch;background:#fff;z-index:9400;border-radius:14px 14px 0 0;box-shadow:0 -4px 16px rgba(0,0,0,.18)}
+.navsteps.hidden{display:none}
+.navstepshead{position:sticky;top:0;background:#fff;display:flex;gap:10px;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #e5e7eb;z-index:1}
+.navstepshead .btn{min-height:44px;white-space:nowrap}
+.navstep{display:flex;width:100%;gap:12px;align-items:center;text-align:left;background:#fff;border:0;border-bottom:1px solid #f0f0f0;padding:12px 14px;font:inherit;font-size:15px;color:#111;cursor:pointer;min-height:52px}
+.navstep.cur{background:#e8f5ee}
+.navstep.picked{background:#e8f0fe}
+.navsteparrow{font-size:22px;min-width:28px;text-align:center;color:#0b6b3a}
+.navsteptxt{flex:1;min-width:0}
+.navstepdist{color:#555;white-space:nowrap;font-size:14px}
+.navstepmsg{padding:16px 14px;color:#555}

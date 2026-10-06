@@ -1,0 +1,18 @@
+{% extends "base.html" %}{% block title %}Invoices{% endblock %}{% block body %}
+<div class="panel">
+  <h1>Your invoices</h1>
+  <p class="muted">What {{ biz_name }} owes you for your food, and how each one was paid.</p>
+  <table class="tbl" style="width:100%">
+    <thead><tr><th>Invoice</th><th>Dates</th><th>Orders</th><th>Total</th><th>Status</th><th></th></tr></thead>
+    <tbody>
+    {% for v in invoices %}
+      <tr><td>{{ v.number }}</td><td>{{ v.period_start }} to {{ v.period_end }}</td><td>{{ v.order_count }}</td><td>{{ v.total }}</td>
+        <td>{% if v.status == 'paid' %}<span class="pill green">Paid{% if v.pay_method == 'check' %} by check #{{ v.check_number }}{% else %} by {{ v.method_label }}{% endif %} {{ v.paid_at }}</span>{% else %}<span class="pill amber">Not paid yet</span>{% endif %}</td>
+        <td><a class="btn small" href="/restaurant/invoices/{{ v.id }}">View</a></td></tr>
+    {% else %}
+      <tr><td colspan="6" class="muted">No invoices yet.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -1,6 +1,6 @@
 {% extends "base.html" %}{% block body %}
 <div class="head"><h1>Restaurant settings</h1><div><a class="btn small" href="/dispatch/regions">Regions</a>
-  {% if is_owner_view %}<a class="btn small" href="/dispatch/import-zuppler">Import from Zuppler</a>{% endif %}
+  {% if is_owner_view %}<a class="btn small" href="/dispatch/import-zuppler">Import from another site</a>{% endif %}
   <a class="btn small" href="/dispatch">Back to board</a></div></div>
 {% if saved %}<p class="good">Hours saved.</p>{% endif %}
 {% if request.args.get('deleted') %}<p class="good">Restaurant removed.</p>{% endif %}
