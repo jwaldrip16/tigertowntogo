@@ -44,6 +44,7 @@
 </div>
 {% endblock %}
 {% block scripts %}<script>
+let BRANCH_ACCTS = [];
 async function jpost(u, b){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},
   body: JSON.stringify(b)}); return r.json(); }
 async function jget(u){ const r = await fetch(u); return r.json(); }
@@ -108,6 +109,7 @@ async function load(){
       '<button class="btn tiny" onclick="addItem('+r.id+')">Add item</button></div></div>';
   }).join('');
 
+  BRANCH_ACCTS = res.branch_accounts || [];
   document.getElementById('drivers').innerHTML = res.drivers.map(d=>{
     const L = d.locked, dis = L ? ' disabled' : '';
     const lockRow = res.owner ? '' : (L
@@ -128,11 +130,16 @@ async function load(){
     '<input id="dk'+d.id+'" value="'+esc(d.pin)+'" placeholder="Password / PIN"'+dis+'>'+
     (L ? '' : '<button class="btn tiny" onclick="saveDriver('+d.id+')">Save</button>')+'</div>'+
     '<div class="row"><span class="muted small">Pay this driver by</span>'+
-    '<select id="dw'+d.id+'"'+dis+'><option value="paypal"'+(d.payout_wallet!=='venmo'&&d.payout_wallet!=='check'?' selected':'')+'>PayPal</option>'+
+    '<select id="dw'+d.id+'"'+dis+'><option value="paypal"'+(['venmo','check','branch'].indexOf(d.payout_wallet)<0?' selected':'')+'>PayPal</option>'+
     '<option value="venmo"'+(d.payout_wallet==='venmo'?' selected':'')+'>Venmo</option>'+
+    '<option value="branch"'+(d.payout_wallet==='branch'?' selected':'')+'>Branch</option>'+
     '<option value="check"'+(d.payout_wallet==='check'?' selected':'')+'>Check</option></select>'+
     '<input id="de'+d.id+'" value="'+esc(d.payout_email||'')+'" placeholder="PayPal email"'+dis+'>'+
-    '<input id="dv'+d.id+'" value="'+esc(d.payout_phone||'')+'" placeholder="Venmo phone (blank = driver phone)"'+dis+'></div>'+
+    '<input id="dv'+d.id+'" value="'+esc(d.payout_phone||'')+'" placeholder="Venmo phone (blank = driver phone)"'+dis+'>'+
+    '<input id="dbr'+d.id+'" value="'+esc(d.payout_branch_id||'')+'" placeholder="Branch worker ID" style="max-width:160px"'+dis+'>'+
+    (BRANCH_ACCTS.length ? '<select id="dba'+d.id+'" style="max-width:170px"'+dis+'><option value="0">Branch account: by brand</option>'+
+      BRANCH_ACCTS.map(a=>'<option value="'+a.id+'"'+(d.branch_account_id===a.id?' selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select>' : '')+
+    '<label class="small" style="display:flex;gap:4px;align-items:center;white-space:nowrap"><input type="checkbox" id="dap'+d.id+'" style="width:auto"'+(d.auto_pay?' checked':'')+dis+'> Auto pay</label></div>'+
     '<div class="row"><span class="muted small">Bank (for your records)</span>'+
     '<input id="dbn'+d.id+'" value="'+esc(d.bank_name||'')+'" placeholder="Bank name, like Regions" style="max-width:180px"'+dis+'>'+
     '<input id="dbl'+d.id+'" value="'+esc(d.bank_last4||'')+'" placeholder="Last 4 of account" maxlength="4" style="max-width:130px"'+dis+'>'+
@@ -226,6 +233,9 @@ async function saveDriver(id){
     payout_wallet:document.getElementById('dw'+id).value,
     payout_email:document.getElementById('de'+id).value,
     payout_phone:document.getElementById('dv'+id).value,
+    payout_branch_id:document.getElementById('dbr'+id).value,
+    branch_account_id:(document.getElementById('dba'+id)||{value:0}).value,
+    auto_pay:document.getElementById('dap'+id).checked?1:0,
     bank_name:document.getElementById('dbn'+id).value,
     bank_last4:document.getElementById('dbl'+id).value});
   if(!res.ok) alert(res.error); load();

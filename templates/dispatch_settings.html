@@ -139,16 +139,20 @@ async function setLogo(inp){
     <input type="time" name="any_end" value="{{ any_row.avail_end }}" style="max-width:130px">
   </div>
   <h2>Driver pay per trip</h2>
-  <div class="muted small">When you tap Pay driver on a delivered order, the amount starts at this and you can change it before sending. Money goes from your PayPal balance to the driver's PayPal or Venmo.</div>
+  <div class="muted small">When you tap Pay driver on a delivered order, the amount starts at this and you can change it before sending. Money goes from your PayPal balance to the driver's PayPal or Venmo, or from Branch to the driver's Branch wallet.</div>
   <label>Share of the delivery fee the driver gets (%)</label>
   <input name="driver_pay_fee_pct" type="number" min="0" max="100" value="{{ s['driver_pay_fee_pct'] if s['driver_pay_fee_pct'] is not none else 100 }}">
-  <label>Pay drivers automatically after delivery (1 on, 0 off)</label>
-  <input name="auto_driver_pay" value="{{ s['auto_driver_pay'] if s['auto_driver_pay'] is not none else 1 }}">
+  <label>Pay drivers automatically after delivery</label>
+  <select name="auto_driver_pay" style="max-width:220px">
+    <option value="1" {{ 'selected' if (s['auto_driver_pay'] if s['auto_driver_pay'] is not none else '1')|string == '1' else '' }}>On</option>
+    <option value="0" {{ 'selected' if (s['auto_driver_pay'] if s['auto_driver_pay'] is not none else '1')|string == '0' else '' }}>Off (pay every driver by hand)</option>
+  </select>
+  <div class="muted small">To stop auto pay for one driver only, uncheck Auto pay on that driver under Restaurants and drivers.</div>
   <label>Auto pay limit per trip ($). Trips over this wait for a dispatcher.</label>
   <input name="auto_pay_cap" inputmode="decimal" value="{{ '%.2f' % (((s['auto_pay_cap_cents'] or 2500)|int) / 100) }}">
   <label>Wait this many minutes after delivery before paying (0 to 1440), so late tips and fixes are included</label>
   <input name="auto_pay_delay_min" type="number" min="0" max="1440" value="{{ s['auto_pay_delay_min'] if s['auto_pay_delay_min'] is not none else 15 }}">
-  <div class="muted small">Auto pay sends the trip's suggested pay by PayPal or Venmo once the customer's payment is settled. Drivers paid by check, drivers with no PayPal email or Venmo phone on file, and failed payments are left for you on the order.</div>
+  <div class="muted small">Auto pay sends the trip's suggested pay by PayPal, Venmo or Branch once the customer's payment is settled. Drivers paid by check, drivers with auto pay off, drivers with nothing on file, and failed payments are left for you on the order.</div>
   <label>Share of the tip the driver gets (%)</label>
   <input name="driver_pay_tip_pct" type="number" min="0" max="100" value="{{ s['driver_pay_tip_pct'] if s['driver_pay_tip_pct'] is not none else 100 }}">
   <label>Flat amount added per trip ($)</label>
@@ -263,6 +267,37 @@ async function setLogo(inp){
   <p class="small muted">Switching between Sandbox and Live waits until no order has a PayPal hold from the other set of keys.</p>
   <button class="btn primary">Save PayPal keys</button>
 </form>
+<div class="panel narrow">
+  <h2>Branch accounts (driver pay)</h2>
+  {% for kind, msg in br_msgs %}<p style="color:{{ '#1e7e34' if kind == 'ok' else '#c0392b' }}">{{ msg }}</p>{% endfor %}
+  <p class="small muted">Add one Branch account for each company that pays its drivers through Branch. Branch gives each company an organization ID and an API key (sandbox first, live after testing). A driver set to Branch is paid from the account picked on that driver under Restaurants and drivers; with none picked, from the account linked to the order's brand, then an account for all brands. Only owners see this. API keys are hidden after saving; leave the box empty to keep the saved one.</p>
+  {% if not br %}<p class="small" style="color:#c0392b">No Branch accounts yet, so drivers set to Branch wait for you to pay them by hand.</p>{% endif %}
+  {% for a in br + [{'id': 0, 'name': '', 'mode': 'sandbox', 'org': '', 'site_id': 0, 'active': 1, 'has_key': False, 'tail': '', 'ready': False}] %}
+  <form method="post" autocomplete="off" style="border-top:1px solid #eee;padding-top:10px;margin-top:10px">
+    <input type="hidden" name="br_present" value="1"><input type="hidden" name="br_id" value="{{ a.id }}">
+    <h3 style="margin:4px 0">{% if a.id %}{{ a.name }} <span class="small" style="color:{{ '#1e7e34' if a.ready else '#c0392b' }}">{{ 'ready, ' ~ a.mode if a.ready else ('off' if not a.active else 'needs keys') }}</span>{% else %}Add a Branch account{% endif %}</h3>
+    <label>Company name</label>
+    <input name="br_name" value="{{ a.name }}" placeholder="Tiger Town To Go">
+    <label>Use</label>
+    <div style="display:flex;gap:16px;margin-bottom:6px">
+      <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="br_mode" value="sandbox" style="width:auto" {{ 'checked' if a.mode != 'live' else '' }}> Sandbox (test money)</label>
+      <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="br_mode" value="live" style="width:auto" {{ 'checked' if a.mode == 'live' else '' }}> Live (real money)</label>
+    </div>
+    <label>Organization ID</label>
+    <input name="br_org" value="{{ a.org }}" spellcheck="false" autocomplete="off">
+    <label>API key</label>
+    <input name="br_key" type="password" value="" spellcheck="false" autocomplete="new-password"
+           placeholder="{% if a.has_key %}Saved{% if a.tail %}, ends in {{ a.tail }}{% endif %}. Type a new one to replace it.{% else %}Not saved yet{% endif %}">
+    {% if br_sites %}<label>Pays drivers for orders from</label>
+    <select name="br_site"><option value="0">All brands</option>{% for st in br_sites %}<option value="{{ st.id }}" {{ 'selected' if a.site_id == st.id else '' }}>{{ st.name }}</option>{% endfor %}</select>{% endif %}
+    {% if a.id %}<label style="display:flex;gap:6px;align-items:center;margin-top:6px"><input type="hidden" name="br_active" value="0"><input type="checkbox" name="br_active" value="1" style="width:auto" {{ 'checked' if a.active else '' }}> Use this account</label>{% endif %}
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn primary" name="br_op" value="save">{{ 'Save' if a.id else 'Add account' }}</button>
+      {% if a.id %}<button class="btn danger" name="br_op" value="delete" onclick="return confirm('Remove the Branch account {{ a.name|e }}?')">Remove</button>{% endif %}
+    </div>
+  </form>
+  {% endfor %}
+</div>
 {% endif %}
 <div class="panel narrow">
   <h2>Purge old orders now</h2>
