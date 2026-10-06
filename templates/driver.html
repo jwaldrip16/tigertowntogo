@@ -209,8 +209,8 @@ function drawLate(list, mode){
   if (!list.length){ bar.classList.add('hidden'); bar.innerHTML = ''; return; }
   bar.innerHTML = '<b>Not accepted yet</b>' + list.map(function(x){
     const msg = mode === 'rest'
-      ? 'Order ' + x.code + ' is waiting for you to accept (' + x.minutes + ' min)'
-      : 'Tap Received on order ' + x.code + ' (' + x.minutes + ' min)';
+      ? 'Order ' + ordMain(x) + ' is waiting for you to accept (' + x.minutes + ' min)'
+      : 'Tap Received on order ' + ordMain(x) + ' (' + x.minutes + ' min)';
     return '<div class="lateline' + (x.loud ? ' loud' : '') + '">' + msg + '</div>';
   }).join('');
   bar.classList.remove('hidden');
@@ -527,7 +527,7 @@ function newOrderAlert(stack){
     const key = top ? top.code + '|' + (top.paged_at || '') : '';
     if (top && key !== NOTIFIED){
       NOTIFIED = key;
-      try { ffNotify.show('New order ' + top.code,
+      try { ffNotify.show('New order ' + ordMain(top),
             (top.restaurant || '') + ' to ' + (top.address || ''), 'order'); } catch(e){}
     }
     // Chimes every 5 seconds until the order is accepted. Sound can't be switched off while one is waiting.

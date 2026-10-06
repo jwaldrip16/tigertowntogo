@@ -710,7 +710,7 @@ function redoDialog(id){
   if(!o){ window.location = '/dispatch/new-order?from='+id+'&redo=1'; return; }
   let box = document.getElementById('redoBox');
   if(!box){ box = document.createElement('div'); box.id = 'redoBox'; box.className = 'modalback'; document.body.appendChild(box); }
-  box.innerHTML = '<div class="modal panel"><h2>New order from '+o.code+'</h2>'+
+  box.innerHTML = '<div class="modal panel"><h2>New order from '+ordBoth(o)+'</h2>'+
     '<label>Why is this going out again?</label><select id="redoWhy"><option value="">Pick a reason</option>'+
     REDO_REASONS.map(r=>'<option value="'+r[0]+'">'+r[1]+'</option>').join('')+'</select>'+
     '<input id="redoNote" placeholder="Detail, e.g. no side salad in the bag">'+
@@ -1330,7 +1330,7 @@ function orderCard(o, opts, drivers){
   const q = o.queue_position ? '<span class="pill blue">Queue #'+o.queue_position+'</span>' : '';
   const hold = o.hold_reason ? '<span class="pill grey">'+o.hold_reason+'</span>' : '';
   return '<div class="order'+(o.kitchen_status==='pending' && o.manual_state!=='ordering' && !['delivered','cancelled'].includes(o.dispatch_status)?' pendingflash':'')+'" draggable="true" ondragstart="dragOrder(event,'+o.id+')" '+
-    'ondragend="dragEnd()"><div class="order-head"><span class="grip">&#8942;&#8942;</span><strong>'+o.code+'</strong> '+
+    'ondragend="dragEnd()"><div class="order-head"><span class="grip">&#8942;&#8942;</span><strong>'+ordMain(o)+'</strong>'+(ordSub(o) ? ' <span class="muted small">'+ordSub(o)+'</span>' : '')+' '+
     refPill(o)+tokenPill(o)+
     ((o.dispatch_status==='awaiting_payment' || o.kitchen_status==='waiting')
       ? '<span class="pill amber">'+(o.uses_app?'not sent to kitchen':'not released yet')+'</span> <span class="pill blue">waiting on payment</span> '
@@ -1703,7 +1703,7 @@ async function loadFuture(){
   box.innerHTML = head + (res.orders.map(function(o){
     let items = '';
     try { items = (o.items||[]).map(function(i){ return (i.qty||1)+' x '+i.name; }).join(', '); } catch(e) {}
-    return '<div class="order"><div class="order-head"><b>'+o.scheduled_label+'</b> &middot; '+o.code+
+    return '<div class="order"><div class="order-head"><b>'+o.scheduled_label+'</b> &middot; '+ordBoth(o)+
       ' <span class="pill amber">Future</span>'+
       (o.kitchen_closed ? ' <span class="pill red">Kitchen closed, sends when they open</span>' : '')+'</div>'+
       '<div>'+o.restaurant+' to <b>'+o.customer+'</b> '+(o.phone||'')+'</div>'+
