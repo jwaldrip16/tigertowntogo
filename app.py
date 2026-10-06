@@ -14113,6 +14113,53 @@ def api_dispatch_customer_lookup():
     me.pop("cards", None)
     return jsonify({"ok": True, "found": True, "customer": me})
 
+@app.get("/api/dispatch/customer-search")
+def api_dispatch_customer_search():
+    """Type-ahead for the new-order form: customers on the list plus anyone who has ordered before."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    q = (request.args.get("q") or "").strip()[:80]
+    dq = phone_digits(q)
+    if len(q) < 2 and len(dq) < 3:
+        return jsonify({"ok": True, "results": []})
+    out, seen = [], set()
+    like = "%" + q + "%"
+    rows = db().execute("""SELECT * FROM customers WHERE name LIKE ? OR (? != '' AND phone LIKE ?) OR address LIKE ?
+                           ORDER BY name LIMIT 15""", (like, dq if len(dq) >= 3 else "", "%" + dq + "%", like)).fetchall()
+    for c in rows:
+        ph = phone_digits(c["phone"])
+        if not ph or ph in seen:
+            continue
+        seen.add(ph)
+        last = next((o for o in db().execute("SELECT address, address_note, customer_phone, created_at FROM orders "
+                                          "WHERE customer_phone LIKE ? ORDER BY id DESC LIMIT 20", ("%" + ph[-4:],)).fetchall()
+                  if phone_digits(o["customer_phone"]) == ph), None)
+        out.append({"name": c["name"] or "", "phone": nice_phone(ph), "phone_digits": ph,
+                    "address": (c["address"] or (last["address"] if last else "") or ""),
+                    "note": (last["address_note"] if last else "") or "",
+                    "existing": bool(c["verified"]) or not customer_is_new(ph), "on_list": True,
+                    "last_order": ((last["created_at"] or "")[:10] if last else "")})
+    if len(out) < 10:
+        orows = db().execute("""SELECT customer_name, customer_phone, address, address_note, created_at FROM orders
+                                WHERE customer_name LIKE ? OR (? != '' AND customer_phone LIKE ?) OR address LIKE ?
+                                ORDER BY id DESC LIMIT 300""",
+                             (like, dq if len(dq) >= 3 else "", "%" + dq + "%", like)).fetchall()
+        for o in orows:
+            ph = phone_digits(o["customer_phone"])
+            if not ph or ph in seen:
+                continue
+            if len(dq) >= 3 and dq not in ph and q.lower() not in (o["customer_name"] or "").lower() \
+                    and q.lower() not in (o["address"] or "").lower():
+                continue
+            seen.add(ph)
+            out.append({"name": o["customer_name"] or "", "phone": nice_phone(ph), "phone_digits": ph,
+                        "address": o["address"] or "", "note": o["address_note"] or "",
+                        "existing": not customer_is_new(ph), "on_list": False,
+                        "last_order": (o["created_at"] or "")[:10]})
+            if len(out) >= 10:
+                break
+    return jsonify({"ok": True, "results": out[:10]})
+
 @app.post("/api/dispatch/confirm-call")
 def api_dispatch_confirm_call():
     """The customer called in to confirm their online order: mark it confirmed (Send to kitchen still releases it)."""

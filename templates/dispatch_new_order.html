@@ -1,4 +1,13 @@
 {% extends "base.html" %}{% block body %}
+<style>
+.custres{position:absolute;left:0;right:0;top:100%;z-index:50;background:#fff;border:1px solid #d0d5dd;border-radius:10px;box-shadow:0 8px 24px rgba(16,24,40,.12);max-height:320px;overflow:auto;margin-top:-4px}
+.custres .cr{padding:9px 12px;cursor:pointer;border-bottom:1px solid #f2f4f7;line-height:1.35}
+.custres .cr:last-child{border-bottom:0}
+.custres .cr:hover,.custres .cr.on{background:#f2f4f7}
+.custres .cr .sub{color:#667085;font-size:13px}
+.custres .none{padding:10px 12px;color:#667085;font-size:14px}
+</style>
+
 <a class="back" href="/dispatch">Back to board</a>
 <h1>{% if src %}New order from {{ src['code'] }}{% else %}Create an order{% endif %}</h1>
 {% for m in get_flashed_messages() %}<div class="panel" style="border-left:4px solid #b42318;color:#b42318">{{ m }}</div>{% endfor %}
@@ -64,6 +73,10 @@
     <div class="muted small">A card order waits until the card goes through, then goes where you picked. You type the card right after you place the order.</div>
     {% endif %}
     <h3>Customer</h3>
+    <div class="custfind" style="position:relative">
+      <input id="custSearch" type="search" autocomplete="off" placeholder="&#128269; Find an existing customer: name, phone or address" oninput="custSearchType()" onkeydown="custSearchKey(event)">
+      <div id="custResults" class="custres hidden"></div>
+    </div>
     <input id="ref" placeholder="Their order number (optional)">
     <input id="name" placeholder="Customer name">
     <input id="phone" placeholder="Phone" onchange="rewardsLookup()">
@@ -428,4 +441,47 @@ async function rewardsLookup(){
   box.innerHTML = h;
   if(!document.getElementById('name').value) document.getElementById('name').value = c.name;
 }
+
+let CS_T = null, CS_LIST = [], CS_ON = -1;
+function csEsc(s){ return String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function custSearchType(){
+  clearTimeout(CS_T);
+  const q = document.getElementById('custSearch').value.trim();
+  const box = document.getElementById('custResults');
+  if(q.length < 2){ box.classList.add('hidden'); box.innerHTML=''; CS_LIST=[]; return; }
+  CS_T = setTimeout(async () => {
+    const r = await jget('/api/dispatch/customer-search?q='+encodeURIComponent(q));
+    if(document.getElementById('custSearch').value.trim() !== q) return;
+    CS_LIST = (r && r.results) || []; CS_ON = -1;
+    box.innerHTML = CS_LIST.length ? CS_LIST.map((c,i) =>
+      '<div class="cr" onmousedown="custPick('+i+');return false;"><b>'+csEsc(c.name||'(no name)')+'</b> &middot; '+csEsc(c.phone)+
+      (c.existing ? ' <span class="pill green">Existing</span>' : '')+
+      '<div class="sub">'+csEsc(c.address||'No address on file')+(c.last_order ? ' &middot; last order '+csEsc(c.last_order) : '')+'</div></div>').join('')
+      : '<div class="none">No customer found. Type their details below for a new customer.</div>';
+    box.classList.remove('hidden');
+  }, 250);
+}
+function custSearchKey(e){
+  const box = document.getElementById('custResults');
+  if(box.classList.contains('hidden') || !CS_LIST.length){ if(e.key==='Escape') box.classList.add('hidden'); return; }
+  if(e.key==='ArrowDown' || e.key==='ArrowUp'){
+    e.preventDefault();
+    CS_ON = (CS_ON + (e.key==='ArrowDown'?1:-1) + CS_LIST.length) % CS_LIST.length;
+    box.querySelectorAll('.cr').forEach((d,i)=>d.classList.toggle('on', i===CS_ON));
+  } else if(e.key==='Enter'){ e.preventDefault(); custPick(CS_ON >= 0 ? CS_ON : 0); }
+  else if(e.key==='Escape'){ box.classList.add('hidden'); }
+}
+function custPick(i){
+  const c = CS_LIST[i]; if(!c) return;
+  document.getElementById('name').value = c.name || '';
+  document.getElementById('phone').value = c.phone || c.phone_digits || '';
+  if(c.address) document.getElementById('address').value = c.address;
+  if(c.note && !document.getElementById('note').value) document.getElementById('note').value = c.note;
+  if(c.on_list) document.getElementById('saveCust').checked = false;
+  document.getElementById('custResults').classList.add('hidden');
+  document.getElementById('custSearch').value = '';
+  try{ rewardsLookup(); }catch(e){}
+  if(c.address){ try{ validate(); }catch(e){} }
+}
+document.addEventListener('click', e => { if(!e.target.closest || !e.target.closest('.custfind')) document.getElementById('custResults').classList.add('hidden'); });
 </script>{% endblock %}
