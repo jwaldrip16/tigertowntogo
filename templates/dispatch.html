@@ -142,6 +142,11 @@
 {% block scripts %}
 <script src="/static/itempick.js"></script><script src="/static/cardbox.js"></script><script src="/static/ppcard.js"></script>
 <script>
+const ORDSHOW = "{{ ordshow('dispatch') }}";
+function ordMain(o){ return (ORDSHOW !== 'secondary' && o && o.primary_no) ? o.primary_no : (o ? o.code : ''); }
+function ordSub(o){ return (ORDSHOW === 'both' && o && o.primary_no) ? o.code : ''; }
+function ordBoth(o){ const s = ordSub(o); return ordMain(o) + (s ? ' (' + s + ')' : ''); }
+
 function siteTag(o){ return o && o.site_name ? '<span class="pill" title="Answer the phone as '+String(o.site_name).replace(/[&<>"']/g,'')+(o.site_phone?' ('+o.site_phone+')':'')+'">'+(o.site_logo&&/^\/[\w\/.\-]+$/.test(o.site_logo)?'<img src="'+o.site_logo+'" alt="" style="height:16px;width:16px;object-fit:contain;vertical-align:-3px;margin-right:4px;border-radius:3px">':'')+String(o.site_name).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))+'</span> ' : ''; }
 let DRAGGED = null;
 let SEEN_PENDING = null;
@@ -361,7 +366,7 @@ async function editOrder(oid){
   box.className = 'modalback'; box.id = 'edModal';
   box.innerHTML = '<div class="itemmodal edmodal" role="dialog" aria-label="Edit order">'+
     '<button type="button" class="imclose" onclick="edClose()" aria-label="Close">&times;</button>'+
-    '<h2>Edit '+edEsc(res.primary_no ? res.primary_no+' ('+res.code+')' : res.code)+' <span class="muted small">'+edEsc(res.restaurant)+'</span></h2>'+
+    '<h2>Edit '+edEsc(ordBoth(res))+' <span class="muted small">'+edEsc(res.restaurant)+'</span></h2>'+
     '<details class="edcust" open><summary>Customer</summary>'+
       '<div class="edrow"><label>Name <input id="edCName" maxlength="80" value="'+edEsc(res.customer_name)+'"></label>'+
       '<label>Phone <input id="edCPhone" type="tel" maxlength="20" value="'+edEsc(res.customer_phone)+'"></label></div>'+
@@ -777,7 +782,7 @@ async function checkPay(id){
 function renderCompleted(res){
   try {
   document.getElementById('completed').innerHTML = (res.completed||[]).map(o=>
-    '<div class="order"><div class="order-head"><strong>'+(o.primary_no ? esc(o.primary_no)+'</strong> <span class="muted small">'+o.code+'</span>' : o.code+'</strong>')+' '+refPill(o)+tokenPill(o)+'<span class="pill '+
+    '<div class="order"><div class="order-head"><strong>'+esc(ordMain(o))+'</strong>'+(ordSub(o) ? ' <span class="muted small">'+esc(ordSub(o))+'</span>' : '')+' '+refPill(o)+tokenPill(o)+'<span class="pill '+
     (o.dispatch_status==='delivered'?'green':'grey')+'">'+o.dispatch_status+'</span> '+
     '<span class="muted small">'+(o.delivered_time || (o.delivered_at||'').replace('T',' '))+'</span></div>'+
     '<div class="muted small">'+siteTag(o)+o.restaurant+' &rarr; '+o.customer+' &middot; '+o.address+
@@ -804,7 +809,7 @@ function renderCompleted(res){
       (o.issue_note?' - '+o.issue_note:'')+'</div>' : '')+'</div></div>').join('') ||
     '<p class="muted">Nothing completed yet.</p>';
   } catch(e){ console.error('completed list', e);
-    document.getElementById('completed').innerHTML = (res.completed||[]).map(o=>'<div class="order"><strong>'+(o.primary_no ? esc(o.primary_no)+' </strong><span class="muted small">'+o.code+'</span>' : o.code+'</strong>')+' '+o.dispatch_status+'</div>').join('') || '<p class="muted">Nothing completed yet.</p>'; }
+    document.getElementById('completed').innerHTML = (res.completed||[]).map(o=>'<div class="order"><strong>'+esc(ordMain(o))+'</strong>'+(ordSub(o) ? ' <span class="muted small">'+esc(ordSub(o))+'</span>' : '')+' '+o.dispatch_status+'</div>').join('') || '<p class="muted">Nothing completed yet.</p>'; }
 }
 let SHOW_ALL_REGIONS = false;
 let RGQ_OPEN = {};
@@ -834,7 +839,7 @@ function drawRegionQueues(res){
       let body = '';
       if (RGQ_OPEN[q.id]){
         body = '<div class="small" style="margin:4px 0 8px 10px">' +
-          ((q.orders||[]).map(o => '<div class="row" style="gap:6px;align-items:center;margin:2px 0">#' + o.pos + ' ' + esc(o.primary_no || o.code) + ' ' + esc(o.restaurant) + ' (' + o.minutes + ' min' +
+          ((q.orders||[]).map(o => '<div class="row" style="gap:6px;align-items:center;margin:2px 0">#' + o.pos + ' ' + esc(ordMain(o)) + ' ' + esc(o.restaurant) + ' (' + o.minutes + ' min' +
              (o.reason ? ', ' + esc(o.reason) : '') + ')' +
              ((q.driver_choices||[]).length
                ? ' <select class="tiny" id="rgs' + o.id + '"><option value="">Send to driver...</option>' +
@@ -925,7 +930,7 @@ async function findAny(){
   const r = await jget('/api/dispatch/find-order?q=' + encodeURIComponent(q));
   if (!r.ok){ out.innerHTML = '<p class="muted small">Search did not work. Try again.</p>'; return; }
   out.innerHTML = (r.results.length ? r.results.map(o=>
-    '<div class="findres'+(o.mine?'':' other')+'"><div class="row between"><span><strong>'+fEsc(o.primary_no ? o.primary_no+' ('+o.code+')' : o.code)+'</strong> '+
+    '<div class="findres'+(o.mine?'':' other')+'"><div class="row between"><span><strong>'+fEsc(ordBoth(o))+'</strong> '+
     fEsc(o.customer)+' &middot; '+fEsc(o.restaurant)+' <span class="pill blue">'+fEsc(o.region)+'</span> '+siteTag(o)+
     (o.web?' <span class="pill green">Web</span>':'')+
     (o.mine?'':' <span class="pill amber">outside your regions</span>')+'</span>'+

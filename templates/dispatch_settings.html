@@ -261,6 +261,12 @@ async function setLogo(inp){
   <label>{{ b.name }} <input name="{{ b.field }}" value="{{ b.value }}" placeholder="{{ b.default }}" maxlength="6" style="width:90px;text-transform:uppercase">
     <span class="muted small">first order looks like {{ b.example }}</span></label>
   {% endfor %}
+  <h3>Which number each screen shows</h3>
+  {% for scr, lab in [('dispatch','Dispatch portal'),('rest','Restaurant app'),('driver','Driver app')] %}
+  <label>{{ lab }}
+    <select name="ordshow_{{ scr }}">{% for k, v in ON.show_choices.items() %}<option value="{{ k }}" {% if ON.show[scr] == k %}selected{% endif %}>{{ v }}</option>{% endfor %}</select></label>
+  {% endfor %}
+  <p class="small muted">Customers always see both numbers on their tracking page. Orders with no restaurant number show the system number.</p>
   <h3>System number (secondary)</h3>
   <label>Letters <input name="secondary_prefix" value="{{ ON.sec_prefix }}" maxlength="6" style="width:90px;text-transform:uppercase"></label>
   <label>Format

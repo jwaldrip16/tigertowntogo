@@ -15,6 +15,11 @@
 <script src="/static/drivernav.js"></script>
 
 <script>
+const ORDSHOW = "{{ ordshow('driver') }}";
+function ordMain(o){ return (ORDSHOW !== 'secondary' && o && o.primary_no) ? o.primary_no : (o ? o.code : ''); }
+function ordSub(o){ return (ORDSHOW === 'both' && o && o.primary_no) ? o.code : ''; }
+function ordBoth(o){ const s = ordSub(o); return ordMain(o) + (s ? ' (' + s + ')' : ''); }
+
 function brandLine(o){
   if (!o || !o.site_name) return '';
   var n = String(o.site_name).replace(/[&<>"']/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]; });
@@ -311,7 +316,7 @@ function renderDone(list){
   document.getElementById('cntDone').textContent = list.length ? '(' + list.length + ')' : '';
   document.getElementById('doneList').innerHTML = list.length ? list.map(function(o){
     const ph = (o.phone||'').replace(/[^0-9]/g,'');
-    return '<div class="panel slim"><div class="row between"><div><strong>' + (o.primary_no || o.code) + '</strong> ' + (o.primary_no ? '<span class="muted small">' + o.code + '</span> ' : '') +
+    return '<div class="panel slim"><div class="row between"><div><strong>' + ordMain(o) + '</strong> ' + (ordSub(o) ? '<span class="muted small">' + ordSub(o) + '</span> ' : '') +
       '<span class="pill ' + (o.dispatch_status === 'delivered' ? 'green' : 'grey') + '">' + o.dispatch_status + '</span></div>' +
       '<span class="muted small">' + (o.delivered_time || (o.delivered_at || '').slice(11, 16)) + '</span></div>' +
       '<div class="paybar">Delivery fee <b>' + o.fee + '</b> &middot; Tip <b>' + o.tip + '</b>' + (o.cash ? ' &middot; cash' : '') + '</div>' +
@@ -429,7 +434,7 @@ function renderRun(stack, total){
   LAST_STACK = stack;
   document.getElementById('stack').innerHTML = stack.map((o,ix)=>
     '<div class="order"><div class="order-head"><strong>Stop '+(ix+1)+' of '+total+
-    ' &middot; '+(o.primary_no ? o.primary_no+'</strong> <span class="muted small">'+o.code+'</span> ' : o.code+'</strong> ')+
+    ' &middot; '+ordMain(o)+'</strong> '+(ordSub(o) ? '<span class="muted small">'+ordSub(o)+'</span> ' : '')+
     (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+
     (o.token ? '<span class="pill blue">'+o.token+'</span> ' : '')+
     '<span class="pill '+(o.kitchen_status==='ready'?'green':'amber')+'">'+kitchenLabel(o)+'</span> '+
@@ -574,7 +579,7 @@ async function stage(id, st, code){
 }
 function openTip(o){
   TIP_ORDER = o;
-  document.getElementById('tipCode').textContent = o.primary_no ? o.primary_no + ' (' + o.code + ')' : o.code;
+  document.getElementById('tipCode').textContent = ordBoth(o);
   document.getElementById('tipTotal').textContent = o.total;
   document.getElementById('tipAmt').value = '';
   document.getElementById('tipMsg').textContent = '';

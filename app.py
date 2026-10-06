@@ -2736,6 +2736,42 @@ def assign_primary(order_id):
     return no
 
 
+_BACKFILL_AT = [0.0]
+def backfill_primary(force=False):
+    """Orders placed before restaurant numbers were turned on (or whose number was skipped)
+    get one now, oldest first, so every open order shows its TT/CTG/BF number."""
+    if not primary_on():
+        return 0
+    if not force and time.time() - _BACKFILL_AT[0] < 20:
+        return 0
+    _BACKFILL_AT[0] = time.time()
+    since = (dt.datetime.now() - dt.timedelta(days=3)).isoformat(timespec="seconds")
+    n = 0
+    try:
+        rows = db().execute("""SELECT id FROM orders WHERE (primary_no IS NULL OR primary_no='')
+                               AND (dispatch_status NOT IN ('delivered','cancelled') OR created_at>=?)
+                               AND created_at>=? ORDER BY id LIMIT 200""",
+                            (dt.datetime.now().strftime("%Y-%m-%d"), since)).fetchall()
+        for r in rows:
+            if assign_primary(r["id"]):
+                n += 1
+        if n:
+            db().commit()
+    except Exception as e:
+        print("backfill restaurant numbers:", e)
+    return n
+
+
+ORDSHOW_CHOICES = {"both": "Restaurant number first, system number small next to it",
+                   "primary": "Restaurant number only (TT1)",
+                   "secondary": "System number only (FF number)"}
+
+def ordshow(screen):
+    """Which order number a screen shows: dispatch, rest (restaurant app) or driver."""
+    v = _ordset("ordshow_" + screen, "both")
+    return v if v in ORDSHOW_CHOICES else "both"
+
+
 def make_order_code():
     """Secondary (system) order number, unique across every order. Format from Settings > Order numbers."""
     prefix = clean_prefix(_ordset("secondary_prefix", "FF")) or "FF"
@@ -5601,6 +5637,7 @@ def api_driver_extra():
 
 @app.get("/api/dispatch/board")
 def api_board():
+    backfill_primary()
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     auto_assign()   # safety net: anything an earlier event missed is placed on the next refresh
@@ -6445,6 +6482,8 @@ def ordnum_view():
             "reset": _ordset("primary_reset", "never"), "sec_prefix": _ordset("secondary_prefix", "FF"),
             "sec_style": _ordset("secondary_style", "time"), "sec_digits": _ordset("secondary_digits", "6"),
             "styles": PRIMARY_STYLES, "sec_styles": SECONDARY_STYLES,
+            "show_choices": ORDSHOW_CHOICES,
+            "show": {"dispatch": ordshow("dispatch"), "rest": ordshow("rest"), "driver": ordshow("driver")},
             "brands": [{"field": "primary_prefix_main", "name": main + " (main business)",
                         "value": _ordset("primary_prefix_main", ""), "default": default_prefix(main),
                         "example": format_primary(brand_prefix(None, main), 1)}] +
@@ -6456,6 +6495,7 @@ def ordnum_view():
 
 
 app.jinja_env.globals["ordnum_view"] = ordnum_view
+app.jinja_env.globals["ordshow"] = ordshow
 
 
 def autokitchen_view():
@@ -9619,6 +9659,9 @@ def dispatch_settings():
                     "secondary_style": f.get("secondary_style") if f.get("secondary_style") in SECONDARY_STYLES else "time",
                     "secondary_digits": str(max(3, min(10, int(f.get("secondary_digits") or 6)))) if (f.get("secondary_digits") or "6").isdigit() else "6",
                     "primary_prefix_main": clean_prefix(f.get("primary_prefix_main"))}
+            for _scr in ("dispatch", "rest", "driver"):
+                _v = f.get("ordshow_" + _scr)
+                vals["ordshow_" + _scr] = _v if _v in ORDSHOW_CHOICES else "both"
             for x in db().execute("SELECT id FROM sites").fetchall():
                 vals["primary_prefix_%d" % x["id"]] = clean_prefix(f.get("primary_prefix_%d" % x["id"]))
             for k, v in vals.items():
@@ -10261,6 +10304,7 @@ def api_driver_route():
 
 @app.get("/api/driver/state")
 def api_driver_state():
+    backfill_primary()
     remind_unreceived()
     short_staff_alert()
     try:
@@ -10530,6 +10574,7 @@ def rest_home():
 
 @app.get("/api/restaurant/orders")
 def api_rest_orders():
+    backfill_primary()
     rid = session.get("restaurant_id")
     if not rid:
         return jsonify({"ok": False}), 403
