@@ -11990,6 +11990,17 @@ def brand_fill(con, sid, data, parts, picks=None):
     return done, failed
 
 
+def _is_this_app(site):
+    """True when a brand's web address already points at this app (so there's no old site to read)."""
+    try:
+        u = site if "://" in site else "https://" + site
+        req = urllib.request.Request(u, headers={"User-Agent": "Mozilla/5.0"})
+        page = urllib.request.urlopen(req, timeout=15).read(200000).decode("utf-8", "ignore")
+        return 'content="Fleet Foot Delivery app"' in page
+    except Exception:
+        return False
+
+
 @app.route("/dispatch/import-website", methods=["GET", "POST"])
 def dispatch_import_website():
     me = session.get("dispatcher_id")
@@ -12008,8 +12019,10 @@ def dispatch_import_website():
         site = (request.form.get("site") or "").strip()
         _own = _norm_host(re.sub(r"^[a-z]+://", "", site.lower()).split("/")[0].split("?")[0])
         _mine = {_norm_host(request.host)}
-        for _srow in db().execute("SELECT * FROM sites").fetchall():
-            _mine.update(site_domains(_srow))
+        if _own and _own not in _mine:
+            for _srow in db().execute("SELECT * FROM sites").fetchall():
+                if _own in site_domains(_srow) and _is_this_app(site):
+                    _mine.add(_own)
         if not site:
             result = {"ok": False, "error": "Type the website address."}
         elif _own in _mine:
@@ -13812,32 +13825,58 @@ def faq_region_list():
         pass
     return out
 
-def faq_region_id():
-    """The region whose FAQ the customer sees: the area they picked, else the first region
-    with its own FAQ on this brand's website. 0 = the business FAQ."""
+def faq_target():
+    """(region id, brand site) whose FAQ the customer sees. The region must belong to the brand
+    of this web address; a picked brand with no area uses that brand. (0, None) = the business FAQ."""
+    rid, site = 0, None
     try:
+        hs = host_site()
         pick = request.args.get("region")
         if pick is None:
             pick = session.get("cust_region") or ""
         if str(pick).isdigit() and _region(int(pick)) is not None:
-            return int(pick)
-        s = current_site()
-        if s is not None:
-            for rid in sorted(site_region_ids(s["id"])):
-                reg = _region(rid)
+            rid = int(pick)
+        if hs is not None:
+            site = hs
+            if rid and rid not in site_region_ids(hs["id"]):
+                rid = 0   # an area from another brand: don't show its questions here
+        elif rid:
+            site = site_of_region(rid)
+        elif brands_on():
+            b = request.args.get("brand")
+            if b is None:
+                b = session.get("cust_brand") or ""
+            if str(b).isdigit():
+                site = site_by_id(int(b))
+        if not rid and site is not None:
+            for r2 in sorted(site_region_ids(site["id"])):
+                reg = _region(r2)
                 if reg is not None and (_rv(reg, "faq_text") or "").strip():
-                    return rid
+                    rid = r2
+                    break
     except Exception:
-        pass
-    return 0
+        return 0, None
+    return rid, site
 
-def faq_items(region_id=None):
+def faq_region_id():
+    return faq_target()[0]
+
+def faq_items(region_id=None, site=None):
     reg = _region(region_id) if region_id else None
+    if site is None and region_id:
+        site = site_of_region(region_id)
+    d = site_design(site) if site is not None else {}
+    def _biz(key):
+        row = db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return (row["value"] if row else "") or ""
     raw = ((_rv(reg, "faq_text") or "").strip() if reg is not None else "") \
-        or (setting("faq_text", str) or "").strip() or DEFAULT_FAQ
-    ph = ((_rv(reg, "phone") or "") if reg is not None else "") or dispatch_phone()
-    rep_ = {"{business}": (setting("business_name", str) or "Fleet Foot Delivery").strip(), "{phone}": nice_phone(ph) or "dispatch",
-            "{email}": (setting("business_email", str) or "").strip(), "{address}": (setting("business_address", str) or "").strip()}
+        or str(d.get("faq_text") or "").strip() or _biz("faq_text").strip() or DEFAULT_FAQ
+    ph = ((_rv(reg, "phone") or "") if reg is not None else "") \
+        or ((site["phone"] or "") if site is not None else "") or dispatch_phone()
+    name = ((site["name"] or "") if site is not None else "").strip() or _biz("business_name").strip() or "Fleet Foot Delivery"
+    rep_ = {"{business}": name, "{phone}": nice_phone(ph) or "dispatch",
+            "{email}": str(d.get("business_email") or "").strip() or _biz("business_email").strip(),
+            "{address}": str(d.get("business_address") or "").strip() or _biz("business_address").strip()}
     items, q, a = [], None, []
     for line in raw.splitlines() + ["Q:"]:
         t = line.strip()
@@ -13856,7 +13895,10 @@ def faq_items(region_id=None):
 
 @app.route("/faq")
 def faq_page():
-    return render_template("faq.html", faqs=faq_items(faq_region_id()))
+    rid, site = faq_target()
+    if site is not None:
+        g._site_forced = site   # the page's logo, name, phone and address match that brand
+    return render_template("faq.html", faqs=faq_items(rid, site))
 
 @app.post("/api/home-search")
 def api_home_search():
