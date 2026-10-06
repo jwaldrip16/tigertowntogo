@@ -1396,16 +1396,17 @@ def dev_guard():
 
 
 # --- pause switch for non-payment ------------------------------------------
-# Set SERVICE_SUSPENDED=1 in Railway to pause this copy of the platform. Customers,
-# drivers, dispatchers and kitchens see a "paused" page; a signed-in developer keeps
-# full access. Nothing is deleted. Remove the variable (or set it to 0) to turn it back on.
+# SERVICE_SUSPENDED in Railway: 1 = site runs normally, 2 = site is blocked (paused).
+# When blocked, customers, drivers, dispatchers and kitchens see a "paused" page; a
+# signed-in developer keeps full access. Nothing is deleted. Any value other than 2
+# (including a missing variable) keeps the site running.
 # Optional SUSPEND_MESSAGE replaces the wording on the paused page.
 SUSPEND_OPEN_PREFIXES = ("/static/", "/brand/", "/media/", "/uploads/", "/.well-known/", "/manifest/")
 SUSPEND_OPEN_PATHS = {"/dispatch/login", "/dispatch/logout", "/favicon.ico", "/robots.txt", "/sw.js"}
 
 
 def service_suspended():
-    return (os.environ.get("SERVICE_SUSPENDED") or "").strip().lower() in ("1", "true", "yes", "on")
+    return (os.environ.get("SERVICE_SUSPENDED") or "").strip() == "2"
 
 
 def suspend_guard():
