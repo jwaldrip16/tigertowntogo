@@ -11581,7 +11581,15 @@ def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_
         return {"ok": False, "error": "Find the restaurants on an ordering website first."}
     con = db()
     have = {}
+    try:
+        region_id = int(region_id) if region_id else None
+    except (TypeError, ValueError):
+        region_id = None
     for r in con.execute("SELECT * FROM restaurants").fetchall():
+        if region_id and (r["region_id"] or 0) not in (0, region_id):
+            # a restaurant with the same name in another region (a chain like Cheba Hut in Athens and
+            # Tuscaloosa) is a different store: never update or move it
+            continue
         have[_norm_name(r["name"])] = r
         if r["zup_id"]:
             have["z" + str(r["zup_id"])] = r
