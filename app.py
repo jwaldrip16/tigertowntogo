@@ -910,6 +910,8 @@ def host_site():
             pv = request.args.get("site")
             if pv is not None and pv.isdigit():
                 session["site_preview"] = int(pv)
+            elif pv is not None or request.args.get("brand") is not None:
+                session.pop("site_preview", None)   # ?site=0 or a brand pick ends a preview
             host = _norm_host(request.host)
             for row in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
                 if host in site_domains(row):
@@ -2708,7 +2710,10 @@ def order_dict(o):
 @app.route("/")
 def home():
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
+    rs_all = rs
     _site = host_site()
+    # is this web address itself a brand's own address (not just a Preview in this browser)?
+    _own_addr = _site is not None and _norm_host(request.host) in site_domains(_site)
     if _site is not None:
         _sreg = site_region_ids(_site["id"])
         rs = [r for r in rs if r["region_id"] and r["region_id"] in _sreg]
@@ -2720,9 +2725,10 @@ def home():
                for g in all_regions() if g["id"] in used]
     # brand picker on the main (shared) website: one button per brand site with restaurants
     brands, brand_site = [], None
-    if _site is None:
+    if not _own_addr:
         reg_site = {g["id"]: (g["site_id"] or 0) for g in db().execute("SELECT id, site_id FROM regions").fetchall()}
-        used_sites = {reg_site.get(rid, 0) for rid in used}
+        used_all = {r["region_id"] for r in rs_all if r["region_id"]}
+        used_sites = {reg_site.get(rid, 0) for rid in used_all}
         for srow in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
             if srow["id"] in used_sites:
                 brands.append({"id": srow["id"], "name": srow["name"], "logo": site_logo_url(srow)})
@@ -2733,6 +2739,13 @@ def home():
         elif request.args.get("region") is not None:
             session["cust_brand"] = ""
         bsel = session.get("cust_brand") or ""
+        if bpick is not None and _site is not None:
+            # leaving a Preview: start again from every restaurant
+            _site = None
+            rs = rs_all
+            used = {r["region_id"] for r in rs if r["region_id"]}
+            regions = [{"id": g["id"], "name": g["name"], "paused": g["id"] in paused}
+                       for g in all_regions() if g["id"] in used]
         if bsel.isdigit() and int(bsel) in {b["id"] for b in brands}:
             brand_site = site_by_id(int(bsel))
             _breg = site_region_ids(brand_site["id"])
@@ -2740,6 +2753,8 @@ def home():
             regions = [g for g in regions if g["id"] in _breg]
         elif bsel:
             session["cust_brand"] = ""
+        elif _site is not None:
+            brand_site = _site   # previewing a brand: its button shows as picked
     pick = request.args.get("region")
     if pick is not None:
         session["cust_region"] = pick if pick.isdigit() else ""
