@@ -1338,7 +1338,15 @@ def hours_label(restaurant):
     span = hours.get(str(local.weekday()))
     if not span or not span[0]:
         return "Closed today"
-    return "Today " + span[0] + " - " + span[1]
+    return "Today " + _clock12(span[0]) + " - " + _clock12(span[1])
+
+def _clock12(hm):
+    """'19:30' -> '7:30 PM'. Anything that isn't HH:MM is shown as it is."""
+    try:
+        t = dt.datetime.strptime((hm or "").strip(), "%H:%M")
+    except ValueError:
+        return hm
+    return t.strftime("%I:%M %p").lstrip("0")
 
 # ---------------------------------------------------------------- queue / dispatch
 

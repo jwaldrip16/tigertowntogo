@@ -612,6 +612,7 @@ button.rwopt{cursor:pointer}button.rwopt.sel{outline:4px solid #16a34a;outline-o
 @media(max-width:520px){.rwcoin{display:none}.rwhero h1{font-size:1.2em}}
 
 .card{position:relative}
+.cardhead{display:flex;align-items:center;gap:12px;margin-bottom:4px}.cardhead h3{margin:0;min-width:0;overflow-wrap:anywhere}.cardlogo-inline{flex:0 0 auto;width:64px;height:54px;object-fit:contain;background:#fff;border-radius:10px;padding:3px;box-shadow:0 1px 4px rgba(0,0,0,.25)}
 .cardlogo{position:absolute;top:10px;left:10px;width:54px;height:54px;object-fit:contain;background:#fff;border-radius:10px;padding:3px;box-shadow:0 1px 4px rgba(0,0,0,.25)}
 .herologo{display:block;width:80px;height:80px;object-fit:contain;background:#fff;border-radius:12px;padding:4px;margin:0 0 8px;box-shadow:0 1px 4px rgba(0,0,0,.2)}
 
