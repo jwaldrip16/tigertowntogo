@@ -6544,16 +6544,23 @@ def dispatch_new_order():
                    "dispatch_note": o["dispatch_note"] or "",
                    "items": json.loads(o["items"]), "tip_cents": o["tip_cents"],
                    "fee_cents": o["fee_cents"], "driver_id": o["driver_id"],
+                   "pay_method": _rv(o, "pay_method") or "",
+                   "house_name": house_name_of(o),
                    "driver": (db().execute("SELECT name FROM drivers WHERE id=?", (o["driver_id"],)).fetchone() or {"name": ""})["name"] if o["driver_id"] else ""}
     oneoff = oneoff_id()
     multi_src = None
     mc = (request.args.get("multi") or "").strip().upper()
     if mc:
         mo = db().execute("SELECT * FROM orders WHERE code=?", (mc,)).fetchone()
+        if not mo:
+            mo = db().execute("SELECT * FROM orders WHERE UPPER(primary_no)=? ORDER BY id DESC LIMIT 1", (mc,)).fetchone()
         if mo:
+            _mr = db().execute("SELECT region_id FROM restaurants WHERE id=?", (mo["restaurant_id"],)).fetchone()
             multi_src = {"code": mo["code"], "restaurant_id": mo["restaurant_id"], "customer_name": mo["customer_name"],
                          "customer_phone": mo["customer_phone"], "address": mo["address"],
-                         "address_note": mo["address_note"] or ""}
+                         "address_note": mo["address_note"] or "",
+                         "region_id": int((_mr["region_id"] if _mr else 0) or 0),
+                         "pay_method": _rv(mo, "pay_method") or "", "house_name": house_name_of(mo)}
     shown = [r for r in rests if r["slug"] != "oneoff" and can_create_in_region(_rv(r, "region_id"))]
     order_of = {x["id"]: i for i, x in enumerate(all_regions())}
     groups = {}
@@ -6563,7 +6570,8 @@ def dispatch_new_order():
     rest_groups = [{"id": rid, "label": region_label(rid), "rests": groups[rid]}
                    for rid in sorted(groups, key=lambda k: (k == 0, order_of.get(k, 9999)))]
     locked_out = order_lock_on() and not is_owner() and len(shown) < len([r for r in rests if r["slug"] != "oneoff"])
-    return render_template("dispatch_new_order.html", rest_groups=rest_groups, locked_out=locked_out,
+    rest_region = {str(r["id"]): int(_rv(r, "region_id") or 0) for r in shown}
+    return render_template("dispatch_new_order.html", rest_groups=rest_groups, locked_out=locked_out, rest_region=rest_region,
                            restaurants=[dict(r) for r in shown],
                            menus=menus, src=src, multi_src=multi_src, multi_policy=MULTI_POLICY, oneoff=oneoff, tokens=token_list(),
                            reasons=[{"key": k, "label": v} for k, v in REDO_REASONS.items()])
@@ -6982,11 +6990,24 @@ MULTI_POLICY = ("One restaurant per order. Want food from another restaurant too
 
 app.jinja_env.globals["MULTI_POLICY"] = MULTI_POLICY
 
+def house_name_of(o):
+    """The house account name typed on an order ("House account John" -> "John")."""
+    try:
+        if (_rv(o, "pay_method") or "") != "house_account":
+            return ""
+        ref = str(_rv(o, "pay_ref") or "")
+        return ref[len("House account"):].strip() if ref.startswith("House account") else ""
+    except Exception:
+        return ""
+
 def multi_resolve(code, phone, by_dispatch):
     code = (code or "").strip().upper()
     if not code:
         return "", ""
     o = db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
+    if not o:
+        # the restaurant number (TT-0003) works too
+        o = db().execute("SELECT * FROM orders WHERE UPPER(primary_no)=? ORDER BY id DESC LIMIT 1", (code,)).fetchone()
     if not o or o["dispatch_status"] == "cancelled":
         return "", "We couldn't find order " + code + " to link this order to."
     if not by_dispatch and phone_digits(o["customer_phone"] or "")[-10:] != phone_digits(phone or "")[-10:]:
@@ -11344,17 +11365,17 @@ APP_MANIFESTS = {
     "customer": {"suffix": "", "short": None, "start": "/", "scope": "/", "orientation": "portrait",
                  "bg": "#ffffff", "theme": "#e53935",
                  "desc": "Order food delivery from local restaurants, track your driver and earn rewards."},
-    "driver": {"suffix": " Driver", "short": "Driver", "start": "/driver", "scope": "/driver",
+    "driver": {"name": "Fleet Foot Driver", "suffix": " Driver", "short": "FF Driver", "start": "/driver", "scope": "/driver",
                "orientation": "portrait", "bg": "#0f172a", "theme": "#0f172a",
                "desc": "Driver app: go online, accept deliveries, navigate and get paid."},
-    "kitchen": {"suffix": " Kitchen", "short": "Kitchen", "start": "/restaurant", "scope": "/restaurant",
+    "kitchen": {"name": "Fleet Foot Restaurant", "suffix": " Kitchen", "short": "FF Restaurant", "start": "/restaurant", "scope": "/restaurant",
                 "orientation": "portrait", "bg": "#7c2d12", "theme": "#7c2d12",
                 "desc": "Restaurant app: receive delivery orders, mark them ready and chat with dispatch."},
     # the shared staff apps (one store listing for every client company)
     "hub-driver": {"name": "Fleet Foot Driver", "suffix": "", "short": "FF Driver", "start": "/go/driver",
                    "scope": "/go/driver", "orientation": "portrait", "bg": "#0f172a", "theme": "#0f172a",
                    "desc": "Driver app for every delivery company on Fleet Foot Delivery. Pick your company and sign in."},
-    "hub-kitchen": {"name": "Fleet Foot Kitchen", "suffix": "", "short": "FF Kitchen", "start": "/go/kitchen",
+    "hub-kitchen": {"name": "Fleet Foot Restaurant", "suffix": "", "short": "FF Restaurant", "start": "/go/kitchen",
                     "scope": "/go/kitchen", "orientation": "portrait", "bg": "#7c2d12", "theme": "#7c2d12",
                     "desc": "Restaurant app for every delivery company on Fleet Foot Delivery. Pick your company and sign in."},
     "tracker": {"suffix": " Tracker", "short": "Tracker", "start": "/dispatch/map", "scope": "/dispatch/map",
@@ -11661,7 +11682,7 @@ def rest_invoice_view(iid):
 # app goes straight to that company's own site. "Switch company" signs them out and
 # brings the picker back. Developers manage the company list at /dispatch/companies.
 HUB_APPS = {"driver": ("Fleet Foot Driver", "/driver/login", "hub-driver"),
-            "kitchen": ("Fleet Foot Kitchen", "/restaurant/login", "hub-kitchen")}
+            "kitchen": ("Fleet Foot Restaurant", "/restaurant/login", "hub-kitchen")}
 
 
 def clean_site_url(u):

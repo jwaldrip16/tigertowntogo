@@ -1,7 +1,7 @@
 <!doctype html>
 <html lang="en"><head>
 <meta charset="utf-8"><meta name="generator" content="Fleet Foot Delivery app"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>{% block title %}{{ biz_name }}{% endblock %}</title>
+<title>{% block title %}{% if portal == 'dispatch' %}Fleet Foot Delivery Dispatch{% elif portal == 'driver' %}Fleet Foot Driver{% elif portal == 'kitchen' %}Fleet Foot Restaurant{% else %}{{ biz_name }}{% endif %}{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 {% if brand_font %}<link rel="stylesheet" href="{{ brand_font }}">{% endif %}
 {% if brand_css %}<style>{{ brand_css|safe }}</style>{% endif %}
@@ -29,7 +29,7 @@ function money(c){ return '$' + (c/100).toFixed(2); }
 {% set staff_area = request.path.startswith('/dispatch') or request.path.startswith('/driver') or request.path.startswith('/restaurant') %}
 <body class="{% if not portal and not staff_area %}cust {% endif %}{% block bodyclass %}{% endblock %}">
 <header class="topbar">
-  <a class="brand" href="{% if portal == 'dispatch' %}/dispatch{% elif portal == 'driver' %}/driver{% elif portal == 'kitchen' %}/restaurant{% elif staff_area %}{{ request.path }}{% else %}/{% endif %}"><img class="brandlogo" src="{{ '/static/brand/logo-default.png' if (portal or staff_area) else logo_url }}" alt="">{{ biz_name }}{% if portal %} {{ portal|capitalize if portal != "kitchen" else "Kitchen" }}{% endif %}</a>
+  <a class="brand" href="{% if portal == 'dispatch' %}/dispatch{% elif portal == 'driver' %}/driver{% elif portal == 'kitchen' %}/restaurant{% elif staff_area %}{{ request.path }}{% else %}/{% endif %}"><img class="brandlogo" src="{{ '/static/brand/logo-default.png' if (portal or staff_area) else logo_url }}" alt="">{% if portal == 'dispatch' %}Fleet Foot Delivery Dispatch{% elif portal == 'driver' %}Fleet Foot Driver{% elif portal == 'kitchen' %}Fleet Foot Restaurant{% else %}{{ biz_name }}{% endif %}</a>
   <nav>
     {% if portal == 'dispatch' %}
       <a href="/dispatch">Board</a>

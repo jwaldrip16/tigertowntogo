@@ -137,6 +137,19 @@ const MENUS = {{ menus | tojson }};
 let cart = [], geo = null, feeCents = 0, miles = 0;
 const SRC = {{ src|tojson if src else 'null' }};
 const MULTI_SRC = {{ multi_src|tojson if multi_src else 'null' }};
+const REST_REGION = {{ rest_region|tojson }};
+const ONEOFF_ID = String({{ oneoff|tojson }});
+// a new order made from another one keeps the same way to pay (house account or cash)
+function carryPay(o){
+  if(!o) return;
+  const h = document.getElementById('houseOrder'), c = document.getElementById('cashOrder'), n = document.getElementById('houseName');
+  if(o.pay_method === 'house_account' && h){
+    h.checked = true; if(c) c.checked = false;
+    if(n){ n.classList.remove('hidden'); if(o.house_name && !n.value) n.value = o.house_name; }
+  } else if(o.pay_method === 'cash' && c && !c.disabled){
+    c.checked = true; if(h) h.checked = false;
+  }
+}
 document.addEventListener('DOMContentLoaded', function(){
   if(!MULTI_SRC) return;
   document.getElementById('multiWith').value = MULTI_SRC.code;
@@ -144,9 +157,17 @@ document.addEventListener('DOMContentLoaded', function(){
   document.getElementById('phone').value = MULTI_SRC.customer_phone || '';
   document.getElementById('address').value = MULTI_SRC.address || '';
   document.getElementById('note').value = MULTI_SRC.address_note || '';
-  // start on a different restaurant than the first order
+  // start on a different restaurant in the same area as the first order
   const sel = document.getElementById('rest');
-  for(const op of sel.options){ if(parseInt(op.value,10) !== MULTI_SRC.restaurant_id){ sel.value = op.value; break; } }
+  let pick = null, any = null;
+  for(const op of sel.options){
+    const id = parseInt(op.value,10);
+    if(!op.value || id === MULTI_SRC.restaurant_id || op.value === ONEOFF_ID) continue;
+    if(any === null) any = op.value;
+    if(pick === null && (REST_REGION[op.value]||0) === (MULTI_SRC.region_id||0)) pick = op.value;
+  }
+  if(pick !== null || any !== null) sel.value = (pick !== null ? pick : any);
+  carryPay(MULTI_SRC);
   try { sel.onchange(); } catch(e){}
   try { validate(); } catch(e){}
 });
@@ -383,6 +404,7 @@ function prefill(){
   document.getElementById('note').value = SRC.address_note || '';
   const tip = document.getElementById('tip');
   if(tip) tip.value = ((SRC.tip_cents||0)/100).toFixed(2);
+  carryPay(SRC);
   draw();
   validate();
 }
