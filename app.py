@@ -2730,8 +2730,9 @@ def home():
         used_all = {r["region_id"] for r in rs_all if r["region_id"]}
         used_sites = {reg_site.get(rid, 0) for rid in used_all}
         for srow in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
-            if srow["id"] in used_sites:
-                brands.append({"id": srow["id"], "name": srow["name"], "logo": site_logo_url(srow)})
+            # every brand gets a button; one with no restaurants yet still opens its own page
+            brands.append({"id": srow["id"], "name": srow["name"], "logo": site_logo_url(srow),
+                           "empty": srow["id"] not in used_sites})
         bpick = request.args.get("brand")
         if bpick is not None:
             session["cust_brand"] = bpick if bpick.isdigit() else ""
