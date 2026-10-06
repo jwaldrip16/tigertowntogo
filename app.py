@@ -1184,6 +1184,16 @@ def _rv(row, key):
     except Exception:
         return None
 
+def default_max_miles():
+    """Business-wide delivery radius (Settings > Delivery fees), used when neither the
+    restaurant nor its region has its own. 0 or blank means no limit."""
+    try:
+        row = db().execute("SELECT value FROM settings WHERE key='default_max_miles'").fetchone()
+        v = float(row[0]) if row and str(row[0]).strip() else 0.0
+    except Exception:
+        v = 0.0
+    return v if v > 0 else 0.0
+
 def delivery_rules(r):
     """Minimum order and delivery radius for a restaurant. The restaurant's own setting wins;
     blank uses its region's; blank there means no limit."""
@@ -1194,6 +1204,8 @@ def delivery_rules(r):
     mx, mx_src = _rv(r, "max_miles"), "restaurant"
     if mx is None:
         mx, mx_src = (_rv(reg, "max_miles") if reg is not None else None), "region"
+    if not mx:
+        mx, mx_src = default_max_miles(), "business"
     return {"min_cents": int(mn or 0), "max_miles": float(mx or 0),
             "min_from": mn_src if mn else "", "miles_from": mx_src if mx else ""}
 
@@ -8878,6 +8890,15 @@ def dispatch_settings():
                 db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('future_lead_min',?)", (str(lm),))
             else:
                 FUTURE_LEAD_ERR.append(1)
+        if "default_max_miles" in request.form:
+            _dm = str(request.form.get("default_max_miles") or "").strip()
+            try:
+                _dmv = float(_dm) if _dm else 0.0
+            except ValueError:
+                _dmv = -1
+            if _dmv == 0 or 0.5 <= _dmv <= 100:
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('default_max_miles',?)",
+                             ("%g" % _dmv if _dmv else "",))
         for key in ("base_fee_cents", "base_miles", "per_mile_cents", "tax_rate_bp", "auto_assign"):
             if key in request.form:
                 db().execute("UPDATE settings SET value=? WHERE key=?", (request.form[key], key))

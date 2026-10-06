@@ -189,6 +189,10 @@ async function setLogo(inp){
   <input name="base_miles" value="{{ s['base_miles'] }}">
   <label>Cents per additional mile</label>
   <input name="per_mile_cents" value="{{ s['per_mile_cents'] }}">
+  <label>Farthest delivery distance in miles (blank for no limit)</label>
+  <input name="default_max_miles" inputmode="decimal" value="{{ s['default_max_miles'] if s['default_max_miles'] is defined and s['default_max_miles'] else '' }}" placeholder="10">
+  <div class="muted small">Customers can't place an order to an address farther than this from the restaurant.
+    A region or restaurant with its own delivery radius (Regions page) uses that instead. Dispatch can still place a farther order for a call-in.</div>
   <label>Sales tax (%)</label>
   <input name="tax_pct" inputmode="decimal" value="{{ '%g' % ((s['tax_rate_bp']|int) / 100) }}" placeholder="9">
   <label>Service fee (% of the food subtotal, 0 for none)</label>
