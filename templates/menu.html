@@ -293,6 +293,17 @@ function totals(){
   document.getElementById('place').disabled = !(geo && cart.length) || !!short;
 }
 const MIN_ORDER = {{ (rules.min_cents if rules else 0)|int }};
+function farBlock(msg){
+  // the restaurant doesn't deliver to this address: no adding items or placing the order
+  let b = document.getElementById('farBanner');
+  if(!b){ b = document.createElement('div'); b.id='farBanner'; b.className='panel';
+    b.style.cssText='border-left:4px solid #c0392b;margin:10px 0;font-weight:600';
+    const m = document.querySelector('main') || document.body; m.insertBefore(b, m.firstChild); }
+  b.style.display = msg ? '' : 'none';
+  if(msg){ b.innerHTML = msg + ' <a href="/#restaurants">See restaurants that deliver to you</a> or change the address below.'; window.scrollTo(0,0); }
+  document.querySelectorAll('.item button, .additem, button[onclick^="add"]').forEach(x=>{ x.disabled = !!msg; });
+  const pl = document.getElementById('place'); if(pl && msg) pl.disabled = true;
+}
 async function validate(){
   const addr = document.getElementById('address').value.trim();
   const q = document.getElementById('quote');
@@ -306,7 +317,10 @@ async function validate(){
     q.className='quote';
     q.textContent = res.error + ' You can place the order. Delivery is about '+res.fee+'; dispatch will confirm your exact address.';
     totals(); return; }
-  if(!res.ok){ geo=null; q.className='quote bad'; q.textContent = res.error; totals(); return; }
+  if(!res.ok){ geo=null; q.className='quote bad'; q.textContent = res.error; totals();
+    if(res.out_of_range && !CUSTOM){ farBlock(res.error); }
+    return; }
+  farBlock('');
   geo = res; feeCents = res.fee_cents; miles = res.miles;
   q.className='quote good';
   q.innerHTML = 'Verified: '+res.formatted+'<br>'+res.miles+' miles from the restaurant, delivery '+res.fee;

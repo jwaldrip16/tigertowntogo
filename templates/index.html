@@ -58,6 +58,7 @@
 </div>
 {% endif %}
 {% if sel_region and not cards %}<div class="panel">No restaurants in {{ sel_region_name }} yet. <a href="/?region=all">See all areas</a>.</div>{% endif %}
+{% if far_name %}<div class="panel" style="border-left:4px solid #c0392b">{{ far_name }} doesn't deliver to the address you searched. Pick a restaurant below that delivers to you, or search a different address.</div>{% endif %}
 <div id="reachNote" class="muted small"></div>
 <div class="grid" id="restGrid">
   {% for c in cards %}

@@ -2915,7 +2915,11 @@ def home():
         biz = biz_on and (business_in_hours() or any(business_in_hours(rid=g["id"]) for g in regions))
     if brand_site is not None and not sel_id:
         g._site = brand_site   # show the picked brand's logo, name, phone and design
-    return render_template("index.html", cards=cards, biz_open=biz, regions=regions,
+    far_name = ""
+    if request.args.get("far"):
+        _fr = db().execute("SELECT name FROM restaurants WHERE slug=?", (request.args.get("far"),)).fetchone()
+        far_name = _fr["name"] if _fr else ""
+    return render_template("index.html", cards=cards, biz_open=biz, regions=regions, far_name=far_name,
                            brands=brands, sel_brand=brand_site["id"] if brand_site is not None else 0,
                            sel_region=sel_id, sel_region_name=sel_name,
                            hours_text=business_hours_label(sel_id or None),
@@ -2936,6 +2940,16 @@ def menu(slug):
         _rs = site_of_region(r["region_id"])
         if _rs is not None:
             g._site_forced = _rs   # restaurant's brand: logo, name and phone on its menu page
+    hg = session.get("home_geo")
+    if (r["slug"] != "oneoff" and hg and r["lat"] is not None and not session.get("dispatcher_id")
+            and request.args.get("anyway") != "1"):
+        try:
+            far = round(haversine_miles(r["lat"], r["lng"], float(hg[0]), float(hg[1])) * ROAD_FACTOR, 1)
+            mx = delivery_rules(r)["max_miles"] or 60
+            if far > mx:
+                return redirect("/?far=%s#restaurants" % r["slug"])
+        except (TypeError, ValueError, IndexError):
+            pass
     items = db().execute("SELECT * FROM menu_items WHERE restaurant_id=? AND active=1", (r["id"],)).fetchall()
     biz = business_is_open() and business_in_hours(rid=r["region_id"])
     open_now = biz and (any_rest_open() if r["slug"] == "oneoff" else is_open(r))
@@ -2980,8 +2994,13 @@ def api_quote():
         return jsonify({"ok": False, "error": "We could not verify that address. Add the 5-digit ZIP code "
                                               "so we can check it's in our delivery area."})
     miles, fee = quote(r, g1["lat"], g1["lng"])
+    _typed = data.get("address", "") or ""
+    if miles > 60 and re.match(r"\s*\d+\s+\S", _typed) and re.search(r"\b\d{5}\b", _typed):
+        return jsonify({"ok": False, "out_of_range": True, "error":
+                        "That address is %d mi from %s. %s doesn't deliver that far."
+                        % (int(miles), r["name"], r["name"])})
     if miles > 60:
-        return jsonify({"ok": False, "error":
+        return jsonify({"ok": False, "out_of_range": True, "error":
                         "That matched a place %s mi from %s. Add the street number, city, state and ZIP."
                         % (int(miles), r["name"])})
     rules = delivery_rules(r)
@@ -12388,7 +12407,10 @@ def inject_portal():
             biz["site"] = site_text()
         _cp = current_portal()
         if not _cp:
-            biz.update({"biz_email": (setting("business_email", str) or "").strip(),
+            _bc = brand_contact()
+            if _bc is not None:
+                biz["biz_address"] = _bc["address"]
+            biz.update({"biz_email": _bc["email"] if _bc is not None else (setting("business_email", str) or "").strip(),
                         "biz_hours": business_hours_label(None) or "",
                         "home_headline": (setting("home_headline", str) or "").strip(),
                         "socials": [(k, (setting("social_" + k, str) or "").strip()) for k in ("x", "facebook", "instagram")
@@ -13864,6 +13886,39 @@ def faq_region_list():
         pass
     return out
 
+def _brand_is_main(site):
+    """True when this brand is the business itself (its name is in the main name or email),
+    so it may show the main email and address."""
+    n = _norm_name(site["name"] if site is not None else "")
+    if not n:
+        return False
+    def _biz(key):
+        row = db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        return (row["value"] if row else "") or ""
+    return n in _norm_name(_biz("business_name")) or n in _norm_name(_biz("business_email").split("@")[0])
+
+def brand_contact(site=None):
+    """Email and address a brand's pages show: the brand's own from its design. A brand without its
+    own never borrows another brand's (Bulldawg must not show Tiger Town's email); only the brand
+    that is the business itself falls back to the main ones. None = no brand on this page."""
+    if site is None:
+        site = getattr(g, "_site_forced", None) or current_site()
+    if site is None:
+        return None
+    d = site_design(site)
+    em = str(d.get("business_email") or "").strip()
+    ad = str(d.get("business_address") or "").strip()
+    if (not em or not ad) and _brand_is_main(site):
+        def _biz(key):
+            row = db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+            return ((row["value"] if row else "") or "").strip()
+        em = em or _biz("business_email")
+        ad = ad or _biz("business_address")
+    return {"email": em, "address": ad}
+
+_PHONE_RE = re.compile(r"(?<!\d)(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}(?!\d)")
+_EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
 def faq_target():
     """(region id, brand site) whose FAQ the customer sees. The region must belong to the brand
     of this web address; a picked brand with no area uses that brand. (0, None) = the business FAQ."""
@@ -13913,9 +13968,14 @@ def faq_items(region_id=None, site=None):
     ph = ((_rv(reg, "phone") or "") if reg is not None else "") \
         or ((site["phone"] or "") if site is not None else "") or dispatch_phone()
     name = ((site["name"] or "") if site is not None else "").strip() or _biz("business_name").strip() or "Fleet Foot Delivery"
+    _bc = brand_contact(site) if site is not None else None
     rep_ = {"{business}": name, "{phone}": nice_phone(ph) or "dispatch",
-            "{email}": str(d.get("business_email") or "").strip() or _biz("business_email").strip(),
-            "{address}": str(d.get("business_address") or "").strip() or _biz("business_address").strip()}
+            "{email}": _bc["email"] if _bc is not None else _biz("business_email").strip(),
+            "{address}": _bc["address"] if _bc is not None else _biz("business_address").strip()}
+    # FAQs copied from an old site carry that site's phone numbers and email: show this brand's
+    raw = _PHONE_RE.sub("{phone}", raw)
+    if rep_["{email}"]:
+        raw = _EMAIL_RE.sub("{email}", raw)
     items, q, a = [], None, []
     for line in raw.splitlines() + ["Q:"]:
         t = line.strip()
@@ -13947,6 +14007,7 @@ def api_home_search():
     g = geocode(addr)
     if not g.get("ok") or g.get("lat") is None:
         return jsonify({"ok": False, "error": "We couldn't find that address. Add the city and ZIP and try again."}), 400
+    session["home_geo"] = [g["lat"], g["lng"], (g.get("formatted") or addr)[:200]]
     out = []
     for r in db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' AND lat IS NOT NULL").fetchall():
         miles = round(haversine_miles(r["lat"], r["lng"], g["lat"], g["lng"]) * ROAD_FACTOR, 1)
