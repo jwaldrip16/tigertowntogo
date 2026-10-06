@@ -11497,8 +11497,16 @@ def dispatch_import_website():
     act = request.form.get("action") if request.method == "POST" else ""
     if act == "read":
         site = (request.form.get("site") or "").strip()
+        _own = _norm_host(re.sub(r"^[a-z]+://", "", site.lower()).split("/")[0].split("?")[0])
+        _mine = {_norm_host(request.host)}
+        for _srow in db().execute("SELECT * FROM sites").fetchall():
+            _mine.update(site_domains(_srow))
         if not site:
             result = {"ok": False, "error": "Type the website address."}
+        elif _own in _mine:
+            result = {"ok": False, "error": "That's this app's own address, so copying it just reads back what's already in your Settings. "
+                      "Type the old website you want to copy from instead, like tigertowntogo.com or orderbulldawgfood.com, "
+                      "or change the text and photos directly under Settings or Regions > Brand sites > Design."}
         else:
             try:
                 data = multi_import.site_pull(site)
