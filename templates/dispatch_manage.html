@@ -139,6 +139,7 @@ async function load(){
     '<input id="dbr'+d.id+'" value="'+esc(d.payout_branch_id||'')+'" placeholder="Branch worker ID" style="max-width:160px"'+dis+'>'+
     (BRANCH_ACCTS.length ? '<select id="dba'+d.id+'" style="max-width:170px"'+dis+'><option value="0">Branch account: by brand</option>'+
       BRANCH_ACCTS.map(a=>'<option value="'+a.id+'"'+(d.branch_account_id===a.id?' selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select>' : '')+
+    (BRANCH_ACCTS.length > 1 ? BRANCH_ACCTS.map(a=>'<input id="dbw'+d.id+'_'+a.id+'" value="'+esc((d.payout_branch_ids||{})[String(a.id)]||'')+'" placeholder="Worker ID at '+esc(a.name)+' (blank = above)" style="max-width:200px"'+dis+'>').join('') : '')+
     '<label class="small" style="display:flex;gap:4px;align-items:center;white-space:nowrap"><input type="checkbox" id="dap'+d.id+'" style="width:auto"'+(d.auto_pay?' checked':'')+dis+'> Auto pay</label></div>'+
     '<div class="row"><span class="muted small">Bank (for your records)</span>'+
     '<input id="dbn'+d.id+'" value="'+esc(d.bank_name||'')+'" placeholder="Bank name, like Regions" style="max-width:180px"'+dis+'>'+
@@ -235,6 +236,7 @@ async function saveDriver(id){
     payout_phone:document.getElementById('dv'+id).value,
     payout_branch_id:document.getElementById('dbr'+id).value,
     branch_account_id:(document.getElementById('dba'+id)||{value:0}).value,
+    payout_branch_ids:Object.fromEntries(BRANCH_ACCTS.map(a=>[String(a.id),(document.getElementById('dbw'+id+'_'+a.id)||{value:''}).value])),
     auto_pay:document.getElementById('dap'+id).checked?1:0,
     bank_name:document.getElementById('dbn'+id).value,
     bank_last4:document.getElementById('dbl'+id).value});

@@ -283,6 +283,7 @@ def init_db():
     con.executescript(SCHEMA)
     ensure_column(con, "drivers", "payout_wallet", "TEXT DEFAULT 'paypal'")
     ensure_column(con, "drivers", "payout_branch_id", "TEXT")      # the driver's Branch worker ID
+    ensure_column(con, "drivers", "payout_branch_ids", "TEXT")     # JSON {Branch account id: worker ID} when it differs per account
     ensure_column(con, "drivers", "auto_pay", "INTEGER DEFAULT 1")   # 0 = never auto pay this driver
     ensure_column(con, "drivers", "branch_account_id", "INTEGER")    # which Branch account pays them (blank = by brand)
     con.execute("""CREATE TABLE IF NOT EXISTS branch_accounts (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -295,6 +296,7 @@ def init_db():
         cents INTEGER NOT NULL, wallet TEXT, receiver TEXT, sender_id TEXT, batch_id TEXT, item_id TEXT,
         status TEXT, error TEXT, created_at TEXT, created_by TEXT, checked_at TEXT)""")
     ensure_column(con, "driver_payouts", "kind", "TEXT DEFAULT 'trip'")
+    ensure_column(con, "driver_payouts", "pp_acct", "INTEGER")   # which PayPal keys sent it (brand id, 0 = main)
     ensure_column(con, "driver_payouts", "reason", "TEXT")
     ensure_column(con, "driver_payouts", "ref", "TEXT")
     ensure_column(con, "driver_payouts", "br_account_id", "INTEGER")
@@ -3899,6 +3901,20 @@ BR_STATUS = {"COMPLETED": "SUCCESS", "SCHEDULED": "PENDING", "PENDING": "PENDING
              "CREATED": "PENDING", "FAILED": "FAILED", "CANCELED": "CANCELED", "CANCELLED": "CANCELED",
              "SKIPPED": "FAILED", "REVERSED": "REVERSED"}
 
+def br_worker_ids(d):
+    """The driver's Branch worker IDs per Branch account ({account id: worker ID})."""
+    try:
+        raw = json.loads((d["payout_branch_ids"] if d is not None and "payout_branch_ids" in d.keys() else "") or "{}")
+        return {int(k): str(v).strip() for k, v in raw.items() if str(v).strip()}
+    except Exception:
+        return {}
+
+def br_worker_for(d, acct_id):
+    """Worker ID for this driver at one Branch account: its own one, else the driver's main worker ID."""
+    if d is None:
+        return ""
+    return br_worker_ids(d).get(int(acct_id or 0)) or ((d["payout_branch_id"] if "payout_branch_id" in d.keys() else "") or "").strip()
+
 def _branch_send(r, brand, what):
     """Create (or safely look up again, same external_id) one Branch disbursement. Returns (status, batch_id, error)."""
     acct = None
@@ -3909,8 +3925,10 @@ def _branch_send(r, brand, what):
         o = db().execute("SELECT * FROM orders WHERE id=?", (r["order_id"],)).fetchone() if r["order_id"] else None
         acct = br_pick(d, o)
         if acct is not None:
-            db().execute("UPDATE driver_payouts SET br_account_id=? WHERE id=?", (acct["id"], r["id"]))
+            wid = br_worker_for(d, acct["id"]) or r["receiver"]
+            db().execute("UPDATE driver_payouts SET br_account_id=?, receiver=? WHERE id=?", (acct["id"], wid, r["id"]))
             db().commit()
+            r = db().execute("SELECT * FROM driver_payouts WHERE id=?", (r["id"],)).fetchone()
     if not _br_ready(acct):
         return "ERROR", None, "No Branch account with keys is set up for this driver yet."
     c = br_conf(acct)
@@ -3943,8 +3961,29 @@ def pay_rail_on(wallet, d=None, o=None):
     if w == "BRANCH":
         return br_pick(d, o) is not None if (d is not None or o is not None) else br_enabled()
     if w in ("PAYPAL", "VENMO"):
-        return pp_enabled()
+        return pp_enabled(pp_payout_acct(o)) if o is not None else pp_any_enabled()
     return True
+
+def pp_payout_acct(o):
+    """PayPal keys a driver's trip pay comes from: the keys that took the customer's payment for
+    that order (its brand's own PayPal account when it has one), else the brand's keys, else the main keys."""
+    if o is None:
+        return 0
+    try:
+        return pp_order_acct(o)
+    except Exception:
+        return 0
+
+def payout_brand_name(o):
+    """Name the driver sees on the payment: the order's brand, else the business name."""
+    try:
+        r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone() if o is not None else None
+        st = site_of_region(_rv(r, "region_id")) if r else None
+        if st and (st["name"] or "").strip():
+            return st["name"].strip()
+    except Exception:
+        pass
+    return setting("business_name", str) or "Fleet Foot Delivery"
 
 def pay_rail_name(wallet):
     return "Branch" if (wallet or "").upper() == "BRANCH" else "PayPal"
@@ -5365,6 +5404,8 @@ def driver_payout_target(d):
     if wallet == "branch":
         wid = ((d["payout_branch_id"] if "payout_branch_id" in keys else "") or "").strip()
         if not wid:
+            wid = next(iter(br_worker_ids(d).values()), "")
+        if not wid:
             return None
         return ("BRANCH", "WORKER", wid, "Branch (worker " + wid + ")")
     if wallet == "venmo":
@@ -5438,8 +5479,8 @@ def drv_pay_info(o):
 def _payout_send(row_id):
     """Send (or safely re-send, same PayPal-Request-Id) one payout row. Returns the row."""
     r = db().execute("SELECT * FROM driver_payouts WHERE id=?", (row_id,)).fetchone()
-    o = db().execute("SELECT code FROM orders WHERE id=?", (r["order_id"],)).fetchone() if r["order_id"] else None
-    brand = (setting("business_name", str) or "Fleet Foot Delivery")[:60]
+    o = db().execute("SELECT * FROM orders WHERE id=?", (r["order_id"],)).fetchone() if r["order_id"] else None
+    brand = payout_brand_name(o)[:60]
     what = ("Pay for trip " + o["code"]) if o else ("Extra pay" + ((": " + r["reason"]) if r["reason"] else ""))
     short = (brand + " trip " + o["code"]) if o else (brand + " extra pay" + ((" - " + r["reason"]) if r["reason"] else ""))
     if (r["wallet"] or "") == "BRANCH":
@@ -5456,7 +5497,11 @@ def _payout_send(row_id):
                        "amount": {"value": "%.2f" % (int(r["cents"]) / 100.0), "currency": "USD"},
                        "receiver": r["receiver"], "note": short[:4000],
                        "sender_item_id": r["sender_id"], "recipient_wallet": wallet}]}
-    with pp_for(0):    # driver payouts always come from the main PayPal account
+    acct = r["pp_acct"] if r["pp_acct"] is not None else pp_payout_acct(o)
+    if r["pp_acct"] is None:
+        db().execute("UPDATE driver_payouts SET pp_acct=? WHERE id=?", (int(acct or 0), row_id))
+        db().commit()
+    with pp_for(acct):    # the order's brand PayPal account (main keys for extra pay or brands without their own)
         st, j = pp_api("POST", "/v1/payments/payouts", body, request_id=r["sender_id"])
     now = dt.datetime.now().isoformat(timespec="seconds")
     if st in (200, 201) and (j.get("batch_header") or {}).get("payout_batch_id"):
@@ -5486,7 +5531,7 @@ def _payout_check(r):
         return _payout_send(r["id"])
     if not r["batch_id"]:
         return r
-    with pp_for(0):
+    with pp_for(int(r["pp_acct"] or 0)):
         st, j = pp_api("GET", "/v1/payments/payouts/" + r["batch_id"])
     now = dt.datetime.now().isoformat(timespec="seconds")
     if st == 200:
@@ -5501,7 +5546,7 @@ def _payout_check(r):
     return db().execute("SELECT * FROM driver_payouts WHERE id=?", (r["id"],)).fetchone()
 
 def payout_sweep(force=False):
-    if not (pp_enabled(0) or br_enabled()):
+    if not (pp_any_enabled() or br_enabled()):
         return
     if not force and time.time() - _payout_last[0] < 60:
         return
@@ -5534,7 +5579,7 @@ def auto_driver_pay_sweep(force=False):
     + flat), by PayPal or Venmo, once the customer's payment is settled and the delay has passed.
     Anything it can't do (no PayPal or Venmo on file, over the limit, a PayPal error) is left
     on the order for a dispatcher, and it never pays the same trip twice."""
-    if not setting("auto_driver_pay") or not (pp_enabled(0) or br_enabled()):
+    if not setting("auto_driver_pay") or not (pp_any_enabled() or br_enabled()):
         return
     if not force and time.time() - _autopay_last[0] < 60:
         return
@@ -5611,7 +5656,7 @@ def api_driver_pay():
     if not o:
         return jsonify({"ok": False, "error": "Order not found."}), 404
     if b.get("op") == "check":
-        if not (pp_enabled(0) or br_enabled()):
+        if not (pp_any_enabled() or br_enabled()):
             return jsonify({"ok": False, "error": "PayPal and Branch keys are not set up yet."}), 400
         for r in db().execute("""SELECT * FROM driver_payouts WHERE order_id=? AND status IN
                                  ('SENDING','UNKNOWN','PENDING','PROCESSING','NEW','ONHOLD','UNCLAIMED')""",
@@ -5691,7 +5736,7 @@ def extra_pay_payload(driver_id=None):
              "status": r["status"] or "", "open": (r["status"] or "") in PAYOUT_OPEN,
              "label": PAYOUT_LABEL.get(r["status"] or "", (r["status"] or "").lower()), "error": r["error"] or "",
              "by": r["created_by"] or "", "at": (r["created_at"] or "").replace("T", " ")[:16]} for r in rows]
-    return {"ok": True, "paypal_ready": pp_enabled(0), "drivers": drivers, "history": hist}
+    return {"ok": True, "paypal_ready": pp_any_enabled(), "drivers": drivers, "history": hist}
 
 
 @app.get("/dispatch/driver-pay")
@@ -5714,7 +5759,7 @@ def api_driver_extra():
         r = db().execute("SELECT * FROM driver_payouts WHERE id=?", (b.get("id"),)).fetchone()
         if not r:
             return jsonify({"ok": False, "error": "That payment is not on file."}), 404
-        if (r["status"] or "") in PAYOUT_OPEN and pp_enabled(0):
+        if (r["status"] or "") in PAYOUT_OPEN and pp_any_enabled():
             _payout_check(r)
         return jsonify(extra_pay_payload(b.get("driver_id") or None))
     if op != "pay":
@@ -10853,6 +10898,7 @@ def api_catalog():
                 "payout_email": d["payout_email"] or "", "payout_phone": d["payout_phone"] or "",
                 "payout_branch_id": d["payout_branch_id"] or "", "auto_pay": 0 if d["auto_pay"] == 0 else 1,
                 "branch_account_id": d["branch_account_id"] or 0,
+                "payout_branch_ids": {str(k): v for k, v in br_worker_ids(d).items()},
                 "active_orders": db().execute("""SELECT COUNT(*) c FROM orders WHERE driver_id=?
                                    AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
                                               (d["id"],)).fetchone()["c"],
@@ -11174,7 +11220,8 @@ def api_driver_crud():
             w = (b.get("payout_wallet") or "").lower()
             w = w if w in ("venmo", "check", "branch") else "paypal"   # auto pay sends PayPal / Venmo / Branch; check is paid by hand
             bw = " ".join(str(b.get("payout_branch_id") or "").split())[:64]
-            if w == "branch" and not bw:
+            _has_ids = isinstance(b.get("payout_branch_ids"), dict) and any(str(v or "").strip() for v in b["payout_branch_ids"].values())
+            if w == "branch" and not bw and not _has_ids:
                 return jsonify({"ok": False, "error": "Enter the driver's Branch worker ID to pay them by Branch."}), 400
             db().execute("UPDATE drivers SET payout_branch_id=? WHERE id=?", (bw or None, b["driver_id"]))
             try:
@@ -11182,6 +11229,17 @@ def api_driver_crud():
             except (TypeError, ValueError):
                 _ba = None
             db().execute("UPDATE drivers SET branch_account_id=? WHERE id=?", (_ba, b["driver_id"]))
+            if isinstance(b.get("payout_branch_ids"), dict):
+                _ids = {}
+                for _k, _v in b["payout_branch_ids"].items():
+                    try:
+                        _k = int(_k)
+                    except (TypeError, ValueError):
+                        continue
+                    _v = " ".join(str(_v or "").split())[:64]
+                    if _k and _v:
+                        _ids[str(_k)] = _v
+                db().execute("UPDATE drivers SET payout_branch_ids=? WHERE id=?", (json.dumps(_ids) if _ids else None, b["driver_id"]))
             bn = " ".join(str(b.get("bank_name") or "").split())[:40]
             l4 = digits(b.get("bank_last4") or "")
             if l4 and len(l4) != 4:
