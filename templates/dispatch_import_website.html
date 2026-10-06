@@ -10,7 +10,7 @@
   </form>
   {% if result and not result.ok %}<div class="flash err">{{ result.error }}</div>{% endif %}
   {% if result and result.ok and result.done is defined %}
-    <div class="flash">Done. Copied {{ result.done|join(', ') if result.done else 'nothing (nothing was ticked)' }}.{% if result.failed %} I couldn't download: {{ result.failed|join(', ') }}.{% endif %} <a href="/" target="_blank">Open your website</a></div>
+    <div class="flash">Done. {% if result.brand %}Filled in {{ result.brand }}: {% else %}Copied {% endif %}{{ result.done|join(', ') if result.done else 'nothing (nothing was ticked)' }}.{% if result.failed %} I couldn't download: {{ result.failed|join(', ') }}.{% endif %} <a href="{{ '/?site=' ~ result.brand_id if result.brand_id else '/' }}" target="_blank">Open {{ 'that brand\'s' if result.brand else 'your' }} website</a></div>
   {% endif %}
 </div>
 {% if data %}
@@ -18,6 +18,19 @@
   <input type="hidden" name="action" value="apply">
   <h2>What I found on {{ data.site }}</h2>
   <p class="muted small">Read from {{ data.pages|length }} page{{ '' if data.pages|length == 1 else 's' }}. Untick anything you don't want, and edit any text before copying.</p>
+  <label style="display:block;margin:10px 0"><b>Copy it into</b><br>
+    <select name="brand">
+      <option value="">Main website (Settings &gt; Customer website)</option>
+      {% for s in sites %}<option value="{{ s['id'] }}">Brand: {{ s['name'] }}</option>{% endfor %}
+      <option value="new">A new brand named after this website</option>
+    </select>
+    <span class="muted small">Pick a brand to fill that brand's name, logo, phone, colors, photos and text. The main website and other brands stay as they are.</span></label>
+  {% if data.colors %}
+    <label style="display:block;margin:10px 0"><input type="checkbox" name="use_colors" value="1" checked> <b>Colors</b> (for a brand)<br>
+    {% for c in data.colors %}<span style="display:inline-flex;align-items:center;gap:4px;margin-right:10px"><input type="color" name="color" value="{{ c }}"> <span class="small muted">{{ 'Main' if loop.first else 'Accent' if loop.index == 2 else '' }}</span></span>{% endfor %}</label>
+  {% else %}
+    <label style="display:block;margin:10px 0"><input type="checkbox" name="use_colors" value="1" checked> <b>Colors</b> (for a brand): this site hides its colors, so I'll take them from its logo.</label>
+  {% endif %}
   {% set vals = {'dispatch_phone': phone_fmt} %}
   {% for k, label, n in fields %}{% set v = vals.get(k) or data.get(k) or '' %}{% if v %}
     <label style="display:block;margin:10px 0"><input type="checkbox" name="use_{{ k }}" value="1" checked> <b>{{ label }}</b><br>
@@ -57,7 +70,7 @@
     {% endfor %}
   {% endif %}
   <label style="display:block;margin:14px 0"><input type="checkbox" name="permission" value="1"> I own this website or have the owner's permission to use its text, logo and photos.</label>
-  <button class="btn">Copy to my website</button>
+  <button class="btn">Copy</button>
   <p class="muted small">Pictures are downloaded and saved on your own server. You can change anything later in Settings &gt; Customer website.</p>
 </form>
 {% endif %}

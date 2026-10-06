@@ -227,6 +227,31 @@ async function setLogo(inp){
   <p class="small muted">Off: no cash orders anywhere (website, dispatch orders, gift cards). Customers pay by card, PayPal, Venmo, gift card, or house account.</p>
   <button class="btn primary">Save</button>
 </form>
+{% if owner_view %}
+<form class="panel narrow" method="post" autocomplete="off">
+  <input type="hidden" name="pp_present" value="1">
+  <h2>PayPal keys</h2>
+  {% for kind, msg in pp_msgs %}<p style="color:{{ '#1e7e34' if kind == 'ok' else '#c0392b' }}">{{ msg }}</p>{% endfor %}
+  <p class="small muted">Get these from developer.paypal.com under Apps &amp; Credentials. Only owners see this. Secrets are hidden after saving; leave a secret box empty to keep the saved one.</p>
+  <label>Use</label>
+  <div style="display:flex;gap:16px;margin-bottom:6px">
+    <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="pp_mode" value="sandbox" style="width:auto" {{ 'checked' if pp.mode == 'sandbox' else '' }}> Sandbox (test money)</label>
+    <label style="display:flex;gap:6px;align-items:center"><input type="radio" name="pp_mode" value="live" style="width:auto" {{ 'checked' if pp.mode == 'live' else '' }}> Live (real money)</label>
+  </div>
+  <p class="small" style="color:{{ '#1e7e34' if pp.on else '#c0392b' }}">{% if pp.on %}PayPal is on, using the {{ pp.mode }} keys.{% else %}PayPal is off: no {{ pp.mode }} keys saved, so customers cannot pay online.{% endif %}</p>
+  {% for m, title in (('sandbox', 'Sandbox keys'), ('live', 'Live keys')) %}
+  <h3 style="margin:14px 0 4px">{{ title }}</h3>
+  <label>Client ID</label>
+  <input name="pp_{{ m }}_client" value="{{ pp[m].client }}" spellcheck="false" autocomplete="off">
+  <label>Secret</label>
+  <input name="pp_{{ m }}_secret" type="password" value="" spellcheck="false" autocomplete="new-password"
+         placeholder="{% if pp[m].has_secret %}Saved{% if pp[m].tail %}, ends in {{ pp[m].tail }}{% endif %}. Type a new one to replace it.{% else %}Not saved yet{% endif %}">
+  {% if pp[m].client or pp[m].has_secret %}<label style="display:flex;gap:6px;align-items:center;margin-top:4px"><input type="checkbox" name="pp_{{ m }}_clear" value="1" style="width:auto"> Remove the {{ m }} keys</label>{% endif %}
+  {% endfor %}
+  <p class="small muted">Switching between Sandbox and Live waits until no order has a PayPal hold from the other set of keys.</p>
+  <button class="btn primary">Save PayPal keys</button>
+</form>
+{% endif %}
 <div class="panel narrow">
   <h2>Purge old orders now</h2>
   <p class="muted small">Download the orders first. Deleted orders cannot be brought back.</p>

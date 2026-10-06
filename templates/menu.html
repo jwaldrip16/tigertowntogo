@@ -158,6 +158,10 @@ function addAnyItem(){
 }
 let cart = [], geo = null, feeCents = 0, miles = 0, tipCents = 0, tipPct = null;
 let MENU = [];
+{% if r is defined and r %}{% set _rp = (r['image'] or '') %}{% set _rl = (r['logo'] or '') %}
+const REST_PIC = {{ ((_rp if _rp.startswith('http') else '/media/' ~ _rp) if _rp else ((_rl if _rl.startswith('http') or _rl.startswith('/') else '/media/' ~ _rl) if _rl else ''))|tojson }};
+const REST_PIC_LOGO = {{ (not _rp and _rl != '')|tojson }};
+{% else %}const REST_PIC = '', REST_PIC_LOGO = false;{% endif %}
 function escH(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function custWhen(){
   const later = document.getElementById('whenMode').value === 'later';
@@ -166,7 +170,8 @@ function custWhen(){
 function itemCard(it, hideLabel){
   const on = Avail.ok(it, custWhen());
   return '<button type="button" class="mcard'+(on?'':' off')+'" onclick="openItem('+it.id+')">'+
-    (it.image ? '<img class="mimg" loading="lazy" src="'+it.image+'" alt="">' : '')+
+    (it.image ? '<img class="mimg" loading="lazy" src="'+it.image+'" alt="">'
+              : (REST_PIC ? '<img class="mimg mfall'+(REST_PIC_LOGO?' mlogo':'')+'" loading="lazy" src="'+REST_PIC+'" alt="">' : ''))+
     '<div class="mhead"><strong>'+escH(it.name)+'</strong><span class="mprice">'+it.price+'</span></div>'+
     (it.description ? '<div class="mdesc">'+escH(it.description)+'</div>' : '')+
     (it.avail_label && (!hideLabel || !on) ? '<div class="mavail">'+(on?'Available ':'Not available now. Available ')+escH(it.avail_label)+'</div>' : '')+

@@ -23,6 +23,10 @@
     <div class="flash">Minimum orders matched. {{ result.min_fixed }} restaurant{{ '' if result.min_fixed == 1 else 's' }} changed.</div>
     {% elif result.ok %}
     <div class="flash">Done. {{ result.created }} restaurants added, {{ result.updated }} updated, {{ result['items'] }} menu items loaded.</div>
+    {% if result.brand %}<div class="flash">{% if result.brand_region %}That region now belongs to {{ result.brand }}.{% else %}Pick a region next time to tie it to {{ result.brand }}.{% endif %}
+      {% if result.brand_done %} Filled in {{ result.brand }}'s {{ result.brand_done|join(', ') }}.{% endif %}
+      {% if result.brand_failed %} Not filled: {{ result.brand_failed|join(', ') }}.{% endif %}
+      <a href="/dispatch/regions">See it under Brand sites</a></div>{% endif %}
     {% else %}<div class="flash error">{{ result.error }}</div>{% endif %}
   {% endif %}
   <div class="panel" id="picBox" style="margin:10px 0">
@@ -54,6 +58,13 @@
         <select name="region_id"><option value="">No region</option>
           {% for g in regions %}<option value="{{ g['id'] }}">{{ g['name'] }}</option>{% endfor %}
         </select></label>
+      <label>Brand for that region
+        <select name="brand" id="brandPick">
+          <option value="">Keep the region's brand</option>
+          {% for s in sites %}<option value="{{ s['id'] }}">{{ s['name'] }}</option>{% endfor %}
+          <option value="new">New brand from this website</option>
+        </select></label>
+      <label class="small"><input type="checkbox" name="brand_fill" value="1" checked> Fill that brand's name, logo, phone and design from {{ site or 'this website' }}</label>
       <button type="button" class="btn" onclick="tick(true)">Check all open</button>
       <button type="button" class="btn" onclick="tick(false)">Uncheck all</button>
       <button class="btn primary">Import checked</button>
@@ -73,7 +84,11 @@
       </tr>{% endfor %}
     </table>
   </form>
-  <script>function tick(on){document.querySelectorAll('input[name=pick]').forEach(b=>{b.checked = on && b.dataset.paused!=='1';});}</script>
+  <script>
+(function(){ const RS = {{ region_site|tojson }}; const rg = document.querySelector('select[name=region_id]'), bp = document.getElementById('brandPick');
+  if(rg && bp) rg.addEventListener('change', function(){ const sid = RS[rg.value]; bp.value = sid ? String(sid) : ''; });
+})();
+function tick(on){document.querySelectorAll('input[name=pick]').forEach(b=>{b.checked = on && b.dataset.paused!=='1';});}</script>
   {% endif %}
 </div>
 {% endblock %}

@@ -405,6 +405,51 @@ def _faqs(page):
     return out
 
 
+def _hex6(v):
+    v = v.lower()
+    if len(v) == 4:
+        v = "#" + "".join(c * 2 for c in v[1:])
+    return v
+
+
+def _colorful(v):
+    r, g, b = (int(v[i:i + 2], 16) for i in (1, 3, 5))
+    hi, lo = max(r, g, b), min(r, g, b)
+    return hi - lo > 60 and hi > 70 and not (lo > 215)
+
+
+def guess_colors(w, base, page):
+    """The site's main brand colors: its theme color, then the most used bright colors in its styles."""
+    from collections import Counter
+    picks = []
+    tc = _meta(page, "theme-color", "msapplication-TileColor")
+    if re.fullmatch(r"#[0-9a-fA-F]{3}|#[0-9a-fA-F]{6}", tc or ""):
+        if _colorful(_hex6(tc)):
+            picks.append(_hex6(tc))
+    css = " ".join(re.findall(r"<style[^>]*>(.*?)</style>", page, re.S | re.I))
+    css += " ".join(re.findall(r'style=["\']([^"\']+)["\']', page, re.I))
+    host = urllib.parse.urlparse(base).netloc
+    for href in re.findall(r'<link[^>]+rel=["\']stylesheet["\'][^>]*href=["\']([^"\']+)', page, re.I)[:6]:
+        full = _abs(base, href)
+        if urllib.parse.urlparse(full).netloc != host:
+            continue
+        try:
+            css += " " + w.get(full, tries=1, timeout=15)[:600000]
+        except Exception:
+            pass
+    cnt = Counter()
+    for m in re.findall(r"(?:color|background(?:-color)?|border(?:-color)?|fill)\s*:\s*[^;}]*?(#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b)", css):
+        v = _hex6(m)
+        if _colorful(v):
+            cnt[v] += 1
+    for v, _n in cnt.most_common(12):
+        if v not in picks:
+            picks.append(v)
+        if len(picks) >= 3:
+            break
+    return picks[:3]
+
+
 def site_pull(site, st=None):
     """Read a public website and pull the parts that fit the Fleet Foot Delivery customer website."""
     st = st if st is not None else {}
@@ -437,6 +482,10 @@ def site_pull(site, st=None):
         m = re.search(r'<link[^>]+rel=["\'](?:apple-touch-icon|icon|shortcut icon)["\'][^>]*href=["\']([^"\']+)', page, re.I)
         logo = _abs(base, m.group(1)) if m else ""
     out["logo"] = logo
+    try:
+        out["colors"] = guess_colors(w, base, page)
+    except Exception:
+        out["colors"] = []
     # big pictures
     pics = []
     og = _meta(page, "og:image", "twitter:image")

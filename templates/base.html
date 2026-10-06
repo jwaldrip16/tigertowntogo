@@ -3,6 +3,8 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{% block title %}{{ biz_name }}{% endblock %}</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+{% if brand_font %}<link rel="stylesheet" href="{{ brand_font }}">{% endif %}
+{% if brand_css %}<style>{{ brand_css|safe }}</style>{% endif %}
 <link rel="icon" type="image/png" href="/brand/icon-32.png">
 <link rel="apple-touch-icon" href="/brand/icon-180.png">
 <script>
@@ -16,7 +18,7 @@ function money(c){ return '$' + (c/100).toFixed(2); }
 </script>
 {% if not (request.path.startswith('/dispatch') or request.path.startswith('/driver') or request.path.startswith('/restaurant')) %}
 <link rel="manifest" href="/manifest/customer.json">
-<meta name="theme-color" content="#e53935">
+<meta name="theme-color" content="{{ brand_theme or '#e53935' }}">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="{{ biz_name }}">

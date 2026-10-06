@@ -446,8 +446,7 @@ Drivers and restaurants each have a Completed tab. Finished orders stay there un
 
 ## Venmo, PayPal and cards (PayPal Checkout)
 Add these Railway variables to turn it on (leave them out and the site works the old way):
-- PAYPAL_CLIENT_ID and PAYPAL_SECRET: from developer.paypal.com > Apps & Credentials (Sandbox first, then Live)
-- PAYPAL_ENV: sandbox while testing, live when you take real money
+- PayPal keys: Dispatch > Settings > PayPal keys (owners only). Enter the sandbox and live client ID and secret from developer.paypal.com > Apps & Credentials, then pick Sandbox or Live. PayPal Railway variables are not used.
 
 How it works: the customer picks "Venmo, PayPal or card" at checkout and pays on /pay/<order code>.
 The money is only held. After delivery the site charges the final total, so a tip added on the

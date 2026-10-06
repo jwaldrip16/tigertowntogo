@@ -627,3 +627,6 @@ button.rwopt{cursor:pointer}button.rwopt.sel{outline:4px solid #16a34a;outline-o
 .navsteptxt{flex:1;min-width:0}
 .navstepdist{color:#555;white-space:nowrap;font-size:14px}
 .navstepmsg{padding:16px 14px;color:#555}
+
+.mimg.mfall{opacity:.55;filter:saturate(.8)}
+.mimg.mlogo{object-fit:contain;background:#f6f6f6;padding:14px}

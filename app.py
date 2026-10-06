@@ -1,6 +1,6 @@
 
 import urllib.error
-import base64, difflib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
+import base64, difflib, hashlib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
 import dbx
 from flask import Flask, g, has_request_context, request, session, redirect, url_for, render_template, jsonify, send_from_directory, flash, get_flashed_messages
 import presets
@@ -479,6 +479,8 @@ def init_db():
     con.execute("""CREATE TABLE IF NOT EXISTS sites (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
                    phone TEXT, domains TEXT, logo TEXT, sort INTEGER DEFAULT 0, created_at TEXT)""")
     ensure_column(con, "regions", "site_id", "INTEGER DEFAULT 0")   # 0 = not tied to a brand site
+    ensure_column(con, "sites", "design", "TEXT")                   # JSON: colors, font, photos, home page text
+    ensure_column(con, "menu_items", "image_src", "TEXT")          # where an item picture first came from
     ensure_column(con, "regions", "min_order_cents", "INTEGER")   # blank = no minimum
     ensure_column(con, "regions", "max_miles", "REAL")            # blank = no radius limit
     ensure_column(con, "restaurants", "min_order_cents", "INTEGER")  # blank = use the region's
@@ -944,11 +946,93 @@ class order_site:
         return False
 
 
+# ---------------------------------------------------------------- brand site designs
+# Each brand site can have its own look. Anything left blank uses the main website's.
+BRAND_FONTS = {"": ("", ""), "poppins": ("'Poppins',system-ui,sans-serif", "Poppins"),
+               "montserrat": ("'Montserrat',system-ui,sans-serif", "Montserrat"),
+               "nunito": ("'Nunito',system-ui,sans-serif", "Nunito"),
+               "oswald": ("'Oswald','Arial Narrow',sans-serif", "Oswald"),
+               "lora": ("'Lora',Georgia,serif", "Lora"),
+               "roboto-slab": ("'Roboto Slab',Georgia,serif", "Roboto+Slab"),
+               "georgia": ("Georgia,'Times New Roman',serif", ""),
+               "arial": ("Arial,Helvetica,sans-serif", "")}
+BRAND_FONT_LABELS = (("", "Standard"), ("poppins", "Poppins (modern)"), ("montserrat", "Montserrat (bold)"),
+                     ("nunito", "Nunito (rounded)"), ("oswald", "Oswald (tall, sporty)"), ("lora", "Lora (classic)"),
+                     ("roboto-slab", "Roboto Slab (diner)"), ("georgia", "Georgia (serif)"), ("arial", "Arial (plain)"))
+BRAND_CORNERS = {"": None, "round": 16, "soft": 8, "square": 0}
+BRAND_COLORS = ("brand", "brand2", "bg", "ink", "header")
+BRAND_IMAGES = ("hero_image", "pocket_image")
+# setting keys a brand can override on its own website
+BRAND_TEXT_KEYS = ("home_headline", "home_sub", "site_announce", "how_title", "how1_t", "how1_p", "how2_t", "how2_p",
+                   "how3_t", "how3_p", "rest_title", "closed_msg", "any_text", "pocket_title", "pocket_text",
+                   "business_email", "business_address", "social_x", "social_facebook", "social_instagram", "faq_text")
+_BRAND_SETTING_KEYS = set(BRAND_TEXT_KEYS) | set(BRAND_IMAGES)
+
+
+def site_design(s):
+    if s is None:
+        return {}
+    try:
+        d = json.loads(s["design"] or "{}")
+        return d if isinstance(d, dict) else {}
+    except Exception:
+        return {}
+
+
+def _hex_ok(v):
+    v = (v or "").strip().lower()
+    if re.fullmatch(r"#[0-9a-f]{3}", v):
+        v = "#" + "".join(c * 2 for c in v[1:])
+    return v if re.fullmatch(r"#[0-9a-f]{6}", v) else ""
+
+
+def _is_dark(hexv):
+    r, g_, b = (int(hexv[i:i + 2], 16) for i in (1, 3, 5))
+    return (0.299 * r + 0.587 * g_ + 0.114 * b) < 150
+
+
+def brand_look(s):
+    """CSS, phone bar color and font link for a brand site's own design."""
+    d = site_design(s)
+    css, rules = [], []
+    v = {k: _hex_ok(d.get(k)) for k in BRAND_COLORS}
+    if v["brand"]:
+        css.append("--brand:" + v["brand"])
+        css.append("--brand2:" + (v["brand2"] or v["brand"]))
+    elif v["brand2"]:
+        css.append("--brand2:" + v["brand2"])
+    if v["bg"]:
+        css.append("--bg:" + v["bg"])
+    if v["ink"]:
+        css.append("--ink:" + v["ink"])
+    out = ":root{" + ";".join(css) + "}" if css else ""
+    fam, gname = BRAND_FONTS.get(d.get("font") or "", ("", ""))
+    if fam:
+        rules.append("body,button,input,select,textarea{font-family:" + fam + "}")
+    rad = BRAND_CORNERS.get(d.get("corners") or "")
+    if rad is not None:
+        rules.append(".cust .card,.cust .panel,.cust .mcard,.cust .rcard,.cust .hero,.cust .noimg,.cust .imimg"
+                     "{border-radius:%dpx}" % rad)
+        rules.append(".cust .btn,.cust input,.cust select,.cust textarea{border-radius:%dpx}" % min(rad, 10))
+    if v["header"]:
+        rules.append(".topbar{background:%s;border-bottom-color:%s}" % (v["header"], v["header"]))
+        if _is_dark(v["header"]):
+            rules.append(".topbar nav a,.topbar .brand{color:#fff}.topbar nav a{opacity:.9}")
+    font_link = ("https://fonts.googleapis.com/css2?family=" + gname + ":wght@400;600;700;800&display=swap") if gname else ""
+    return {"brand_css": out + "".join(rules), "brand_theme": v["brand"] or "", "brand_font": font_link}
+
+
 def setting(key, cast=int):
     if key in _SITE_KEYS:
         s = current_site()
         if s is not None and (s[_SITE_KEYS[key]] or "").strip():
             return cast(s[_SITE_KEYS[key]].strip())
+    if key in _BRAND_SETTING_KEYS:
+        s = current_site()
+        if s is not None:
+            dv = str(site_design(s).get(key) or "").strip()
+            if dv and (key not in BRAND_IMAGES or os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(dv)))):
+                return cast(dv)
     row = db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return cast(row["value"]) if row else None
 
@@ -2281,7 +2365,7 @@ def menu_payload(rid):
                     "price_cents": it["price_cents"], "price": money(it["price_cents"]),
                     "section": (it["section"] or "").strip(),
                     "tab": (it["menu_tab"] or "").strip(),
-                    "image": media_url(it["image"]),
+                    "image": item_picture(it),
                     "groups": item_options(it["id"]), **avail_fields(it)})
     return out
 
@@ -3093,33 +3177,82 @@ def add_extra_charge(o, cents, label, ref):
 
 
 # ---------------------------------------------------------------- PayPal, Venmo and cards through PayPal
-# Set PAYPAL_CLIENT_ID and PAYPAL_SECRET (and PAYPAL_ENV=live when you go live; sandbox otherwise).
+# PayPal keys live in Dispatch settings (owner only): a sandbox pair, a live pair and a Sandbox/Live switch.
+# Railway variables are not used for PayPal.
 # At checkout the money is only held (authorized). After delivery the site charges the final total,
 # so a tip added after delivery is included. PayPal lets that charge run up to 15% or $75 over the
 # hold, whichever is less; anything past that shows on the tracking page as a small Pay the rest button.
-PAYPAL_CLIENT_ID = os.environ.get("PAYPAL_CLIENT_ID", "").strip()
-PAYPAL_SECRET = os.environ.get("PAYPAL_SECRET", "").strip()
-PAYPAL_ENV = (os.environ.get("PAYPAL_ENV", "sandbox") or "sandbox").strip().lower()
-PP_BASE = "https://api-m.paypal.com" if PAYPAL_ENV == "live" else "https://api-m.sandbox.paypal.com"
+PP_MODES = ("sandbox", "live")
+PP_KEYS = ("pp_mode", "pp_sandbox_client", "pp_sandbox_secret", "pp_live_client", "pp_live_secret")
 PP_SOURCES = {"venmo": "Venmo", "paypal": "PayPal", "card": "card"}   # venmo kept only for old orders
-_pp_tok = {"t": "", "exp": 0.0}
+_pp_tok = {"t": "", "exp": 0.0, "who": ""}
 _pp_lock = threading.Lock()
 _pp_last_sweep = [0.0]
 
-def pp_enabled():
-    return bool(PAYPAL_CLIENT_ID and PAYPAL_SECRET)
+def _pp_settings():
+    """The saved PayPal keys. Works inside a page request or a background job."""
+    q = "SELECT key, value FROM settings WHERE key IN (%s)" % ",".join("?" * len(PP_KEYS))
+    try:
+        rows = db().execute(q, PP_KEYS).fetchall()
+    except RuntimeError:          # no request running
+        con = dbx.connect(DB_PATH)
+        try:
+            rows = con.execute(q, PP_KEYS).fetchall()
+        finally:
+            con.close()
+    except Exception:
+        rows = []
+    return {r[0]: (r[1] or "").strip() for r in rows}
 
-def pp_token():
+def pp_conf():
+    v = _pp_settings()
+    mode = v.get("pp_mode") if v.get("pp_mode") in PP_MODES else "sandbox"
+    cid, sec = v.get("pp_%s_client" % mode, ""), v.get("pp_%s_secret" % mode, "")
+    return {"mode": mode, "client": cid, "secret": sec,
+            "base": "https://api-m.paypal.com" if mode == "live" else "https://api-m.sandbox.paypal.com",
+            "all": v}
+
+def pp_client_id():
+    return pp_conf()["client"]
+
+def pp_enabled():
+    c = pp_conf()
+    return bool(c["client"] and c["secret"])
+
+def pp_token(conf=None):
+    c = conf or pp_conf()
+    who = c["mode"] + ":" + c["client"] + ":" + hashlib.sha256(c["secret"].encode()).hexdigest()
     with _pp_lock:
-        if _pp_tok["t"] and time.time() < _pp_tok["exp"] - 60:
+        if _pp_tok["t"] and _pp_tok["who"] == who and time.time() < _pp_tok["exp"] - 60:
             return _pp_tok["t"]
-        auth = base64.b64encode((PAYPAL_CLIENT_ID + ":" + PAYPAL_SECRET).encode()).decode()
-        req = urllib.request.Request(PP_BASE + "/v1/oauth2/token", data=b"grant_type=client_credentials",
+        auth = base64.b64encode((c["client"] + ":" + c["secret"]).encode()).decode()
+        req = urllib.request.Request(c["base"] + "/v1/oauth2/token", data=b"grant_type=client_credentials",
                                      headers={"Authorization": "Basic " + auth,
                                               "Content-Type": "application/x-www-form-urlencoded"})
         j = json.loads(urllib.request.urlopen(req, timeout=15).read())
-        _pp_tok["t"], _pp_tok["exp"] = j["access_token"], time.time() + int(j.get("expires_in", 3000))
+        _pp_tok["t"], _pp_tok["exp"], _pp_tok["who"] = j["access_token"], time.time() + int(j.get("expires_in", 3000)), who
         return _pp_tok["t"]
+
+def pp_settings_view():
+    """What the owner sees in Settings. Secrets never leave the server; only the last 4 characters."""
+    c = pp_conf(); v = c["all"]; out = {"mode": c["mode"], "on": bool(c["client"] and c["secret"])}
+    for m in PP_MODES:
+        sec = v.get("pp_%s_secret" % m, "")
+        out[m] = {"client": v.get("pp_%s_client" % m, ""), "has_secret": bool(sec), "tail": sec[-4:] if len(sec) >= 8 else ""}
+    return out
+
+def pp_test_keys(mode, cid, sec):
+    """Ask PayPal whether a key pair works. Returns (ok, message)."""
+    base = "https://api-m.paypal.com" if mode == "live" else "https://api-m.sandbox.paypal.com"
+    try:
+        pp_token({"mode": mode, "client": cid, "secret": sec, "base": base})
+        return True, "PayPal accepted the %s keys." % mode
+    except urllib.error.HTTPError as e:
+        if e.code in (401, 403):
+            return False, "PayPal turned down the %s keys. Check the client ID and secret, and that they are %s keys." % (mode, mode)
+        return False, "PayPal answered with an error (%s) when checking the %s keys." % (e.code, mode)
+    except Exception:
+        return False, "Could not reach PayPal to check the %s keys. They are saved; try again later." % mode
 
 def pp_api(method, path, body=None, request_id=None):
     """Returns (http status, json). Never raises."""
@@ -3129,7 +3262,7 @@ def pp_api(method, path, body=None, request_id=None):
         if request_id:
             h["PayPal-Request-Id"] = request_id
         data = json.dumps(body).encode() if body is not None else (b"" if method == "POST" else None)
-        req = urllib.request.Request(PP_BASE + path, data=data, headers=h, method=method)
+        req = urllib.request.Request(pp_conf()["base"] + path, data=data, headers=h, method=method)
         resp = urllib.request.urlopen(req, timeout=20)
         raw = resp.read()
         return resp.status, (json.loads(raw) if raw else {})
@@ -3220,7 +3353,7 @@ def pp_void(o, why="cancelled"):
 
 @app.get("/api/paypal/client")
 def api_pp_client():
-    return jsonify({"ok": True, "enabled": pp_enabled(), "client_id": PAYPAL_CLIENT_ID, "env": PAYPAL_ENV})
+    return jsonify({"ok": True, "enabled": pp_enabled(), "client_id": pp_client_id(), "env": pp_conf()["mode"]})
 
 @app.post("/api/paypal/replace-card")
 def api_pp_replace_card():
@@ -3306,7 +3439,7 @@ def pay_page(code):
     amount = info["owed"] if kind == "balance" else money(o["total_cents"])
     return render_template("pay.html", order=o, code=code, kind=kind, amount=amount, info=info,
                            rname=(o["pickup_name"] or (r["name"] if r else "")),
-                           pp_ready=pp_enabled(), client_id=PAYPAL_CLIENT_ID,
+                           pp_ready=pp_enabled(), client_id=pp_client_id(),
                            is_dispatch=bool(dispatcher_required()))
 
 @app.post("/api/paypal/create")
@@ -3478,6 +3611,17 @@ def api_track_tip(code):
 @app.context_processor
 def inject_paypal():
     return {"pp_enabled": pp_enabled(), "pp_on": pp_enabled()}
+
+
+@app.context_processor
+def inject_brand_look():
+    try:
+        if request.path.startswith(_STAFF_PREFIXES):
+            return {"brand_css": "", "brand_theme": "", "brand_font": ""}
+        s = current_site()
+        return brand_look(s) if s is not None else {"brand_css": "", "brand_theme": "", "brand_font": ""}
+    except Exception:
+        return {"brand_css": "", "brand_theme": "", "brand_font": ""}
 
 
 @app.context_processor
@@ -7298,8 +7442,34 @@ def sites_payload():
         out.append({"id": s["id"], "name": s["name"], "phone": nice_phone(s["phone"] or "") if (s["phone"] or "").strip() else "",
                     "domains": ", ".join(site_domains(s)),
                     "logo": media_url(lg) if lg and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(lg))) else "",
-                    "regions": sorted(site_region_ids(s["id"]))})
+                    "regions": sorted(site_region_ids(s["id"])),
+                    "design": _design_payload(s)})
     return out
+
+
+def _design_payload(s):
+    d = site_design(s)
+    out = {k: _hex_ok(d.get(k)) for k in BRAND_COLORS}
+    out["font"] = d.get("font") or ""
+    out["corners"] = d.get("corners") or ""
+    for k in BRAND_TEXT_KEYS:
+        out[k] = str(d.get(k) or "")
+    for k in BRAND_IMAGES:
+        nm = str(d.get(k) or "").strip()
+        out[k] = media_url(nm) if nm and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(nm))) else ""
+    return out
+
+
+def save_site_design(con, sid, changes):
+    """Merge changes into a brand's design. Blank text or color removes that part."""
+    row = con.execute("SELECT * FROM sites WHERE id=?", (sid,)).fetchone()
+    d = site_design(row)
+    for k, val in changes.items():
+        if val in (None, ""):
+            d.pop(k, None)
+        else:
+            d[k] = val
+    con.execute("UPDATE sites SET design=? WHERE id=?", (json.dumps(d), sid))
 
 
 def sites_edit(b, con, who):
@@ -7345,6 +7515,40 @@ def sites_edit(b, con, who):
             log("site", who + " changed brand site " + name)
         con.commit()
         return jsonify({"ok": True, "id": sid, **regions_payload()})
+    if op == "site_design":
+        s = site_by_id(b.get("id"))
+        if not s:
+            return jsonify({"ok": False, "error": "That site is gone."}), 404
+        ch = {}
+        for k in BRAND_COLORS:
+            if k in b:
+                raw = str(b.get(k) or "").strip()
+                hv = _hex_ok(raw)
+                if raw and not hv:
+                    return jsonify({"ok": False, "error": "Pick a color for " + k + " with the color box."}), 400
+                ch[k] = hv
+        if "font" in b:
+            if (b.get("font") or "") not in BRAND_FONTS:
+                return jsonify({"ok": False, "error": "Pick a font from the list."}), 400
+            ch["font"] = b.get("font") or ""
+        if "corners" in b:
+            if (b.get("corners") or "") not in BRAND_CORNERS:
+                return jsonify({"ok": False, "error": "Pick a corner style from the list."}), 400
+            ch["corners"] = b.get("corners") or ""
+        lim = {k: n for k, _d, n in SITE_TEXT}
+        lim.update({"home_headline": 120, "business_email": 120, "business_address": 160, "social_x": 200,
+                    "social_facebook": 200, "social_instagram": 200, "faq_text": 12000})
+        for k in BRAND_TEXT_KEYS:
+            if k in b:
+                val = str(b.get(k) or "")
+                val = val.strip()[:lim[k]] if k == "faq_text" else " ".join(val.split())[:lim[k]]
+                if k.startswith("social_") and val and not val.startswith("http"):
+                    val = "https://" + val
+                ch[k] = val
+        save_site_design(con, s["id"], ch)
+        con.commit()
+        log("site", who + " changed the design of " + s["name"])
+        return jsonify({"ok": True, **regions_payload()})
     if op == "delete_site":
         s = site_by_id(b.get("id"))
         if not s:
@@ -7352,6 +7556,8 @@ def sites_edit(b, con, who):
         con.execute("UPDATE regions SET site_id=0 WHERE site_id=?", (s["id"],))
         con.execute("DELETE FROM sites WHERE id=?", (s["id"],))
         drop_media((s["logo"] or "").strip())
+        for _k in BRAND_IMAGES:
+            drop_media(str(site_design(s).get(_k) or "").strip())
         con.commit()
         log("site", who + " deleted brand site " + s["name"])
         return jsonify({"ok": True, **regions_payload()})
@@ -7380,6 +7586,9 @@ def api_site_logo():
     s = site_by_id(request.form.get("id"))
     if not s:
         return jsonify({"ok": False, "error": "That site is gone."}), 404
+    which = request.form.get("which") or "logo"
+    if which in BRAND_IMAGES:
+        return _site_photo(s, which)
     old = (s["logo"] or "").strip()
     if request.form.get("op") == "reset":
         drop_media(old)
@@ -7407,11 +7616,40 @@ def api_site_logo():
     return jsonify({"ok": True, "logo": media_url(name)})
 
 
+def _site_photo(s, which):
+    """A brand's own big top photo or app section photo."""
+    old = str(site_design(s).get(which) or "").strip()
+    if request.form.get("op") == "reset":
+        drop_media(old)
+        save_site_design(db(), s["id"], {which: ""})
+        db().commit()
+        return jsonify({"ok": True, "url": ""})
+    fs = request.files.get("photo")
+    if not fs:
+        return jsonify({"ok": False, "error": "Choose a picture to upload."}), 400
+    raw = fs.read(PHOTO_MAX_BYTES + 1)
+    if len(raw) > PHOTO_MAX_BYTES:
+        return jsonify({"ok": False, "error": "That picture is over 10 MB. Pick a smaller one."}), 400
+    try:
+        from PIL import Image
+        import io
+        im = Image.open(io.BytesIO(raw)).convert("RGB")
+        im.thumbnail((2000, 2000))
+        name = secrets.token_hex(10) + ".jpg"
+        im.save(os.path.join(UPLOAD_DIR, name), "JPEG", quality=85, optimize=True)
+    except Exception:
+        return jsonify({"ok": False, "error": "That picture could not be read. Try a PNG or JPG."}), 400
+    drop_media(old)
+    save_site_design(db(), s["id"], {which: name})
+    db().commit()
+    return jsonify({"ok": True, "url": media_url(name)})
+
+
 def regions_payload():
     con = db()
     regs = all_regions()
     return {"ok": True, "me": session.get("dispatcher_id"), "owner": is_owner(),
-            "sites": sites_payload(),
+            "sites": sites_payload(), "fonts": BRAND_FONT_LABELS,
             "regions": [{"id": r["id"], "name": r["name"], "site_id": (_region(r["id"])["site_id"] or 0),
                          "own_hours": bool(region_own_hours(r["id"])),
                          "min_order_cents": _rv(_region(r["id"]), "min_order_cents"),
@@ -7473,7 +7711,7 @@ def api_delete_orders():
             missing.append(c)
     if not want and not missing:
         return jsonify({"ok": False, "error": "Pick at least one order."}), 400
-    live = PAYPAL_ENV == "live"
+    live = pp_conf()["mode"] == "live"
     deleted, skipped = [], []
     for oid in sorted(want):
         o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
@@ -7744,7 +7982,7 @@ def api_regions_edit():
                 out.add(x)
         return out
 
-    if op in ("add_site", "edit_site", "delete_site", "set_region_site"):
+    if op in ("add_site", "edit_site", "delete_site", "set_region_site", "site_design"):
         return sites_edit(b, con, who)
     if op in ("add_region", "rename_region"):
         name = " ".join(str(b.get("name") or "").split())[:40]
@@ -8407,6 +8645,7 @@ def dispatch_settings():
     if not dispatcher_required():
         return redirect(url_for("dispatch_login"))
     saved = False
+    pp_msgs = []
     if request.method == "POST":
         if "automsg_present" in request.form and is_owner(session.get("dispatcher_id")):
             for _k, _l, _h, _d in AUTO_MSGS:
@@ -8417,6 +8656,40 @@ def dispatch_settings():
             except ValueError:
                 _e = 15
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('short_staff_every_min',?)", (str(_e),))
+        if "pp_present" in request.form and is_owner(session.get("dispatcher_id")):
+            _cur = _pp_settings()
+            _new = dict(_cur)
+            for _m in PP_MODES:
+                _c = (request.form.get("pp_%s_client" % _m) or "").strip()[:200]
+                _new["pp_%s_client" % _m] = _c
+                _sv = (request.form.get("pp_%s_secret" % _m) or "").strip()[:200]
+                if request.form.get("pp_%s_clear" % _m):
+                    _new["pp_%s_client" % _m], _new["pp_%s_secret" % _m] = "", ""
+                elif _sv:
+                    _new["pp_%s_secret" % _m] = _sv
+            _mode = request.form.get("pp_mode") if request.form.get("pp_mode") in PP_MODES else "sandbox"
+            _old_mode = _cur.get("pp_mode") if _cur.get("pp_mode") in PP_MODES else "sandbox"
+            if _mode != _old_mode:
+                _held = [r[0] for r in db().execute(
+                    "SELECT code FROM orders WHERE pp_state='authorized' ORDER BY id DESC LIMIT 20").fetchall()]
+                if _held:
+                    pp_msgs.append(("bad", "Still on %s: these orders have a PayPal hold made with the %s keys, "
+                                    "so they must be charged or released first: %s" % (_old_mode, _old_mode, ", ".join(_held))))
+                    _mode = _old_mode
+            _new["pp_mode"] = _mode
+            for _k in PP_KEYS:
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, _new.get(_k, "")))
+            db().commit()
+            for _m in PP_MODES:
+                _c, _sv = _new.get("pp_%s_client" % _m, ""), _new.get("pp_%s_secret" % _m, "")
+                _changed = (_c, _sv) != (_cur.get("pp_%s_client" % _m, ""), _cur.get("pp_%s_secret" % _m, ""))
+                if _c and _sv and (_changed or _m == _mode and _mode != _old_mode):
+                    _ok, _msg = pp_test_keys(_m, _c, _sv)
+                    pp_msgs.append(("ok" if _ok else "bad", _msg))
+                elif bool(_c) != bool(_sv) and (_c or _sv):
+                    pp_msgs.append(("bad", "The %s keys need both a client ID and a secret." % _m))
+            if not (_new.get("pp_%s_client" % _mode) and _new.get("pp_%s_secret" % _mode)):
+                pp_msgs.append(("bad", "PayPal is off: there are no %s keys saved, so customers cannot pay online." % _mode))
         if "cashgps_present" in request.form:
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('allow_cash',?)",
                          ("1" if request.form.get("allow_cash") else "0",))
@@ -8624,7 +8897,7 @@ def dispatch_settings():
         if errs:
             db().commit()
             rows = db().execute("SELECT * FROM settings").fetchall()
-            return render_template("dispatch_settings.html", auto_msgs=AUTO_MSGS, am_on=auto_msg_on, owner_view=is_owner(session.get("dispatcher_id")), site=site_text(raw=True), s={r["key"]: r["value"] for r in rows},
+            return render_template("dispatch_settings.html", pp=pp_settings_view(), pp_msgs=pp_msgs, auto_msgs=AUTO_MSGS, am_on=auto_msg_on, owner_view=is_owner(session.get("dispatcher_id")), site=site_text(raw=True), s={r["key"]: r["value"] for r in rows},
                                    saved=False, errors=errs, bh=business_hours_rows(),
                                    bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
         if "order_tokens" in request.form:
@@ -8633,7 +8906,7 @@ def dispatch_settings():
         db().commit()
         saved = True
     rows = db().execute("SELECT * FROM settings").fetchall()
-    return render_template("dispatch_settings.html", auto_msgs=AUTO_MSGS, am_on=auto_msg_on, owner_view=is_owner(session.get("dispatcher_id")), site=site_text(raw=True), s={r["key"]: r["value"] for r in rows}, saved=saved,
+    return render_template("dispatch_settings.html", pp=pp_settings_view(), pp_msgs=pp_msgs, auto_msgs=AUTO_MSGS, am_on=auto_msg_on, owner_view=is_owner(session.get("dispatcher_id")), site=site_text(raw=True), s={r["key"]: r["value"] for r in rows}, saved=saved,
                            bh=business_hours_rows(), bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
 
 # ---------------------------------------------------------------- chat
@@ -9875,7 +10148,7 @@ def api_menu_full(rid):
                       "price_cents": it["price_cents"], "price": money(it["price_cents"]),
                       "section": (it["section"] or "").strip(), "active": it["active"],
                       "tab": (it["menu_tab"] or "").strip(),
-                      "image": media_url(it["image"]), "groups": item_options(it["id"]),
+                      "image": item_picture(it), "groups": item_options(it["id"]),
                       **avail_fields(it)})
     return jsonify({"ok": True, "items": items, "restaurant": {
         "id": r["id"], "name": r["name"], "slug": r["slug"], "image": media_url(r["image"])},
@@ -10845,10 +11118,11 @@ def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_
                 con.execute("DELETE FROM option_groups WHERE item_id IN (%s)" % marks, old)
                 con.execute("DELETE FROM menu_items WHERE restaurant_id=?", (rid,))
         for it in z["items"]:
-            c = con.execute("""INSERT INTO menu_items(restaurant_id,name,description,price_cents,active,section,sort,image,menu_tab,zup_id)
-                               VALUES(?,?,?,?,1,?,?,?,?,?)""",
+            c = con.execute("""INSERT INTO menu_items(restaurant_id,name,description,price_cents,active,section,sort,image,menu_tab,zup_id,image_src)
+                               VALUES(?,?,?,?,1,?,?,?,?,?,?)""",
                             (rid, it["name"][:120], it["description"][:1000], int(it["price_cents"]), it["section"][:80],
-                             int(it["sort"]), it["image"], it["tab"][:60], str(it["zid"])))
+                             int(it["sort"]), it["image"], it["tab"][:60], str(it["zid"]),
+                             it["image"] if (it["image"] or "").startswith("http") else ""))
             iid = c.lastrowid
             items += 1
             for gi, g in enumerate(it["groups"]):
@@ -10864,6 +11138,75 @@ def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_
 # ---------------------------------------------------------------- copy imported pictures onto this server
 _PIC_LOCK = threading.Lock()
 _PIC_STATE = {"running": False, "done": 0, "failed": 0}
+
+def _local_pic_ok(name):
+    name = (name or "").strip()
+    if not name:
+        return False
+    if name.startswith("http"):
+        return True
+    return os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(name)))
+
+
+def item_picture(it):
+    """An item's picture: the copy on this server, or where it came from when that copy went missing."""
+    img = (it["image"] or "").strip()
+    if _local_pic_ok(img):
+        return media_url(img)
+    try:
+        src = (it["image_src"] or "").strip()
+    except (IndexError, KeyError):
+        src = ""
+    return src if src.startswith("http") else ""
+
+
+def fill_missing_pictures(con=None):
+    """Give back item and restaurant pictures that are blank or whose copy is gone, from the last menu
+    imports kept on this server. Matches restaurants by their import id or name, items by id or name."""
+    con = con or db()
+    srcs = []
+    for path in (zuppler_file(), os.path.join(APP_DIR, "data", "tigertown_import.json")):
+        try:
+            srcs.append(json.load(open(path)))
+        except Exception:
+            pass
+    byrest = {}
+    for d in srcs:
+        for z in d.get("restaurants") or []:
+            ent = byrest.setdefault("z" + str(z.get("zid")), {"photo": "", "logo": "", "items": {}})
+            byrest.setdefault(_norm_name(z.get("name") or ""), ent)
+            ent["photo"] = ent["photo"] or (z.get("photo") or "")
+            ent["logo"] = ent["logo"] or (z.get("logo") or "")
+            for it in z.get("items") or []:
+                if (it.get("image") or "").startswith("http"):
+                    ent["items"].setdefault("z" + str(it.get("zid")), it["image"])
+                    ent["items"].setdefault(_norm_name(it.get("name") or "") + "|" + _norm_name(it.get("section") or ""), it["image"])
+                    ent["items"].setdefault(_norm_name(it.get("name") or ""), it["image"])
+    fixed = 0
+    if not byrest:
+        return 0
+    for r in con.execute("SELECT id,name,zup_id,image,logo FROM restaurants").fetchall():
+        ent = byrest.get("z" + str(r["zup_id"])) if r["zup_id"] else None
+        ent = ent or byrest.get(_norm_name(r["name"] or ""))
+        if not ent:
+            continue
+        if not _local_pic_ok(r["image"]) and ent["photo"]:
+            con.execute("UPDATE restaurants SET image=? WHERE id=?", (ent["photo"], r["id"])); fixed += 1
+        if not _local_pic_ok(r["logo"]) and ent["logo"]:
+            con.execute("UPDATE restaurants SET logo=? WHERE id=?", (ent["logo"], r["id"])); fixed += 1
+        for it in con.execute("SELECT id,name,section,zup_id,image,image_src FROM menu_items WHERE restaurant_id=?",
+                              (r["id"],)).fetchall():
+            if _local_pic_ok(it["image"]):
+                continue
+            url = (it["image_src"] or "").strip() if (it["image_src"] or "").startswith("http") else ""
+            url = url or (ent["items"].get("z" + str(it["zup_id"])) if it["zup_id"] else None) \
+                or ent["items"].get(_norm_name(it["name"] or "") + "|" + _norm_name(it["section"] or "")) \
+                or ent["items"].get(_norm_name(it["name"] or ""))
+            if url:
+                con.execute("UPDATE menu_items SET image=?, image_src=? WHERE id=?", (url, url, it["id"])); fixed += 1
+    con.commit()
+    return fixed
+
 
 def remote_picture_count():
     con = db()
@@ -10903,6 +11246,7 @@ def _copy_pictures_worker():
                         f.write(blob)
                 con.execute("UPDATE restaurants SET image=? WHERE image=?", (name, url))
                 con.execute("UPDATE restaurants SET logo=? WHERE logo=?", (name, url))
+                con.execute("UPDATE menu_items SET image_src=? WHERE image=? AND COALESCE(image_src,'')=''", (url, url))
                 con.execute("UPDATE menu_items SET image=? WHERE image=?", (name, url))
                 con.commit()
                 _PIC_STATE["done"] += 1
@@ -10975,6 +11319,127 @@ def _webcopy_picture(url, logo=False):
     return name
 
 
+def logo_colors(name):
+    """Bright colors in a saved logo, most used first (used when a website hides its colors)."""
+    try:
+        from PIL import Image
+        from collections import Counter
+        im = Image.open(os.path.join(UPLOAD_DIR, os.path.basename(name))).convert("RGBA")
+        im.thumbnail((96, 96))
+        cnt = Counter()
+        for r, g_, b, a in im.getdata():
+            if a < 200:
+                continue
+            hi, lo = max(r, g_, b), min(r, g_, b)
+            if hi - lo > 60 and hi > 70 and lo < 215:
+                cnt[(r // 24 * 24 + 12, g_ // 24 * 24 + 12, b // 24 * 24 + 12)] += 1
+        out = []
+        for (r, g_, b), _n in cnt.most_common(8):
+            hv = "#%02x%02x%02x" % (min(r, 255), min(g_, 255), min(b, 255))
+            if hv not in out:
+                out.append(hv)
+        return out[:2]
+    except Exception:
+        return []
+
+
+def brand_target(con, pick, name_hint):
+    """'12' = that brand, 'new' = a new brand named after the website. Returns the brand id or 0."""
+    pick = str(pick or "").strip()
+    if pick.isdigit() and site_by_id(int(pick)):
+        return int(pick)
+    if pick != "new":
+        return 0
+    base = " ".join(str(name_hint or "").split())[:60] or "New brand"
+    name, n = base, 2
+    taken = {r["name"].lower() for r in con.execute("SELECT name FROM sites").fetchall()}
+    while name.lower() in taken:
+        name = (base[:55] + " " + str(n)); n += 1
+    srt = con.execute("SELECT COALESCE(MAX(sort),0)+1 s FROM sites").fetchone()["s"]
+    cur = con.execute("INSERT INTO sites(name,phone,domains,sort,created_at) VALUES(?,?,?,?,?)",
+                      (name, "", "", srt, now()))
+    con.commit()
+    return cur.lastrowid
+
+
+def brand_fill(con, sid, data, parts, picks=None):
+    """Fill a brand site from a website someone read: name, phone, logo, colors, photos and home page text.
+    parts says which pieces; picks can hold edited text and the chosen photos. Returns (done, failed)."""
+    picks = picks or {}
+    s = site_by_id(sid)
+    done, failed, ch = [], [], {}
+    if not s:
+        return done, ["Brand"]
+    if "name" in parts:
+        nm = " ".join(str(picks.get("business_name") or data.get("business_name") or "").split())[:60]
+        if nm and nm.lower() != s["name"].lower():
+            if con.execute("SELECT 1 FROM sites WHERE lower(name)=? AND id<>?", (nm.lower(), sid)).fetchone():
+                failed.append("Name (another brand already uses " + nm + ")")
+            else:
+                con.execute("UPDATE sites SET name=? WHERE id=?", (nm, sid)); done.append("Name")
+    if "phone" in parts:
+        ph = re.sub(r"\D", "", str(picks.get("dispatch_phone") or data.get("phone") or ""))[-10:]
+        if len(ph) == 10:
+            con.execute("UPDATE sites SET phone=? WHERE id=?", (ph, sid)); done.append("Phone")
+    logo_name = ""
+    if "logo" in parts and data.get("logo"):
+        try:
+            logo_name = _webcopy_picture(data["logo"], logo=True)
+            drop_media((s["logo"] or "").strip())
+            con.execute("UPDATE sites SET logo=? WHERE id=?", (logo_name, sid)); done.append("Logo")
+        except Exception:
+            failed.append("Logo")
+    if "colors" in parts:
+        cols = [c for c in (picks.get("colors") or data.get("colors") or []) if _hex_ok(c)]
+        if not cols and logo_name:
+            cols = logo_colors(logo_name)
+        if cols:
+            ch["brand"] = _hex_ok(cols[0]); ch["brand2"] = _hex_ok(cols[1] if len(cols) > 1 else cols[0])
+            done.append("Colors")
+    d = site_design(s)
+    for key, label in (("hero_image", "Top photo"), ("pocket_image", "App section photo")):
+        if key not in parts:
+            continue
+        url = picks.get(key)
+        if url is None:   # automatic: only when the brand has none yet
+            if (d.get(key) or "").strip():
+                continue
+            pics = data.get("pictures") or []
+            url = pics[0 if key == "hero_image" else 1] if len(pics) > (0 if key == "hero_image" else 1) else ""
+        if not url:
+            continue
+        try:
+            nm = _webcopy_picture(url)
+            drop_media(str(d.get(key) or "").strip())
+            ch[key] = nm; done.append(label)
+        except Exception:
+            failed.append(label)
+    if "text" in parts:
+        n = 0
+        for k in BRAND_TEXT_KEYS:
+            if k in ("faq_text",) or k.startswith("social_"):
+                continue
+            v = picks.get(k) if k in picks else data.get(k)
+            v = " ".join(str(v or "").split())
+            if v:
+                ch[k] = v[:400]; n += 1
+        if n:
+            done.append("Home page text")
+    if "socials" in parts:
+        for k in ("x", "facebook", "instagram"):
+            v = (picks.get("social_" + k) if ("social_" + k) in picks else (data.get("socials") or {}).get(k)) or ""
+            v = v.strip()[:200]
+            if v:
+                ch["social_" + k] = v if v.startswith("http") else "https://" + v
+                done.append({"x": "X (Twitter)", "facebook": "Facebook", "instagram": "Instagram"}[k])
+    if "faq_text" in picks:
+        ch["faq_text"] = picks["faq_text"]; done.append("FAQs")
+    if ch:
+        save_site_design(con, sid, ch)
+    con.commit()
+    return done, failed
+
+
 @app.route("/dispatch/import-website", methods=["GET", "POST"])
 def dispatch_import_website():
     me = session.get("dispatcher_id")
@@ -11006,6 +11471,46 @@ def dispatch_import_website():
             result = {"ok": False, "error": "Tick the box to confirm you own this website or have the owner's permission."}
         else:
             con, done, failed = db(), [], []
+            bsid = brand_target(con, request.form.get("brand"), request.form.get("business_name") or data.get("business_name"))
+            if bsid:
+                picks, parts = {}, {"colors"} if request.form.get("use_colors") else set()
+                for k, label, n in WEBCOPY_TEXT:
+                    if request.form.get("use_" + k):
+                        picks[k] = " ".join((request.form.get(k) or "").split())[:n]
+                        parts.add({"business_name": "name", "dispatch_phone": "phone"}.get(k, "text"))
+                for k in BRAND_TEXT_KEYS:
+                    if k not in picks and not k.startswith("social_") and k != "faq_text":
+                        picks[k] = ""   # unticked: leave the brand's own text alone
+                for k in ("x", "facebook", "instagram"):
+                    picks["social_" + k] = (request.form.get("social_" + k) or "").strip() if request.form.get("use_social_" + k) else ""
+                    if picks["social_" + k]:
+                        parts.add("socials")
+                if request.form.get("use_faqs"):
+                    pairs = []
+                    for i, (q, a) in enumerate(data.get("faqs") or []):
+                        if request.form.get("fk%d" % i):
+                            pairs.append("Q: %s\nA: %s" % (" ".join((request.form.get("fq%d" % i) or q).split()),
+                                                            " ".join((request.form.get("fa%d" % i) or a).split())))
+                    if pairs:
+                        picks["faq_text"] = "\n\n".join(pairs)[:12000]
+                cols = [c for c in request.form.getlist("color") if _hex_ok(c)]
+                if cols:
+                    picks["colors"] = cols
+                if request.form.get("use_logo"):
+                    parts.add("logo")
+                for key in ("hero_image", "pocket_image"):
+                    pick = request.form.get(key) or ""
+                    if pick.isdigit() and int(pick) < len(data.get("pictures") or []):
+                        picks[key] = data["pictures"][int(pick)]; parts.add(key)
+                # only the ticked text goes in: drop blank picks so the brand keeps its own
+                picks = {k: v for k, v in picks.items() if v not in ("", None)}
+                done, failed = brand_fill(con, bsid, data, parts, picks)
+                b = site_by_id(bsid)
+                log("site", "Brand " + b["name"] + " filled from " + (data.get("site") or "a website") + ": " + ", ".join(done))
+                result = {"ok": True, "done": done, "failed": failed, "brand": b["name"], "brand_id": bsid}
+                return render_template("dispatch_import_website.html", data=data, result=result, fields=WEBCOPY_TEXT,
+                                       faqs=(data or {}).get("faqs") or [], sites=db().execute("SELECT id,name FROM sites ORDER BY sort,id").fetchall(),
+                                       phone_fmt=nice_phone((data or {}).get("phone") or ""))
             def put(k, v):
                 con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, v))
             for k, label, n in WEBCOPY_TEXT:
@@ -11055,7 +11560,8 @@ def dispatch_import_website():
             result = {"ok": True, "done": done, "failed": failed}
     faqs = (data or {}).get("faqs") or []
     return render_template("dispatch_import_website.html", data=data, result=result, fields=WEBCOPY_TEXT,
-                           faqs=faqs, phone_fmt=nice_phone((data or {}).get("phone") or ""))
+                           faqs=faqs, sites=db().execute("SELECT id,name FROM sites ORDER BY sort,id").fetchall(),
+                           phone_fmt=nice_phone((data or {}).get("phone") or ""))
 
 
 @app.route("/dispatch/import-zuppler", methods=["GET", "POST"])
@@ -11098,7 +11604,35 @@ def dispatch_import_zuppler():
         result = tigertown_import(pick_ids=set(picks) if picks else set(),
                                   skip_paused=False, replace_menu=True,
                                   region_id=int(rg) if rg.isdigit() else None)
+        if result.get("ok") and (request.form.get("brand") or "").strip():
+            con = db()
+            web = (data or {}).get("site") or re.sub(r"\s*\(.*\)$", "", (data or {}).get("source") or "")
+            pulled = None
+            if request.form.get("brand_fill") and web:
+                try:
+                    import multi_import
+                    pulled = multi_import.site_pull(web)
+                except Exception:
+                    pulled = None
+            hint = (pulled or {}).get("business_name") or re.sub(r"\s*\(.*\)$", "", (data or {}).get("source") or "")
+            bsid = brand_target(con, request.form.get("brand"), hint)
+            if bsid:
+                bname = site_by_id(bsid)["name"]
+                if rg.isdigit():
+                    con.execute("UPDATE regions SET site_id=? WHERE id=?", (bsid, int(rg)))
+                    con.commit()
+                    result["brand_region"] = True
+                if request.form.get("brand_fill"):
+                    if pulled:
+                        bd, bf = brand_fill(con, bsid, pulled,
+                                            {"name", "phone", "logo", "colors", "hero_image", "pocket_image", "text", "socials"})
+                        result["brand_done"], result["brand_failed"] = bd, bf
+                    else:
+                        result["brand_failed"] = ["I couldn't read " + (web or "the website") + " for the brand details"]
+                result["brand"] = site_by_id(bsid)["name"]
+                log("site", "Menu import tied to brand " + result["brand"])
         if result.get("ok"):
+            fill_missing_pictures()
             start_picture_copy()
     rows = []
     if data:
@@ -11119,9 +11653,25 @@ def dispatch_import_zuppler():
                          "paused": bool(z.get("paused") or "(old)" in low or " dnd" in low),
                          "here": bool(m)})
     return render_template("dispatch_import.html", rows=rows, result=result, regions=all_regions(),
+                           sites=db().execute("SELECT id,name FROM sites ORDER BY sort,id").fetchall(),
+                           region_site={r["id"]: (r["site_id"] or 0) for r in db().execute("SELECT id,site_id FROM regions").fetchall()},
                            remote_pics=remote_picture_count(),
                            pulled=(data or {}).get("pulled", ""), source=(data or {}).get("source", ""),
                            site=(data or {}).get("site", ""), zup=ZUP_STATE)
+
+def _startup_picture_repair():
+    """Once at start-up: put back item pictures that went blank or missing, then copy them here."""
+    try:
+        with app.app_context():
+            if fill_missing_pictures():
+                start_picture_copy()
+    except Exception as e:
+        print("picture repair skipped:", e)
+
+
+if os.environ.get("PICTURE_REPAIR", "1") != "0":
+    threading.Thread(target=_startup_picture_repair, daemon=True).start()
+
 
 @app.get("/healthz")
 def healthz():
@@ -12257,7 +12807,7 @@ def gift_limits():
 def gift_cards_page():
     lo, hi = gift_limits()
     return render_template("gift.html", lo=lo // 100, hi=hi // 100, pp_on=pp_enabled(),
-                           pp_client=PAYPAL_CLIENT_ID, phone=nice_phone(dispatch_phone()),
+                           pp_client=pp_client_id(), phone=nice_phone(dispatch_phone()),
                            me=customer_public(current_customer()))
 
 @app.post("/api/gift/start")
@@ -12365,7 +12915,7 @@ def dispatch_gift_cards():
     lo, hi = gift_limits()
     rows = db().execute("SELECT * FROM gift_cards WHERE status!='pending' ORDER BY id DESC LIMIT 100").fetchall()
     return render_template("dispatch_gifts.html", cards=[gift_public(g, True) for g in rows], lo=lo // 100, hi=hi // 100,
-                           owner=is_owner(), pp_on=pp_enabled(), pp_client=PAYPAL_CLIENT_ID)
+                           owner=is_owner(), pp_on=pp_enabled(), pp_client=pp_client_id())
 
 @app.post("/api/dispatch/gift/sell")
 def api_dispatch_gift_sell():

@@ -10,7 +10,7 @@ overrides this list while they are working that shift.</p>
 
 <div class="panel" id="stPanel">
   <h2>Brand sites</h2>
-  <p class="muted small">Each site has its own business name, phone number, logo and web address. Pick a site on each region
+  <p class="muted small">Each site has its own business name, phone number, logo, web address and design (colors, font, photos and home page text). Pick a site on each region
   below. A site's website only shows the restaurants in its regions, and its orders, texts and "call to confirm" show that
   site's name and number. You keep one dispatch board and one group of drivers for all of them.</p>
   <div id="stList"></div>
@@ -145,10 +145,12 @@ function drawSites(){
     '<span><strong>'+e(s.name)+'</strong>' +
     '<div class="muted small">Phone: '+e(s.phone || 'business number')+'</div>' +
     '<div class="muted small">Web address: '+e(s.domains || 'none yet')+'</div>' +
+    '<div class="muted small">Design: '+designLine(s)+'</div>' +
     '<div class="muted small">Regions: '+e(RG.regions.filter(r=>r.site_id===s.id).map(r=>r.name).join(', ') || 'none yet')+'</div></span></span>' +
     (RG.owner ? '<span><button class="btn tiny" onclick="siteForm('+s.id+')">Edit</button>' +
       '<label class="btn tiny">Logo<input type="file" accept="image/*" style="display:none" onchange="siteLogo('+s.id+', this)"></label>' +
       (s.logo ? '<button class="btn tiny" onclick="siteLogoReset('+s.id+')">Remove logo</button>' : '') +
+      '<button class="btn tiny" onclick="designForm('+s.id+')">Design</button>' +
       '<a class="btn tiny" href="/?site='+s.id+'" target="_blank">Preview</a>' +
       '<button class="btn tiny danger" onclick="delSite('+s.id+')">Delete</button></span>' : '') + '</div>').join('')
     : '<p class="muted small">No brand sites yet. Until you add one, every web address shows every region under the business name in Settings.</p>';
@@ -178,6 +180,71 @@ async function saveSite(id){
 function delSite(id){
   const s = RG.sites.find(x=>x.id===id);
   if(confirm('Delete '+s.name+'? Its regions go back to No site. Orders and restaurants are not touched.')) send({op:'delete_site', id:id});
+}
+function designLine(s){
+  const d = s.design || {};
+  const dots = ['brand','brand2','header'].filter(k=>d[k]).map(k=>'<span title="'+k+'" style="display:inline-block;width:12px;height:12px;border-radius:50%;background:'+d[k]+';border:1px solid #ccc;vertical-align:-2px;margin-right:3px"></span>').join('');
+  const f = (RG.fonts||[]).find(x=>x[0]===(d.font||''));
+  const bits = [];
+  if (dots) bits.push(dots); else bits.push('main website colors');
+  if (d.font && f) bits.push(e(f[1]));
+  if (d.hero_image) bits.push('own top photo');
+  if (d.home_headline) bits.push('own headline');
+  return bits.join(' &middot; ');
+}
+const DTEXT = [['home_headline','Big headline',120],['home_sub','Line under the headline',300],['site_announce','Announcement bar',300],
+  ['how_title','How it works title',60],['how1_t','Step 1 title',60],['how1_p','Step 1 text',300],['how2_t','Step 2 title',60],['how2_p','Step 2 text',300],
+  ['how3_t','Step 3 title',60],['how3_p','Step 3 text',300],['rest_title','Restaurants title',60],['closed_msg','Closed message',300],
+  ['any_text','Any restaurant text',300],['pocket_title','App section title',80],['pocket_text','App section text',400],
+  ['business_email','Email',120],['business_address','Address',160],['social_facebook','Facebook link',200],['social_instagram','Instagram link',200],['social_x','X (Twitter) link',200],
+  ['faq_text','FAQs (Q: question / A: answer, blank line between)',12000]];
+const DCOL = [['brand','Main color (buttons, links)'],['brand2','Accent color'],['header','Top bar'],['bg','Page background'],['ink','Text color']];
+function designForm(id){
+  const s = RG.sites.find(x=>x.id===id); if(!s) return; const d = s.design || {};
+  const col = DCOL.map(c=>'<label class="small" style="display:inline-flex;align-items:center;gap:6px;margin:4px 14px 4px 0">'+
+      '<input type="checkbox" id="dcu_'+c[0]+'"'+(d[c[0]]?' checked':'')+'> '+c[1]+
+      ' <input type="color" id="dc_'+c[0]+'" value="'+(d[c[0]]||(c[0]==='bg'?'#f7f8fa':c[0]==='ink'?'#16181d':c[0]==='header'?'#ffffff':'#c2410c'))+'" oninput="document.getElementById(\'dcu_'+c[0]+'\').checked=true"></label>').join('');
+  const fonts = (RG.fonts||[]).map(f=>'<option value="'+e(f[0])+'"'+(f[0]===(d.font||'')?' selected':'')+'>'+e(f[1])+'</option>').join('');
+  const cor = [['','Standard'],['round','Extra round'],['soft','Slightly round'],['square','Square']].map(c=>'<option value="'+c[0]+'"'+(c[0]===(d.corners||'')?' selected':'')+'>'+c[1]+'</option>').join('');
+  const txt = (k,l,n)=> (n>120
+      ? '<label class="small" style="display:block;margin-top:6px">'+l+'<textarea id="dt_'+k+'" maxlength="'+n+'" rows="'+(k==='faq_text'?6:2)+'" style="width:100%">'+e(d[k]||'')+'</textarea></label>'
+      : '<label class="small" style="display:block;margin-top:6px">'+l+'<input id="dt_'+k+'" maxlength="'+n+'" value="'+e(d[k]||'')+'" style="width:100%"></label>');
+  const pic = (k,l)=> '<div style="display:inline-block;margin:6px 14px 6px 0;vertical-align:top"><div class="small"><b>'+l+'</b></div>'+
+      (d[k] ? '<img src="'+e(d[k])+'" alt="" style="width:180px;height:100px;object-fit:cover;border-radius:6px;display:block;margin:4px 0">' : '<div class="muted small" style="margin:4px 0">Using the main website\'s</div>')+
+      '<label class="btn tiny">Upload<input type="file" accept="image/*" style="display:none" onchange="sitePhoto('+id+',\''+k+'\',this)"></label>'+
+      (d[k] ? ' <button class="btn tiny" onclick="sitePhotoReset('+id+',\''+k+'\')">Remove</button>' : '')+'</div>';
+  document.getElementById('stForm').innerHTML =
+    '<div class="schedrow"><strong>Design for '+e(s.name)+'</strong>'+
+    '<div class="muted small">Only this brand\'s website changes. Anything left blank or unticked uses the main website\'s look and text. Staff pages keep the Fleet Foot look.</div>'+
+    '<h3>Colors</h3>'+col+
+    '<h3>Font and corners</h3><div class="row"><label class="small">Font <select id="dFont">'+fonts+'</select></label> <label class="small">Corners <select id="dCorners">'+cor+'</select></label></div>'+
+    '<h3>Photos</h3>'+pic('hero_image','Big top photo')+pic('pocket_image','App section photo')+
+    '<h3>Home page text</h3>'+DTEXT.slice(0,3).map(x=>txt(x[0],x[1],x[2])).join('')+
+    '<details class="mt"><summary class="small">More text: how it works, contact, social links, FAQs</summary>'+DTEXT.slice(3).map(x=>txt(x[0],x[1],x[2])).join('')+'</details>'+
+    '<div class="row mt"><button class="btn primary small" onclick="saveDesign('+id+')">Save design</button>'+
+    '<a class="btn small" href="/?site='+id+'" target="_blank">Preview</a>'+
+    '<button class="btn small" onclick="document.getElementById(\'stForm\').innerHTML=\'\';drawSites()">Close</button></div></div>';
+  document.getElementById('stForm').scrollIntoView({behavior:'smooth'});
+}
+async function saveDesign(id){
+  const b = {op:'site_design', id:id, font: document.getElementById('dFont').value, corners: document.getElementById('dCorners').value};
+  DCOL.forEach(c=>{ b[c[0]] = document.getElementById('dcu_'+c[0]).checked ? document.getElementById('dc_'+c[0]).value : ''; });
+  DTEXT.forEach(x=>{ b[x[0]] = document.getElementById('dt_'+x[0]).value; });
+  const r = await jpost('/api/dispatch/regions', b);
+  if(!r.ok){ alert(r.error || 'That did not save.'); return; }
+  RG = r; draw(); designForm(id);
+  const f = document.getElementById('stForm').querySelector('strong'); if(f) f.textContent = 'Saved. Design for '+(RG.sites.find(x=>x.id===id)||{}).name;
+}
+async function sitePhoto(id, which, inp){
+  if(!inp.files.length) return;
+  const fd = new FormData(); fd.append('id', id); fd.append('which', which); fd.append('photo', inp.files[0]);
+  const res = await fetch('/api/dispatch/site-logo', {method:'POST', body: fd}); const r = await res.json();
+  if(!r.ok){ alert(r.error || 'That photo did not upload.'); return; }
+  await load(); designForm(id);
+}
+async function sitePhotoReset(id, which){
+  const fd = new FormData(); fd.append('id', id); fd.append('which', which); fd.append('op', 'reset');
+  await fetch('/api/dispatch/site-logo', {method:'POST', body: fd}); await load(); designForm(id);
 }
 function setRegionSite(rid, sid){ send({op:'set_region_site', region_id: rid, site_id: +sid}); }
 async function siteLogo(id, inp){
