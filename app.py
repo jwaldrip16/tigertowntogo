@@ -10380,6 +10380,31 @@ def driver_site_ids(did):
            WHERE dr.driver_id=?""", (did,)).fetchall()}
 
 
+def main_named_site_ids():
+    """Brand rows that carry the main business's own name (a region tied to a "Tiger Town To Go"
+    brand row still belongs to Tiger Town To Go when it is the main business)."""
+    def norm(x):
+        return "".join(ch for ch in str(x or "").lower() if ch.isalnum()).replace("2", "to")
+    names = {norm(main_brand_name()), norm(session.get("staff_brand_name"))} - {""}
+    try:
+        return {int(r["id"]) for r in db().execute("SELECT id, name FROM sites").fetchall()
+                if norm(r["name"]) in names}
+    except Exception:
+        return set()
+
+
+def driver_home_brand(did):
+    """The brand to switch a driver to when they picked a company they don't drive for:
+    'main' for regions not tied to a brand, else the one brand their regions belong to."""
+    sids = driver_site_ids(did)
+    if not sids or 0 in sids:
+        return "main"
+    if len(sids) == 1:
+        sid = next(iter(sids))
+        return sid if site_by_id(sid) is not None else None
+    return None
+
+
 def driver_fits_brand(did, site=None):
     """True when this driver may sign in under the brand being shown. A driver with regions in
     several brands fits each of them; one with no brand-tied regions fits every brand."""
@@ -10387,7 +10412,7 @@ def driver_fits_brand(did, site=None):
     sids = driver_site_ids(did)
     if site is None:
         if staff_main_brand():   # main business: its regions are the ones not tied to a brand
-            return (not sids) or (0 in sids)
+            return (not sids) or (0 in sids) or bool(sids & main_named_site_ids())
         return True
     return (not sids) or (0 in sids) or (int(site["id"]) in sids)
 
@@ -10419,6 +10444,17 @@ def driver_login():
         if row and not (row["active"] if row["active"] is not None else 1):
             err = "Your driver account is inactive. Call dispatch."
         elif row and not driver_fits_brand(row["id"]):
+            # Right phone and PIN but the wrong company picked: when this web address isn't one
+            # brand's own, move them to the company they drive for instead of turning them away.
+            home = driver_home_brand(row["id"]) if not host_brand_site() else None
+            if home is not None:
+                session["staff_brand"] = home
+                session.pop("staff_brand_name", None) if home != "main" else None
+                g.pop("_staff_site", None)
+            if home is not None and driver_fits_brand(row["id"]):
+                session["driver_id"] = row["id"]
+                session["driver_name"] = row["name"]
+                return redirect(url_for("driver"))
             err = wrong_brand_msg(staff_brand_site(), "driver")
         elif row:
             session["driver_id"] = row["id"]
@@ -12346,6 +12382,18 @@ def staff_brand_site():
         s = None
     g._staff_site = s
     return s
+
+
+def host_brand_site():
+    """The brand whose own web address this is, or None on a shared address."""
+    try:
+        host = _norm_host(request.host)
+        for row in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
+            if host in site_domains(row):
+                return row
+    except Exception:
+        pass
+    return None
 
 
 def staff_main_brand():
