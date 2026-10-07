@@ -657,6 +657,7 @@ async function ask(st){
   }
   const r = await jpost('/api/driver/request', {status:st});
   if (r && r.ok === false && r.error) alert(r.error);
+  else if (r && r.ok !== false){ try { ffSound.play('sent'); } catch(e){} }   // request message reached dispatch
   state(); chat();
 }
 function pickOnlineRegions(opts, picked){
@@ -676,6 +677,7 @@ function pickOnlineRegions(opts, picked){
     if (!vals.length){ document.getElementById('olMsg').textContent = 'Pick at least one region.'; return; }
     const r = await jpost('/api/driver/request', {status:'online', regions: vals.length===opts.length ? [] : vals});
     if (r && r.ok === false){ document.getElementById('olMsg').textContent = r.error || 'That did not send.'; return; }
+    try { ffSound.play('sent'); } catch(e){}   // request message reached dispatch
     m.remove(); state(); chat();
   };
 }
