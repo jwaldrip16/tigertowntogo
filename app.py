@@ -348,7 +348,9 @@ def init_db():
         # up to unlimited (stored as 999).
         con.execute("UPDATE drivers SET max_stack=3")
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('stack_limit_v2','1')")
-    con.execute("UPDATE drivers SET max_stack=3 WHERE max_stack IS NULL OR max_stack < 1")
+    con.execute("""UPDATE drivers SET max_stack=COALESCE((SELECT CAST(value AS INTEGER) FROM settings
+                   WHERE key='max_stack_default' AND CAST(value AS INTEGER) >= 1), 3)
+                   WHERE max_stack IS NULL OR max_stack < 1""")
     con.execute("""CREATE TABLE IF NOT EXISTS blocked_customers(
         id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT UNIQUE, name TEXT, reason TEXT,
         created_at TEXT)""")
@@ -1116,6 +1118,15 @@ def brand_look(s):
     font_link = ("https://fonts.googleapis.com/css2?family=" + gname + ":wght@400;600;700;800&display=swap") if gname else ""
     return {"brand_css": out + "".join(rules), "brand_theme": v["brand"] or "", "brand_font": font_link}
 
+
+def default_stack_limit():
+    """Stack limit new drivers start with (Dispatch settings > Default stack limit). 999 = unlimited."""
+    try:
+        r = db().execute("SELECT value FROM settings WHERE key='max_stack_default'").fetchone()
+        v = int(r["value"]) if r and str(r["value"]).strip() else 3
+    except Exception:
+        v = 3
+    return v if v >= 999 else max(1, min(20, v))
 
 def setting(key, cast=int):
     if key in _SITE_KEYS:
@@ -10061,6 +10072,22 @@ def dispatch_settings():
         if "stack_by_location" in request.form:
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('stack_by_location',?)",
                          ("1" if str(request.form.get("stack_by_location")).strip() == "1" else "0",))
+        if "max_stack_default" in request.form:
+            _raw = str(request.form.get("max_stack_default") or "").strip().lower()
+            _lim = None
+            if _raw in ("u", "unlimited", "none", "no limit", "999"):
+                _lim = STACK_UNLIMITED
+            else:
+                try:
+                    _lim = max(1, min(20, int(_raw)))
+                except ValueError:
+                    _lim = None
+            if _lim is not None:
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('max_stack_default',?)", (str(_lim),))
+                if request.form.get("max_stack_apply_all") == "1":
+                    db().execute("UPDATE drivers SET max_stack=?", (_lim,))
+                    log("stack_limit", "all drivers -> " + ("unlimited" if _lim >= STACK_UNLIMITED else str(_lim)) +
+                        " by " + (session.get("dispatcher_name") or "dispatch"))
         for key, lo, hi in (("stack_pickup_mi", 0.05, 10), ("stack_detour_mi", 0, 30)):
             if key in request.form:
                 try:
@@ -11245,8 +11272,8 @@ def api_driver_crud():
             return jsonify({"ok": False, "error": "Name and a 10 digit phone are required."}), 400
         if db().execute("SELECT 1 FROM drivers WHERE phone=?", (phone,)).fetchone():
             return jsonify({"ok": False, "error": "That phone is already on a driver."}), 400
-        cur = db().execute("INSERT INTO drivers(name,phone,pin,status) VALUES(?,?,?,'offline')",
-                           (name, phone, pin))
+        cur = db().execute("INSERT INTO drivers(name,phone,pin,status,max_stack) VALUES(?,?,?,'offline',?)",
+                           (name, phone, pin, default_stack_limit()))
         db().commit()
         return jsonify({"ok": True, "driver_id": cur.lastrowid})
     if op == "update":

@@ -235,6 +235,13 @@ async function setLogo(inp){
   <input name="keep_awake_kitchen" value="{{ s['keep_awake_kitchen'] if s['keep_awake_kitchen'] is defined and s['keep_awake_kitchen'] != None else '1' }}">
   <div class="muted small">Stops phones and tablets from going to sleep while the app is open, so new orders,
     alerts and GPS keep coming in. Each device can still switch it off with the Keep screen awake button.</div>
+  <h2>Stack limit</h2>
+  <label>Default number of orders a driver can carry at once (1 to 20, or U for unlimited)</label>
+  {% set _ms = s['max_stack_default'] if s['max_stack_default'] is defined and s['max_stack_default'] != None and s['max_stack_default'] != '' else '3' %}
+  <input name="max_stack_default" value="{{ 'U' if _ms|string == '999' else _ms }}">
+  <label style="display:flex;gap:8px;align-items:center;font-weight:normal"><input type="checkbox" name="max_stack_apply_all" value="1" style="width:auto"> Also set every current driver to this number now</label>
+  <div class="muted small">New drivers start with this stack limit. You can still change one driver at a time
+    by tapping the Stack pill on their card in dispatch.</div>
   <h2>Stacking by location</h2>
   <label>Auto dispatch stacks orders that are going the same way (1 on, 0 off)</label>
   <input name="stack_by_location" value="{{ s['stack_by_location'] if s['stack_by_location'] is defined and s['stack_by_location'] != None else '1' }}">
