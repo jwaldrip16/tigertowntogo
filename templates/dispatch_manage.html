@@ -134,27 +134,46 @@ function drawDrivers(res){
     '<span><button class="btn tiny" onclick="setActive('+d.id+','+(d.active?0:1)+')">'+(d.active?'Make inactive':'Make active')+'</button>'+
     (L ? '' : '<button class="btn tiny danger" onclick="delDriver('+d.id+",'"+d.name.replace(/'/g,"")+"'"+')">Delete</button>')+'</span></div>'+
     lockRow+
-    '<div class="row"><input id="dn'+d.id+'" value="'+esc(d.name)+'"'+dis+'>'+
-    '<input id="dp'+d.id+'" value="'+esc(d.phone)+'" placeholder="Phone"'+dis+'>'+
-    '<input id="dk'+d.id+'" value="'+esc(d.pin)+'" placeholder="Password / PIN"'+dis+'>'+
+    '<div class="row" style="align-items:flex-end">'+
+    '<label class="small" style="flex:1;min-width:140px">Driver name<input id="dn'+d.id+'" value="'+esc(d.name)+'"'+dis+'></label>'+
+    '<label class="small" style="flex:1;min-width:140px">Driver phone (10 digits)<input id="dp'+d.id+'" value="'+esc(d.phone)+'" placeholder="3345551234"'+dis+'></label>'+
+    '<label class="small" style="flex:1;min-width:140px">Driver app password / PIN<input id="dk'+d.id+'" value="'+esc(d.pin)+'" placeholder="What the driver signs in with"'+dis+'></label>'+
     (L ? '' : '<button class="btn tiny" onclick="saveDriver('+d.id+')">Save</button>')+'</div>'+
-    '<div class="row"><span class="muted small">Pay this driver by</span>'+
-    '<select id="dw'+d.id+'"'+dis+'><option value="paypal"'+(['venmo','check','branch'].indexOf(d.payout_wallet)<0?' selected':'')+'>PayPal</option>'+
+    '<div class="paybox" style="border-top:1px solid #eee;padding-top:8px;margin-top:6px">'+
+    '<label class="small" style="display:block;max-width:260px"><strong>How do you pay this driver?</strong>'+
+    '<select id="dw'+d.id+'" onchange="payShow('+d.id+')"'+dis+'><option value="paypal"'+(['venmo','check','branch'].indexOf(d.payout_wallet)<0?' selected':'')+'>PayPal</option>'+
     '<option value="venmo"'+(d.payout_wallet==='venmo'?' selected':'')+'>Venmo</option>'+
     '<option value="branch"'+(d.payout_wallet==='branch'?' selected':'')+'>Branch</option>'+
-    '<option value="check"'+(d.payout_wallet==='check'?' selected':'')+'>Check</option></select>'+
-    '<input id="de'+d.id+'" value="'+esc(d.payout_email||'')+'" placeholder="PayPal email"'+dis+'>'+
-    '<input id="dv'+d.id+'" value="'+esc(d.payout_phone||'')+'" placeholder="Venmo phone (blank = driver phone)"'+dis+'>'+
-    '<input id="dbr'+d.id+'" value="'+esc(d.payout_branch_id||'')+'" placeholder="Branch worker ID" style="max-width:160px"'+dis+'>'+
-    (BRANCH_ACCTS.length ? '<select id="dba'+d.id+'" style="max-width:170px"'+dis+'><option value="0">Branch account: by brand</option>'+
-      BRANCH_ACCTS.map(a=>'<option value="'+a.id+'"'+(d.branch_account_id===a.id?' selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select>' : '')+
-    (BRANCH_ACCTS.length > 1 ? BRANCH_ACCTS.map(a=>'<input id="dbw'+d.id+'_'+a.id+'" value="'+esc((d.payout_branch_ids||{})[String(a.id)]||'')+'" placeholder="Worker ID at '+esc(a.name)+' (blank = above)" style="max-width:200px"'+dis+'>').join('') : '')+
-    '<label class="small" style="display:flex;gap:4px;align-items:center;white-space:nowrap"><input type="checkbox" id="dap'+d.id+'" style="width:auto"'+(d.auto_pay?' checked':'')+dis+'> Auto pay</label></div>'+
+    '<option value="check"'+(d.payout_wallet==='check'?' selected':'')+'>Check (pay by hand)</option></select></label>'+
+    '<div id="pf_paypal'+d.id+'" class="payfield"><label class="small" style="display:block"><strong>Driver\'s PayPal email</strong>'+
+      '<input id="de'+d.id+'" type="email" value="'+esc(d.payout_email||'')+'" placeholder="driver@example.com"'+dis+'></label>'+
+      '<div class="muted small">The email address the driver uses to sign in to their own PayPal account. Their pay is sent there. Ask the driver for it.</div></div>'+
+    '<div id="pf_venmo'+d.id+'" class="payfield"><label class="small" style="display:block"><strong>Driver\'s Venmo phone number</strong>'+
+      '<input id="dv'+d.id+'" value="'+esc(d.payout_phone||'')+'" placeholder="3345551234"'+dis+'></label>'+
+      '<div class="muted small">The 10 digit phone number on the driver\'s Venmo account. Leave it empty if it is the same as the driver phone above.</div></div>'+
+    '<div id="pf_branch'+d.id+'" class="payfield"><label class="small" style="display:block"><strong>Driver\'s Branch worker ID</strong>'+
+      '<input id="dbr'+d.id+'" value="'+esc(d.payout_branch_id||'')+'" placeholder="Worker ID from Branch"'+dis+'></label>'+
+      '<div class="muted small">Not the driver\'s phone or email. Sign in to your company\'s Branch dashboard, open Workers, find this driver and copy their Worker ID (some screens call it Employee ID). The driver must already be added as a worker in Branch.</div>'+
+      (BRANCH_ACCTS.length ? '<label class="small" style="display:block;margin-top:6px"><strong>Pay from which Branch account?</strong><select id="dba'+d.id+'"'+dis+'><option value="0">The account for the order\'s brand (usual)</option>'+
+        BRANCH_ACCTS.map(a=>'<option value="'+a.id+'"'+(d.branch_account_id===a.id?' selected':'')+'>'+esc(a.name)+'</option>').join('')+'</select></label>'
+        : '<div class="small" style="color:#c0392b;margin-top:4px">No Branch account is set up yet. An owner adds it in Settings, under Branch accounts. Until then this driver is paid by hand.</div>')+
+      (BRANCH_ACCTS.length > 1 ? '<div class="muted small" style="margin-top:6px">Only if the driver has a different Worker ID at another company:</div>'+BRANCH_ACCTS.map(a=>'<label class="small" style="display:block">Worker ID at '+esc(a.name)+' (leave empty to use the one above)<input id="dbw'+d.id+'_'+a.id+'" value="'+esc((d.payout_branch_ids||{})[String(a.id)]||'')+'"'+dis+'></label>').join('') : '')+
+    '</div>'+
+    '<div id="pf_check'+d.id+'" class="payfield"><div class="muted small">Nothing to fill in. You pay this driver yourself and mark the trip Paid by check.</div></div>'+
+    '<label class="small" style="display:flex;gap:6px;align-items:center;margin-top:6px"><input type="checkbox" id="dap'+d.id+'" style="width:auto"'+(d.auto_pay?' checked':'')+dis+'> Auto pay: send this driver\'s pay automatically after each delivered trip</label>'+
+    '</div>'+
     '<div class="row"><span class="muted small">Bank (for your records)</span>'+
     '<input id="dbn'+d.id+'" value="'+esc(d.bank_name||'')+'" placeholder="Bank name, like Regions" style="max-width:180px"'+dis+'>'+
     '<input id="dbl'+d.id+'" value="'+esc(d.bank_last4||'')+'" placeholder="Last 4 of account" maxlength="4" style="max-width:130px"'+dis+'>'+
     '<span class="muted small">Only the last 4. Never save full account or routing numbers here.</span></div></div>';
   }).join('')) || '<p class="muted">No drivers yet. Add one above.</p>';
+  (res.drivers||[]).forEach(d=>payShow(d.id));
+}
+function payShow(id){
+  const sel = document.getElementById('dw'+id); if(!sel) return;
+  ['paypal','venmo','branch','check'].forEach(w=>{
+    const el = document.getElementById('pf_'+w+id); if(el) el.style.display = (sel.value===w) ? '' : 'none';
+  });
 }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function unlockDriver(id){
