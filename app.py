@@ -16153,9 +16153,15 @@ def _region_choices():
 @app.route("/drive", methods=["GET", "POST"])
 def drive_apply():
     f, errs, done = request.form, [], False
+    try:
+        _ds = faq_target()[1]
+        if _ds is not None:
+            g._site_forced = _ds   # a picked brand's Drive page names and shows only that brand
+    except Exception:
+        pass
     if request.method == "POST":
         if f.get("website"):
-            return render_template("drive.html", done=True, errs=[], f={}, regions=_region_choices(), makes=CAR_MAKES)
+            return render_template("drive.html", done=True, errs=[], f={}, regions=_region_choices(), makes=CAR_MAKES, all_contacts=faq_brand_contacts())
         ph = _phone3(f, "phone")
         first, last = (f.get("first_name") or "").strip()[:60], (f.get("last_name") or "").strip()[:60]
         if not first or not last:
@@ -16197,7 +16203,7 @@ def drive_apply():
             db().commit()
             log("application", "New driver application: " + first + " " + last)
             done = True
-    return render_template("drive.html", done=done, errs=errs, f=f, regions=_region_choices(), makes=CAR_MAKES)
+    return render_template("drive.html", done=done, errs=errs, f=f, regions=_region_choices(), makes=CAR_MAKES, all_contacts=faq_brand_contacts())
 
 @app.route("/partner", methods=["GET", "POST"])
 def partner_apply():

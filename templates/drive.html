@@ -2,9 +2,9 @@
 <div class="applybox">
 <h1 class="applytitle">Become a driver</h1>
 {% if done %}
-<div class="panel"><h2>Thanks, your application is in.</h2><p>We will contact you to talk about the details.{% if biz_phone %} Questions? Call <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>.{% endif %}</p></div>
+<div class="panel"><h2>Thanks, your application is in.</h2><p>We will contact you to talk about the details.{% if all_logos and all_contacts %} Questions? Call {% for b in all_contacts if b.phone %}{{ b.name }} at <a href="tel:{{ b.tel }}">{{ b.phone }}</a>{{ ', ' if not loop.last else '' }}{% endfor %}.{% elif biz_phone %} Questions? Call <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>.{% endif %}</p></div>
 {% else %}
-<p>{{ biz_name }} is partnering with drivers!</p>
+{% if all_logos and all_contacts %}{% set _bn = all_contacts|map(attribute='name')|list %}<p>{{ _bn[:-1]|join(', ') }}{{ ' and ' if _bn|length > 1 else '' }}{{ _bn[-1] }} {{ 'are' if _bn|length > 1 else 'is' }} partnering with drivers!</p>{% else %}<p>{{ biz_name }} is partnering with drivers!</p>{% endif %}
 <p>Just enter your information below to get started, and we will contact you to discuss the details.</p>
 {% for e in errs %}<p class="cc-err">{{ e }}</p>{% endfor %}
 <form method="post" class="applyform">
