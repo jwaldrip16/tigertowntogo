@@ -2,9 +2,21 @@
 <div class="applybox faq">
 <h1 class="applytitle" style="text-align:left">Frequently asked questions</h1>
 {% for it in faqs %}<h3>{{ it.q }}</h3><p>{{ it.a }}</p>{% endfor %}
+{% if all_contacts %}
+<h3 style="text-transform:uppercase">Please contact your brand with any questions about disputes, refunds or customer service</h3>
+<div class="faqbrands">
+{% for b in all_contacts %}<div class="faqbrand">
+  <p class="faqbrandname">{% if b.logo %}<img src="{{ b.logo }}" alt="">{% endif %}{{ b.name }}</p>
+  {% if b.phone %}<p class="faqbig"><a href="tel:{{ b.tel }}">{{ b.phone }}</a></p>{% endif %}
+  {% if b.email %}<p class="faqbig"><a href="mailto:{{ b.email }}">{{ b.email }}</a></p>{% endif %}
+  {% if b.address %}<p>{{ b.address }}</p>{% endif %}
+</div>{% endfor %}
+</div>
+{% else %}
 <h3 style="text-transform:uppercase">Please contact {{ biz_name }} with any questions about disputes, refunds or customer service</h3>
 {% if biz_phone %}<p class="faqbig"><a href="tel:{{ biz_tel }}">{{ biz_phone }}</a></p>{% endif %}
 {% if biz_email %}<p class="faqbig"><a href="mailto:{{ biz_email }}">{{ biz_email }}</a></p>{% endif %}
 {% if biz_address %}<p class="faqbig">{{ biz_address }}</p>{% endif %}
+{% endif %}
 </div>
 {% endblock %}

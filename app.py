@@ -16022,7 +16022,31 @@ def faq_target():
 def faq_region_id():
     return faq_target()[0]
 
-def faq_items(region_id=None, site=None):
+def faq_all_brands():
+    """True on the shared website's FAQ with no brand or area picked (All brands)."""
+    try:
+        if not brands_on() or host_site() is not None:
+            return False
+        rid, site = faq_target()
+        return not rid and site is None
+    except Exception:
+        return False
+
+
+def faq_brand_contacts():
+    """Every brand's name, phone, email and address, for the All brands FAQ."""
+    out = []
+    for srow in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
+        bc = brand_contact(srow) or {}
+        ph = nice_phone((srow["phone"] or "").strip()) or ""
+        out.append({"name": (srow["name"] or "").strip(), "phone": ph,
+                    "tel": "".join(ch for ch in ph if ch.isdigit()),
+                    "email": bc.get("email") or "", "address": bc.get("address") or "",
+                    "logo": brand_logo(srow)})
+    return [b for b in out if b["name"]]
+
+
+def faq_items(region_id=None, site=None, all_brands=False):
     reg = _region(region_id) if region_id else None
     if site is None and region_id:
         site = site_of_region(region_id)
@@ -16041,8 +16065,25 @@ def faq_items(region_id=None, site=None):
             "{address}": _bc["address"] if _bc is not None else _biz("business_address").strip()}
     # FAQs copied from an old site carry that site's phone numbers and email: show this brand's
     raw = _PHONE_RE.sub("{phone}", raw)
-    if rep_["{email}"]:
+    if rep_["{email}"] or all_brands:
         raw = _EMAIL_RE.sub("{email}", raw)
+    if all_brands:
+        # All brands: no single brand's name, phone or email. Speak for every brand.
+        names = {name}
+        for srow in db().execute("SELECT name FROM sites").fetchall():
+            if (srow["name"] or "").strip():
+                names.add(srow["name"].strip())
+        for n in sorted(names, key=len, reverse=True):
+            if not n:
+                continue
+            pat = r"\s*".join(re.escape(ch) for ch in n.replace(" ", ""))
+            raw = re.sub(r"(?i)\b" + pat + r"\b", "{business}", raw)
+        raw = re.sub(r"\{business\} is\b", "We are", raw)
+        raw = re.sub(r"\{business\} has\b", "We have", raw)
+        raw = re.sub(r"(?i)\b(call|text|at|contact) \{phone\}", r"\1 your brand's number below", raw)
+        raw = re.sub(r"(?i)\b(email|at) \{email\}", r"\1 your brand's email below", raw)
+        rep_ = {"{business}": "us", "{phone}": "your brand's number below",
+                "{email}": "your brand's email below", "{address}": ""}
     items, q, a = [], None, []
     for line in raw.splitlines() + ["Q:"]:
         t = line.strip()
@@ -16064,7 +16105,10 @@ def faq_page():
     rid, site = faq_target()
     if site is not None:
         g._site_forced = site   # the page's logo, name, phone and address match that brand
-    return render_template("faq.html", faqs=faq_items(rid, site))
+    if faq_all_brands():
+        return render_template("faq.html", faqs=faq_items(rid, site, all_brands=True),
+                               all_contacts=faq_brand_contacts())
+    return render_template("faq.html", faqs=faq_items(rid, site), all_contacts=None)
 
 @app.post("/api/home-search")
 def api_home_search():
