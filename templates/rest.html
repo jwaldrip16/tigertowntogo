@@ -92,6 +92,7 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
 // new order sound (the chime file), plays every 5 seconds until the order is accepted
 try { ffSound.setOrderSound('/static/sounds/new-order.mp3'); } catch(e) {}
 try { ffSound.setSound('sent', '/static/sounds/chat.mp3'); } catch(e) {}   // your message reached dispatch
+try { ffSound.setSound('message', '/static/sounds/driver-message.mp3'); } catch(e) {}   // dispatch or system wrote to the kitchen
 ffAwake.init('kitchen', {{ 'true' if awake_default != '0' else 'false' }});
 async function askCall(level){
   const code = document.getElementById('callCode').value.trim();
@@ -101,6 +102,7 @@ async function askCall(level){
   if (level === 'dialed') msg = 'calling dispatch now' + (note ? ': ' + note : '') + '. If you missed it, call the kitchen back';
   const res = await jpost('/api/restaurant/call-dispatch', {code: code, note: msg, urgent: level === 'urgent'});
   if (res && res.ok){
+    try { ffSound.play('sent'); } catch(e){}   // request reached dispatch
     document.getElementById('callNote').value = '';
     if (level === 'dialed') { said('Calling dispatch. They also got an alert in case the call does not connect.'); return; }
     said(level === 'urgent' ? 'Sent as urgent. Dispatch is being alerted now.'
@@ -254,6 +256,7 @@ async function loadChat(seen){
     || '<p class="muted">No messages yet.</p>';
   c.scrollTop = c.scrollHeight;
   if (seen) chatBadge(0);
+  return res;
 }
 async function sendChat(){
   const box = document.getElementById('rchatBox');
@@ -267,11 +270,19 @@ function chatBadge(n){
 }
 function chatCheck(res){
   const n = res.chat_unread || 0, last = res.chat_last_id || 0;
-  if (TAB === 'chat'){ if (last !== CHAT_LAST) loadChat(true); }
+  if (TAB === 'chat'){
+    if (last !== CHAT_LAST){
+      const fresh = CHAT_LAST !== null && last > CHAT_LAST;
+      loadChat(true).then(function(r){
+        const ms = (r && r.messages) || [], m = ms[ms.length-1];
+        if (fresh && m && m.sender !== 'restaurant'){ try { ffSound.play('message'); } catch(e) {} }
+      });
+    }
+  }
   else {
     chatBadge(n);
     if (CHAT_LAST !== null && last > CHAT_LAST && n){
-      try { ffSound.beep(); } catch(e) {}
+      try { ffSound.play('message'); } catch(e) {}   // dispatch or system wrote to the kitchen
       const f = document.getElementById('flash');
       if (f){ f.textContent = 'New message from dispatch'; f.classList.remove('hidden');
         f.onclick = function(){ showTab('chat'); f.classList.add('hidden'); };
