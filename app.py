@@ -10406,32 +10406,66 @@ def driver_home_brand(did):
 
 
 def driver_fits_brand(did, site=None):
-    """True when this driver may sign in under the brand being shown. A driver with regions in
-    several brands fits each of them; one with no brand-tied regions fits every brand."""
+    """True when this driver may sign in under the brand being shown. Regions not tied to a
+    brand (or tied to a brand row carrying the main business's name) belong to Tiger Town To Go;
+    a driver may sign in under another brand only when dispatch gave them a region of that brand."""
     site = staff_brand_site() if site is None else site
-    sids = driver_site_ids(did)
-    if site is None:
-        if staff_main_brand():   # Tiger Town To Go (the main business): every driver may sign in under it
-            return True
+    if site is None:   # Tiger Town To Go (the main business): every driver may sign in under it
         return True
-    return (not sids) or (0 in sids) or (int(site["id"]) in sids)
+    sid = int(site["id"])
+    sids = driver_site_ids(did)
+    if sid in sids:
+        return True
+    mains = main_named_site_ids()
+    if sid in mains:   # a brand row named Tiger Town To Go counts as the main business
+        return (not sids) or (0 in sids) or bool(sids & mains)
+    return False
 
 
 def restaurant_fits_brand(row, site=None):
-    """True when this restaurant belongs to the brand being shown (by its region's brand)."""
+    """True when this restaurant belongs to the brand being shown (by its region's brand).
+    A restaurant with no region, or a region not tied to a brand, belongs to Tiger Town To Go."""
     site = staff_brand_site() if site is None else site
-    if row is None:
+    if row is None or site is None:   # Tiger Town To Go (the main business) takes every restaurant
         return True
+    sid = int(site["id"])
     rs = site_of_region(row["region_id"]) if row["region_id"] else None
-    if site is None:
-        if staff_main_brand():   # Tiger Town To Go (the main business): every restaurant may sign in under it
-            return True
+    if rs is not None and int(rs["id"]) == sid:
         return True
-    return rs is None or int(rs["id"]) == int(site["id"])
+    mains = main_named_site_ids()
+    if sid in mains:
+        return rs is None or int(rs["id"]) in mains
+    return False
 
 
-def wrong_brand_msg(site, who):
+def home_brand_name_for(sids):
+    """Name of the company an account belongs to, for the wrong-company message."""
+    real = [x for x in sids if x and x not in main_named_site_ids()]
+    if len(real) == 1:
+        st = site_by_id(real[0])
+        if st is not None:
+            return st["name"]
+    if not real:
+        return main_company_name()
+    return None
+
+
+def main_company_name():
+    """The main business's name as the Switch company list shows it (Tiger Town To Go)."""
+    try:
+        for c in company_rows():
+            if company_look(c).get("bs") == "main":
+                return c.get("name") or main_brand_name()
+    except Exception:
+        pass
+    return main_brand_name()
+
+
+def wrong_brand_msg(site, who, home=None):
     nm = site["name"] if site is not None else (session.get("staff_brand_name") or main_brand_name())
+    if home and home != nm:
+        return ("This %s account belongs to %s, not %s. Tap Switch company and pick %s."
+                % (who, home, nm, home))
     return ("This %s account isn't set up for %s. Pick your company again with Switch company, "
             "or call dispatch." % (who, nm))
 
@@ -10446,18 +10480,8 @@ def driver_login():
         if row and not (row["active"] if row["active"] is not None else 1):
             err = "Your driver account is inactive. Call dispatch."
         elif row and not driver_fits_brand(row["id"]):
-            # Right phone and PIN but the wrong company picked: when this web address isn't one
-            # brand's own, move them to the company they drive for instead of turning them away.
-            home = driver_home_brand(row["id"]) if not host_brand_site() else None
-            if home is not None:
-                session["staff_brand"] = home
-                session.pop("staff_brand_name", None) if home != "main" else None
-                g.pop("_staff_site", None)
-            if home is not None and driver_fits_brand(row["id"]):
-                session["driver_id"] = row["id"]
-                session["driver_name"] = row["name"]
-                return redirect(url_for("driver"))
-            err = wrong_brand_msg(staff_brand_site(), "driver")
+            # Right phone and PIN but another company's app: keep them out and name their company.
+            err = wrong_brand_msg(staff_brand_site(), "driver", home_brand_name_for(driver_site_ids(row["id"])))
         elif row:
             session["driver_id"] = row["id"]
             session["driver_name"] = row["name"]
@@ -10467,7 +10491,7 @@ def driver_login():
     if request.method == "GET" and session.get("driver_id"):
         if driver_fits_brand(session["driver_id"]):
             return redirect(url_for("driver"))
-        err = wrong_brand_msg(staff_brand_site(), "driver")   # switched to a brand they don't drive for
+        err = wrong_brand_msg(staff_brand_site(), "driver", home_brand_name_for(driver_site_ids(session["driver_id"])))   # switched to a brand they don't drive for
         session.pop("driver_id", None)
     return render_template("driver_login.html", err=err)
 
@@ -11014,15 +11038,11 @@ def rest_login():
         row = db().execute("SELECT * FROM restaurants WHERE slug=? AND pin=?",
                            (request.form.get("slug", "").strip().lower(),
                             request.form.get("pin", ""))).fetchone()
-        if row and not restaurant_fits_brand(row) and not host_brand_site():
-            # Right store code and PIN but the wrong company picked: move them to their own company.
-            rs = site_of_region(row["region_id"]) if row["region_id"] else None
-            session["staff_brand"] = int(rs["id"]) if rs is not None else "main"
-            if rs is not None:
-                session.pop("staff_brand_name", None)
-            g.pop("_staff_site", None)
         if row and not restaurant_fits_brand(row):
-            err = wrong_brand_msg(staff_brand_site(), "restaurant")
+            # Right store code and PIN but another company's app: keep them out and name their company.
+            rs = site_of_region(row["region_id"]) if row["region_id"] else None
+            err = wrong_brand_msg(staff_brand_site(), "restaurant",
+                                  home_brand_name_for({int(rs["id"])} if rs is not None else set()))
         elif row:
             session["restaurant_id"] = row["id"]
             session["restaurant_name"] = row["name"]
@@ -11034,7 +11054,8 @@ def rest_login():
         r = db().execute("SELECT * FROM restaurants WHERE id=?", (session["restaurant_id"],)).fetchone()
         if restaurant_fits_brand(r, site):
             return redirect(url_for("rest_home"))
-        err = wrong_brand_msg(site, "restaurant")   # switched to another brand's company
+        rs = site_of_region(r["region_id"]) if r is not None and r["region_id"] else None
+        err = wrong_brand_msg(site, "restaurant", home_brand_name_for({int(rs["id"])} if rs is not None else set()))   # switched to another brand's company
         session.pop("restaurant_id", None)
     return render_template("rest_login.html", err=err)
 
