@@ -203,9 +203,16 @@ const DTEXT = [['home_headline','Big headline',120],['home_sub','Line under the 
 const DCOL = [['brand','Main color (buttons, links)'],['brand2','Accent color'],['header','Top bar'],['bg','Page background'],['ink','Text color']];
 function designForm(id){
   const s = RG.sites.find(x=>x.id===id); if(!s) return; const d = s.design || {};
-  const col = DCOL.map(c=>'<label class="small" style="display:inline-flex;align-items:center;gap:6px;margin:4px 14px 4px 0">'+
-      '<input type="checkbox" id="dcu_'+c[0]+'"'+(d[c[0]]?' checked':'')+'> '+c[1]+
-      ' <input type="color" id="dc_'+c[0]+'" value="'+(d[c[0]]||(c[0]==='bg'?'#f7f8fa':c[0]==='ink'?'#16181d':c[0]==='header'?'#ffffff':'#c2410c'))+'" oninput="document.getElementById(\'dcu_'+c[0]+'\').checked=true"></label>').join('');
+  const col = DCOL.map(c=>{
+      const def = c[0]==='bg'?'#f7f8fa':c[0]==='ink'?'#16181d':c[0]==='header'?'#ffffff':'#c2410c';
+      const val = d[c[0]] || def;
+      return '<div class="small" style="display:inline-flex;align-items:center;gap:6px;margin:4px 14px 4px 0">'+
+        '<input type="color" id="dc_'+c[0]+'" value="'+val+'" data-orig="'+val+'" style="width:44px;height:30px;padding:0;border:1px solid #ccc;border-radius:6px;cursor:pointer" '+
+        'oninput="dcPick(\''+c[0]+'\')" onchange="dcPick(\''+c[0]+'\')">'+
+        '<input type="checkbox" id="dcu_'+c[0]+'"'+(d[c[0]]?' checked':'')+' style="width:auto;margin:0">'+
+        '<label for="dcu_'+c[0]+'" style="cursor:pointer">'+c[1]+'</label></div>';
+    }).join('') +
+    '<div class="muted small">Click a color box to pick a color. Untick a color to go back to the main website\'s color.</div>';
   const fonts = (RG.fonts||[]).map(f=>'<option value="'+e(f[0])+'"'+(f[0]===(d.font||'')?' selected':'')+'>'+e(f[1])+'</option>').join('');
   const cor = [['','Standard'],['round','Extra round'],['soft','Slightly round'],['square','Square']].map(c=>'<option value="'+c[0]+'"'+(c[0]===(d.corners||'')?' selected':'')+'>'+c[1]+'</option>').join('');
   const txt = (k,l,n)=> (n>120
@@ -228,9 +235,14 @@ function designForm(id){
     '<button class="btn small" onclick="document.getElementById(\'stForm\').innerHTML=\'\';drawSites()">Close</button></div></div>';
   document.getElementById('stForm').scrollIntoView({behavior:'smooth'});
 }
+function dcPick(k){ const t = document.getElementById('dcu_'+k); if(t) t.checked = true; }
 async function saveDesign(id){
   const b = {op:'site_design', id:id, font: document.getElementById('dFont').value, corners: document.getElementById('dCorners').value};
-  DCOL.forEach(c=>{ b[c[0]] = document.getElementById('dcu_'+c[0]).checked ? document.getElementById('dc_'+c[0]).value : ''; });
+  DCOL.forEach(c=>{
+    const box = document.getElementById('dc_'+c[0]), tick = document.getElementById('dcu_'+c[0]);
+    const changed = box.value.toLowerCase() !== String(box.dataset.orig||'').toLowerCase();
+    b[c[0]] = (tick.checked || changed) ? box.value : '';
+  });
   DTEXT.forEach(x=>{ b[x[0]] = document.getElementById('dt_'+x[0]).value; });
   const r = await jpost('/api/dispatch/regions', b);
   if(!r.ok){ alert(r.error || 'That did not save.'); return; }
