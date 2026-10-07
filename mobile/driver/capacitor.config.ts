@@ -9,9 +9,10 @@ const config: CapacitorConfig = {
   appName: 'Fleet Foot Driver',
   webDir: 'www',
   server: {
-    url: site + '/driver',
+    url: site + '/go/driver',   // company picker first, then that company's sign in
     cleartext: false,
-    allowNavigation: [new URL(site).host, '*.up.railway.app', '*.paypal.com', '*.branchapp.com'],
+    // every client company has its own web address, so the app may open any of them
+    allowNavigation: ['*'],
   },
   android: { backgroundColor: '#ffffff' },
   ios: { backgroundColor: '#ffffff', contentInset: 'always' },

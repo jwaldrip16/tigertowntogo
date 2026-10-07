@@ -1,6 +1,8 @@
 # Fleet Foot phone apps
 
-Two store apps that open the live site: **Fleet Foot Driver** (`/driver`) and **Fleet Foot Kitchen** (`/restaurant`).
+Two store apps that open the live site: **Fleet Foot Driver** (`/go/driver`) and **Fleet Foot Kitchen** (`/go/kitchen`).
+Both open on the company picker: the worker picks their company (or types its code) once, the app remembers it,
+and "Switch company" on the sign-in page and in the top bar brings the picker back. Companies are listed at Dispatch > Companies.
 Every change pushed to GitHub shows up in both apps right away, no store update needed.
 
 ## Store icons

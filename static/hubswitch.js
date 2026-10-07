@@ -11,11 +11,13 @@
       ['hub','app','co'].forEach(function(k){ p.delete(k); });
       var qs = p.toString(); history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
     }
-    hub = localStorage.getItem(HUB_KEY);
-    if (!hub) return;
+    // No picker remembered (the app or browser opened this site directly): the company
+    // picker on this same site still works, so the link always shows.
+    hub = localStorage.getItem(HUB_KEY) || location.origin;
     function go(ev){
       if (ev) ev.preventDefault();
-      if (!confirm('Sign out and switch to a different company?')) return;
+      var signedIn = !!document.querySelector('header.topbar nav a[href$="/logout"]');
+      if (signedIn && !confirm('Sign out and switch to a different company?')) return;
       fetch(logout, {credentials:'same-origin'}).catch(function(){}).then(function(){
         try{ localStorage.removeItem(HUB_KEY); }catch(e){}
         location.href = hub + '/go/' + app + '?switch=1';
