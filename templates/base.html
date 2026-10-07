@@ -5,12 +5,13 @@
 <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
 {% if brand_font %}<link rel="stylesheet" href="{{ brand_font }}">{% endif %}
 {% if brand_css %}<style>{{ brand_css|safe }}</style>{% endif %}
+{% set _sb = staff_brand if (staff_brand and portal != 'dispatch' and not request.path.startswith('/dispatch')) else None %}
+{% set tab_logo = _sb.logo if _sb else ('/static/brand/logo-default.png' if (portal or staff_area or request.path.startswith('/dispatch')) else logo_url) %}
+<link rel="icon" type="image/png" sizes="64x64" href="/brand/tab-64.png?src={{ tab_logo|urlencode }}">
 {% if request.path.startswith('/dispatch') or request.path.startswith('/driver') or request.path.startswith('/restaurant') or request.path.startswith('/reset/') %}
-<link rel="icon" type="image/png" href="/static/brand/logo-default.png">
 <link rel="apple-touch-icon" href="/static/icons/{{ 'driver' if request.path.startswith('/driver') else 'kitchen' }}-192.png">
 {% else %}
-<link rel="icon" type="image/png" href="/brand/icon-32.png">
-<link rel="apple-touch-icon" href="/brand/icon-180.png">
+<link rel="apple-touch-icon" href="/brand/tab-180.png?src={{ tab_logo|urlencode }}">
 {% endif %}
 <script>
 async function jpost(url, data){

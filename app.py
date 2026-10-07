@@ -12025,6 +12025,51 @@ def app_manifest(which):
     return resp
 
 
+def _tab_logo_file(src):
+    """The file behind a logo address the page shows (/static/... or /media/...), else ''."""
+    try:
+        from urllib.parse import urlparse
+        path = urlparse(src or "").path or ""
+    except Exception:
+        return ""
+    if path.startswith("/static/"):
+        f = os.path.normpath(os.path.join(APP_DIR_STATIC, path[len("/static/"):]))
+        if f.startswith(APP_DIR_STATIC + os.sep) and os.path.isfile(f):
+            return f
+    if path.startswith("/media/"):
+        f = os.path.join(UPLOAD_DIR, os.path.basename(path))
+        if os.path.isfile(f):
+            return f
+    return ""
+
+
+@app.get("/brand/tab-<int:size>.png")
+def brand_tab_icon(size):
+    """Browser-tab icon made from the logo the page itself shows (?src=), so each brand's
+    tab carries that brand's logo. The address differs per logo, so tabs never mix them up."""
+    size = size if size in (32, 64, 180) else 64
+    f = _tab_logo_file(request.args.get("src")) or os.path.join(APP_DIR_STATIC, "brand", "logo-default.png")
+    try:
+        from PIL import Image
+        import io
+        src = Image.open(f).convert("RGBA")
+        bbox = src.getbbox()
+        if bbox:
+            src = src.crop(bbox)
+        canvas = Image.new("RGBA", (size, size), (255, 255, 255, 0))
+        box = int(size * 0.94)
+        k = box / max(src.size)
+        src = src.resize((max(1, int(src.width * k)), max(1, int(src.height * k))), Image.LANCZOS)
+        canvas.paste(src, ((size - src.width) // 2, (size - src.height) // 2), src)
+        out = io.BytesIO()
+        canvas.save(out, "PNG")
+        resp = app.response_class(out.getvalue(), mimetype="image/png")
+        resp.headers["Cache-Control"] = "public, max-age=3600"
+        return resp
+    except Exception:
+        return redirect(DEFAULT_LOGO)
+
+
 @app.get("/brand/maskable-<int:size>.png")
 def brand_maskable(size):
     """Android adaptive icon: the logo kept inside the safe circle on a solid background."""
