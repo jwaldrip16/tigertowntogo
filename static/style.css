@@ -674,3 +674,9 @@ ul.ordlines{margin:4px 0}
 .ovmoney{display:flex;justify-content:space-between;max-width:280px}
 .ovtotal{font-weight:800;border-top:1px solid #e5e7eb;margin-top:3px;padding-top:3px}
 @media (max-width:520px){.ovrow{grid-template-columns:1fr;gap:2px}.ovpanel{font-size:16px}}
+
+.ovconfirm{margin-top:12px;padding:12px;border:2px solid #c2410c;border-radius:12px;background:#fff7ed;display:flex;flex-direction:column;gap:8px}
+.ovtimer{display:flex;align-items:center;gap:8px}
+.ovtimer .mins{width:80px;font-size:20px;text-align:center}
+.ovgo{width:100%;font-size:18px;padding:12px}
+.ovbtn.primary{font-size:16px;padding:8px 14px}

@@ -179,13 +179,13 @@ async function load(force){
   const gone = o => ['enroute','delivered','cancelled'].includes(o.dispatch_status);
   const active = res.orders.filter(o=>!gone(o));
   const done = res.orders.filter(gone).reverse();
+  if (res.prep_default) OrderView.setConfirm(OV_CONFIRM, res.prep_default);
   document.getElementById('cntActive').textContent = active.length ? '('+active.length+')' : '';
   document.getElementById('cntDone').textContent = done.length ? '('+done.length+')' : '';
   document.getElementById('ordersDone').innerHTML = done.length ? done.map(o=>
     '<div class="panel slim"><div class="row between"><div><strong>'+ordMain(o)+'</strong> '+(ordSub(o) ? '<span class="muted small">'+ordSub(o)+'</span> ' : '')+
-    (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+o.customer+
-    '<div class="small">'+OrderLines.block(o)+'</div>'+
-    '<div class="small">Delivery fee '+o.fee+' &middot; Tip '+o.tip+'</div>'+OrderView.btn(o)+'</div>'+
+    (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+
+    '<div style="margin-top:6px">'+OrderView.btn(o)+'</div></div>'+
     '<div class="right muted small">'+({enroute:'Driver en route',delivered:'Delivered',
       cancelled:'Cancelled'}[o.dispatch_status]||'')+
     (o.ready_time ? '<div>Ready '+o.ready_time+'</div>' : '')+'</div></div></div>').join('')
@@ -199,40 +199,16 @@ async function load(force){
       '">'+o.kitchen_status+'</span> '+t+
       (o.driver?' <span class="pill blue">driver '+o.driver+'</span>':
        o.queue_position?' <span class="pill grey">queue #'+o.queue_position+'</span>':'')+'</div>'+
-      '<div class="detail">'+
-      '<div class="paybar">Delivery fee <b>'+o.fee+'</b> &middot; Tip <b>'+o.tip+'</b></div>'+
-      '<div class="detail-row"><span class="lbl">Customer</span><span><strong>'+o.customer+'</strong>'+
-        '<br><a href="tel:'+o.phone+'">'+o.phone+'</a><br>'+o.address+
-        (o.note?('<br><em>'+o.note+'</em>'):'')+'</span></div>'+
-      (o.issue ? '<div class="detail-row"><span class="lbl">Remake</span>'+
-      '<span class="issuebar">'+o.issue+(o.issue_note?' - '+o.issue_note:'')+
-      (o.cloned_from?' (first order '+o.cloned_from+')':'')+'</span></div>' : '')+
-    (o.dispatch_note ? '<div class="detail-row"><span class="lbl">Dispatch note</span>'+
-        '<span class="notebar">'+o.dispatch_note+'</span></div>' : '')+
-      '<div class="detail-row"><span class="lbl">Order ('+(o.item_count||o.items.length)+' items)</span>'+
-        '<span><ul class="lines">'+
-        OrderLines.lis(o)+
-        '</ul></span></div>'+
-      '<div class="detail-row"><span class="lbl">Times</span><span>'+
-        (o.timeline||[]).map(x=>x.time+' '+x.label).join('<br>')+'</span></div>'+
-      '<div class="detail-row"><span class="lbl">Ticket</span><span>Subtotal '+o.subtotal+
-        ' &middot; fee '+o.fee+(o.service_cents ? ' &middot; service '+o.service : '')+' &middot; tax '+o.tax+' &middot; tip '+o.tip+
-        '<br>Total '+o.total+' &middot; placed '+(o.placed_by||'customer')+
-        ' &middot; '+(o.miles||0)+' mi out</span></div>'+
-      '<div class="detail-row"><span class="lbl">Driver</span><span>'+
-        (o.driver ? (o.driver+' , stop '+(o.stack_seq||1))
-                  : 'assigned once you confirm this ticket')+'</span></div>'+
-      '</div>'+
-      '<div class="order-actions">'+
+      (o.kitchen_status==='pending'
+        ? '<div class="order-actions">'+OrderView.btn(o, 'View order to confirm', true)+'</div></div>'
+        : '<div class="order-actions">'+
         OrderView.btn(o)+
       '<button class="btn tiny" onclick="nudge('+o.id+',-5)">-5</button>'+
       '<input class="mins" id="m'+o.id+'" type="number" value="'+
       (o.prep_minutes||res.prep_default)+'" min="1" max="180" onchange="setTimer('+o.id+')"> min'+
       '<button class="btn tiny" onclick="nudge('+o.id+',5)">+5</button>'+
       '<button class="btn tiny" onclick="setTimer('+o.id+')">Set timer</button>'+
-      (o.kitchen_status==='pending'
-        ? '<button class="btn tiny" onclick="start('+o.id+')">Accept and start</button>' : '')+
-      '<button class="btn tiny" onclick="ready('+o.id+')">Mark ready</button></div></div>';
+      '<button class="btn tiny" onclick="ready('+o.id+')">Mark ready</button></div></div>');
   }).join('') : '<p class="muted">No open orders.</p>';
   showTab(TAB);
 }
@@ -314,6 +290,13 @@ function newTicketAlert(orders){
     ffSound.stopLoop();
   }
 }
+// New orders are confirmed only from inside View order, by setting the timer.
+var OV_CONFIRM = async function(id, mins){
+  try { ffSound.stopLoop(); } catch(e){}
+  await jpost('/api/order/status', {order_id:id, kitchen_status:'preparing', prep_minutes:mins});
+  load(true);
+};
+OrderView.setConfirm(OV_CONFIRM);
 async function start(id){
   ffSound.stopLoop();
   await jpost('/api/order/status', {order_id:id, kitchen_status:'preparing',

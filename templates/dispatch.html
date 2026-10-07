@@ -809,10 +809,8 @@ function renderCompleted(res){
     '<div class="order"><div class="order-head"><strong>'+esc(ordMain(o))+'</strong>'+(ordSub(o) ? ' <span class="muted small">'+esc(ordSub(o))+'</span>' : '')+' '+refPill(o)+tokenPill(o)+'<span class="pill '+
     (o.dispatch_status==='delivered'?'green':'grey')+'">'+o.dispatch_status+'</span> '+
     '<span class="muted small">'+(o.delivered_time || (o.delivered_at||'').replace('T',' '))+'</span></div>'+
-    '<div class="muted small">'+siteTag(o)+o.restaurant+' &rarr; '+o.customer+' &middot; '+o.address+
-    ' &middot; '+milesLabel(o)+' &middot; fee '+o.fee+' &middot; <strong>tip '+o.tip+'</strong>'+(o.discount ? ' &middot; discount '+o.discount : '')+' &middot; total '+o.total+
-    (o.driver?' &middot; driver '+o.driver:'')+'</div>'+
     '<div class="order-actions">'+
+      OrderView.btn(o)+
       (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
       (!o.driver_id && o.dispatch_status!=='cancelled' ? '<select class="sendsel" id="sd'+o.id+'">'+
         '<option value="">Next up</option>'+ (res.drivers||[]).filter(d=>d.status==='online')
@@ -1385,17 +1383,8 @@ function orderCard(o, opts, drivers){
     ' '+srcPill(o)+
     payPill(o)+
     (o.placed_by!=='customer' ? ' <span class="pill grey">by '+o.placed_by+'</span>' : '')+'</div>'+
-    '<div class="muted small">'+siteTag(o)+o.restaurant+' &rarr; '+o.customer+' &middot; '+o.address+
-    ' &middot; '+milesLabel(o)+' &middot; fee '+o.fee+' &middot; total '+o.total+'</div>'+
     (o.needs_address_approval ? '<div class="issuebar">Address not verified &middot; pending dispatch '+
       'approval. The kitchen has not seen this order yet.</div>' : '')+
-    '<div class="small">'+OrderLines.block(o)+
-      (o.items.some(i=>i.fee_cents) ? '<div class="muted small">'+o.items.filter(i=>i.fee_cents).map(i=>i.name+' +'+money(i.fee_cents)+' fee').join(', ')+'</div>' : '')+
-      (o.item_fee && o.item_fee!=='$0.00' ? '<div class="muted small">custom fees '+o.item_fee+'</div>' : '')+'</div>'+
-    (o.issue ? '<div class="issuebar">Redo'+(o.cloned_from?' of '+o.cloned_from:'')+': '+o.issue+
-      (o.issue_note?' - '+o.issue_note:'')+'</div>' : '')+
-    (o.dispatch_note ? '<div class="notebar">Note: '+o.dispatch_note+'</div>' : '')+
-    trailLine(o)+
     '<div class="order-actions">'+
       OrderView.btn(o)+
       payButtons(o)+
@@ -1756,12 +1745,8 @@ async function loadFuture(){
     return '<div class="order"><div class="order-head"><b>'+o.scheduled_label+'</b> &middot; '+ordBoth(o)+
       ' <span class="pill amber">Future</span>'+
       (o.kitchen_closed ? ' <span class="pill red">Kitchen closed, sends when they open</span>' : '')+'</div>'+
-      '<div>'+o.restaurant+' to <b>'+o.customer+'</b> '+(o.phone||'')+'</div>'+
-      '<div class="muted small">'+o.address+'</div>'+
-      (items ? '<div class="small">'+items+'</div>' : '')+
-      '<div class="small">Total '+o.total+' &middot; '+(o.pay_method==='cash' ? 'cash' : 'card')+
-      ' &middot; goes to the kitchen '+o.release_label+payPill(o)+'</div>'+
       '<div class="order-actions">'+
+      OrderView.btn(o)+
       '<button class="btn tiny" onclick="editOrder('+o.id+')">Edit order</button>'+
       payButtons(o)+
       (o.kitchen_closed

@@ -12,6 +12,29 @@
     if (window.OrderLines) return OrderLines.lis(o);
     return (o.lines||[]).map(function(l){ return '<li>'+esc(l)+'</li>'; }).join('');
   }
+  var CONFIRM = null, CONFIRM_MINS = 15;
+  function kitchenText(o){
+    if (o.kitchen_status==='preparing' && o.timer_seconds!=null) return Math.max(0, Math.ceil(o.timer_seconds/60))+' min left on the timer';
+    if (o.prep_minutes && o.kitchen_status!=='pending') return esc(o.prep_minutes)+' min timer';
+    return '';
+  }
+  function callIn(o){
+    if (o.uses_app || !o.manual_state) return '';
+    var ph = o.order_method!=='online';
+    if (o.manual_state==='placed') return (ph ? 'Called in' : 'Ordered online')+(o.manual_time ? ' '+esc(o.manual_time) : '');
+    if (o.manual_state==='ordering') return ph ? 'Dispatch is calling it in now' : 'Dispatch is ordering online now';
+    return '';
+  }
+  function confirmBox(o){
+    if (!CONFIRM || o.kitchen_status!=='pending') return '';
+    var m = Number(o.prep_minutes || CONFIRM_MINS) || 15;
+    return '<div class="ovconfirm"><div class="ovlbl">Confirm this order</div>'+
+      '<div class="small muted">Set how many minutes it will take. Setting the timer confirms the order.</div>'+
+      '<div class="ovtimer"><button type="button" class="btn" onclick="OrderView.bump(-5)">-5</button>'+
+      '<input id="ovMins" class="mins" type="number" min="1" max="180" value="'+m+'"> min'+
+      '<button type="button" class="btn" onclick="OrderView.bump(5)">+5</button></div>'+
+      '<button type="button" class="btn primary ovgo" onclick="OrderView.confirm('+Number(o.id)+')">Set timer and confirm order</button></div>';
+  }
   function build(o){
     var num = (o.primary_no || o.code || '');
     var sub = (o.primary_no && o.code && o.primary_no!==o.code) ? o.code : '';
@@ -36,16 +59,25 @@
       row('Restaurant', '<b>'+esc(o.restaurant||'')+'</b>'+(o.restaurant_address ? '<br>'+esc(o.restaurant_address) : '')+(rph ? '<br>'+rph : ''))+
       row('Driver', o.driver ? esc(o.driver) : '')+
       row('Dispatch note', o.dispatch_note ? '<div class="ovnote">'+esc(o.dispatch_note)+'</div>' : '')+
-      row('Problem', o.issue ? esc(o.issue)+(o.issue_note ? ' - '+esc(o.issue_note) : '') : '')+
+      row('Problem', o.issue ? esc(o.issue)+(o.issue_note ? ' - '+esc(o.issue_note) : '')+(o.cloned_from ? ' (first order '+esc(o.cloned_from)+')' : '') : '')+
+      row('Address check', o.needs_address_approval ? '<div class="ovnote">Address not verified yet, waiting on dispatch approval.</div>' : '')+
+      row('Kitchen', kitchenText(o))+
+      row('Called in', callIn(o))+
+      row('Queue', [o.queue_position ? 'Queue #'+esc(o.queue_position) : '', o.hold_reason ? esc(o.hold_reason) : ''].filter(Boolean).join(' &middot; '))+
+      row('Details', [o.miles!=null && o.miles!=='' ? esc(o.miles)+' mi from the restaurant' : '',
+                      o.placed_by ? 'Placed by '+esc(o.placed_by) : '', o.source ? 'From '+esc(o.source) : '',
+                      o.payment_status ? 'Payment '+esc(String(o.payment_status).replace(/_/g,' ')) : '',
+                      o.item_fee && o.item_fee!=='$0.00' ? 'Custom fees '+esc(o.item_fee) : ''].filter(Boolean).join('<br>'))+
       row('Payment', pay)+
       row('Times', times)+
+      confirmBox(o)+
       '</div>';
   }
   window.OrderView = {
-    btn: function(o, label){
+    btn: function(o, label, primary){
       if (!o || o.id==null) return '';
       KEEP[o.id] = o;
-      return '<button type="button" class="btn tiny ovbtn" onclick="OrderView.open('+Number(o.id)+')">'+(label||'View order')+'</button>';
+      return '<button type="button" class="btn tiny ovbtn'+(primary?' primary':'')+'" onclick="OrderView.open('+Number(o.id)+')">'+esc(label||'View order')+'</button>';
     },
     remember: function(o){ if (o && o.id!=null) KEEP[o.id] = o; },
     open: function(id){
@@ -59,6 +91,15 @@
       document.body.appendChild(back);
       document.addEventListener('keydown', onKey);
     },
-    close: close
+    close: close,
+    /* kitchen app: a pending order can only be confirmed from inside the popup by setting a timer */
+    setConfirm: function(fn, mins){ CONFIRM = fn; if (mins) CONFIRM_MINS = mins; },
+    bump: function(d){ var i=document.getElementById('ovMins'); if(!i) return; i.value = Math.min(180, Math.max(1, (Number(i.value)||0)+d)); },
+    confirm: function(id){
+      var i = document.getElementById('ovMins'); var m = i ? Number(i.value) : 0;
+      if (!m || m < 1){ if (i) i.focus(); return; }
+      var b = document.querySelector('#ovBack .ovgo'); if (b){ b.disabled = true; b.textContent = 'Confirming...'; }
+      Promise.resolve(CONFIRM && CONFIRM(id, m)).then(close, function(){ if (b){ b.disabled=false; b.textContent='Set timer and confirm order'; } });
+    }
   };
 })();
