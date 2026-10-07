@@ -12514,6 +12514,53 @@ def staff_main_brand():
     return session.get("staff_brand") == "main" and staff_brand_site() is None
 
 
+def _session_brand_site():
+    """The brand the signed-in driver/kitchen picked (or the web address belongs to), for API calls."""
+    h = host_brand_site()
+    if h is not None:
+        return h
+    bs = session.get("staff_brand")
+    if bs and bs != "main":
+        try:
+            return site_by_id(int(bs))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+@app.before_request
+def keep_staff_in_their_company():
+    """An app left open (or signed in before a fix) keeps calling the server in the background.
+    If the driver or kitchen no longer belongs to the company that app is showing, sign them out
+    there too, not only when the page reloads."""
+    try:
+        if not brands_on():
+            return None
+        p = request.path
+        disp = bool(session.get("dispatcher_id"))
+        if session.get("driver_id") and (p.startswith("/api/driver/") or
+                                         (not disp and (p.startswith("/api/chat/") or p.startswith("/api/order/")))):
+            site = _session_brand_site()
+            if site is not None and not driver_fits_brand(session["driver_id"], site):
+                session.pop("driver_id", None)
+                resp = jsonify({"ok": False, "signed_out": True, "error": "Signed out: this account belongs to another company."})
+                resp.status_code = 401
+                resp.headers["X-Signed-Out"] = "/driver/login"
+                return resp
+        if session.get("restaurant_id") and p.startswith("/api/restaurant/"):
+            site = _session_brand_site()
+            r = db().execute("SELECT * FROM restaurants WHERE id=?", (session["restaurant_id"],)).fetchone()
+            if site is not None and r is not None and not restaurant_fits_brand(r, site):
+                session.pop("restaurant_id", None)
+                resp = jsonify({"ok": False, "signed_out": True, "error": "Signed out: this kitchen belongs to another company."})
+                resp.status_code = 401
+                resp.headers["X-Signed-Out"] = "/restaurant/login"
+                return resp
+    except Exception:
+        return None
+    return None
+
+
 @app.before_request
 def remember_staff_brand():
     """The shared apps pass ?bs=<brand id> when a worker picks their company."""
