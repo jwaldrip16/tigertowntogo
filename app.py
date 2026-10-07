@@ -5829,6 +5829,30 @@ def api_driver_extra():
     return jsonify(out)
 
 
+_DONE_CACHE = {}   # finished orders: {id: (row values, built dict, when)}
+
+
+def done_order_dict(o):
+    """Delivered/cancelled orders barely change, so reuse the last build for up to 2 minutes
+    while the order row itself is unchanged. Any dispatcher action clears this (see below)."""
+    key = tuple(o)
+    hit = _DONE_CACHE.get(o["id"])
+    if hit and hit[0] == key and time.time() - hit[2] < 120:
+        return hit[1]
+    d = order_dict(o)
+    _DONE_CACHE[o["id"]] = (key, d, time.time())
+    if len(_DONE_CACHE) > 3000:
+        _DONE_CACHE.clear()
+    return d
+
+
+@app.after_request
+def _clear_done_cache(resp):
+    if request.method != "GET":
+        _DONE_CACHE.clear()   # a payment, edit or refund shows on the very next refresh
+    return resp
+
+
 @app.get("/api/dispatch/board")
 def api_board():
     backfill_primary()
@@ -5851,6 +5875,13 @@ def api_board():
         pass
     live = db().execute("""SELECT * FROM orders WHERE dispatch_status NOT IN ('delivered','cancelled','scheduled')
                            ORDER BY created_at ASC""").fetchall()
+    live_all = live          # every live order, before any region filter (drivers' stops come from here)
+    _od = {}
+    def od(o):
+        """order_dict once per order per refresh (it was being built twice for every stop)."""
+        if o["id"] not in _od:
+            _od[o["id"]] = order_dict(o)
+        return _od[o["id"]]
     future_count = db().execute("SELECT COUNT(*) c FROM orders WHERE dispatch_status='scheduled'").fetchone()["c"]
     done_day = (request.args.get("done_day") or dt.date.today().isoformat())[:10]
     done = db().execute("""SELECT * FROM orders WHERE dispatch_status IN ('delivered','cancelled')
@@ -5911,8 +5942,8 @@ def api_board():
         "late": late_accepts(),
         "rest_chat_unread": rest_chat_unread_for_dispatch()[0],
         "rest_chat_latest": rest_chat_unread_for_dispatch()[1],
-        "orders": [order_dict(o) for o in live],
-        "completed": [order_dict(o) for o in done],
+        "orders": [od(o) for o in live],
+        "completed": [done_order_dict(o) for o in done],
         "owner": is_owner(),
         "done_day": done_day,
         "chat_unread": sum(unread.values()),
@@ -5936,10 +5967,10 @@ def api_board():
                      "on_orders": [{"id": x["id"], "code": x["code"], "stage": x["dispatch_status"],
                                     "restaurant": x["restaurant"], "customer": x["customer"],
                                     "stop": x["stack_seq"]}
-                                   for x in [order_dict(y) for y in db().execute(
-                                       """SELECT * FROM orders WHERE driver_id=? AND dispatch_status
-                                          IN ('assigned','received','at_restaurant','enroute')
-                                          ORDER BY stack_seq ASC""", (d["id"],)).fetchall()]]}
+                                   for x in [od(y) for y in sorted(
+                                       (y for y in live_all if y["driver_id"] == d["id"] and y["dispatch_status"]
+                                        in ('assigned','received','at_restaurant','enroute')),
+                                       key=lambda y: (y["stack_seq"] is None, y["stack_seq"] or 0))]]}
                     for d in drivers],
         "restaurants": [{"id": r["id"], "name": r["name"], "open": is_open(r),
                          "paused": bool(r["closed_override"]), "open_24": bool(r["open_24"]),
