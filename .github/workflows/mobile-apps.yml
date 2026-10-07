@@ -12,6 +12,7 @@ jobs:
   android:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         app: [driver, kitchen]
     defaults:
@@ -48,6 +49,7 @@ jobs:
   ios:
     runs-on: macos-latest
     strategy:
+      fail-fast: false
       matrix:
         app: [driver, kitchen]
     defaults:
@@ -71,7 +73,8 @@ jobs:
       - name: Check the iPhone app builds (unsigned)
         working-directory: mobile/${{ matrix.app }}/ios/App
         run: |
-          xcodebuild -project App.xcodeproj -scheme App -configuration Release -sdk iphonesimulator \
+          if [ -d App.xcworkspace ]; then SRC="-workspace App.xcworkspace"; else SRC="-project App.xcodeproj"; fi
+          xcodebuild $SRC -scheme App -configuration Release -sdk iphonesimulator \
             -derivedDataPath build CODE_SIGNING_ALLOWED=NO build
       - name: Zip the Xcode project for signing on a Mac
         run: zip -qr ios-${{ matrix.app }}-xcode.zip ios -x "ios/App/build/*"
