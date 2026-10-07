@@ -12259,6 +12259,45 @@ def seed_brand_photos():
         print("brand photo seed skipped:", e)
 
 
+def seed_tiger_town_logo():
+    """First start after this update: give the Tiger Town To Go brand its tiger logo (the main
+    business logo) when the brand has no logo of its own. Runs once."""
+    try:
+        con = sqlite3.connect(DB_PATH)
+        con.row_factory = sqlite3.Row
+        if con.execute("SELECT 1 FROM settings WHERE key='tt_brand_logo_v1'").fetchone():
+            con.close()
+            return
+        row = con.execute("SELECT value FROM settings WHERE key='logo_image'").fetchone()
+        main = (row["value"] if row else "") or ""
+        src = os.path.join(UPLOAD_DIR, os.path.basename(main)) if main.strip() else ""
+        done = False
+        if src and os.path.exists(src):
+            for s in con.execute("SELECT id, name, domains, logo FROM sites").fetchall():
+                key = (s["name"] or "").lower().replace(" ", "")
+                doms = (s["domains"] or "").lower()
+                if not (key.startswith("tigertown") or "tigertown" in doms):
+                    continue
+                has = (s["logo"] or "").strip() and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(s["logo"])))
+                if has:
+                    continue
+                import shutil
+                name = secrets.token_hex(10) + (os.path.splitext(src)[1] or ".png")
+                shutil.copyfile(src, os.path.join(UPLOAD_DIR, name))
+                con.execute("UPDATE sites SET logo=? WHERE id=?", (name, s["id"]))
+                done = True
+            # only mark it finished once the brand exists, so it still runs after the brand is added
+            if done or con.execute("SELECT 1 FROM sites WHERE LOWER(REPLACE(name,' ','')) LIKE 'tigertown%' "
+                                   "OR LOWER(COALESCE(domains,'')) LIKE '%tigertown%'").fetchone():
+                con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('tt_brand_logo_v1','1')")
+        con.commit()
+        con.close()
+        if done:
+            print("Tiger Town To Go brand logo set from the main business logo")
+    except Exception as e:
+        print("tiger town logo seed skipped:", e)
+
+
 @app.get("/api/menu/<int:rid>")
 def api_menu(rid):
     return jsonify({"ok": True, "items": menu_payload(rid)})
@@ -13306,6 +13345,7 @@ def _auto_secret_key():
 
 _auto_secret_key()
 seed_brand_photos()
+seed_tiger_town_logo()
 
 def current_portal():
     """Which portal the signed-in person belongs to, if any."""
