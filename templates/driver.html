@@ -653,7 +653,9 @@ async function ask(st){
   if (st === 'online'){
     let rl = null; try { rl = await jget('/api/regions-list'); } catch(e){}
     const opts = (rl && rl.ok && rl.today_allowed) || [];
-    if (opts.length > 1){ pickOnlineRegions(opts, rl.today_pick || []); return; }
+    // regions combined for drivers (Auburn + Downtown Auburn) are one area: no need to ask
+    const areas = new Set(opts.map(o => o.drive_lead ? 'g' + o.drive_lead : 's' + o.id));
+    if (opts.length > 1 && areas.size > 1){ pickOnlineRegions(opts, rl.today_pick || []); return; }
   }
   const r = await jpost('/api/driver/request', {status:st});
   if (r && r.ok === false && r.error) alert(r.error);

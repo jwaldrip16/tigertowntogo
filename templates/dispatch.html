@@ -1537,7 +1537,10 @@ async function setStatus(id, st, regions){
   const d = ((LAST && LAST.drivers) || []).find(x => x.id === id);
   // Online and Off ask which of the driver's eligible regions to put them in
   if (regions === undefined && d && (st === 'online' || st === 'offline') && (d.region_choices||[]).length > 1){
-    regionPickFor(d, st); return false;
+    // regions combined for drivers (Auburn + Downtown Auburn) are one area: no need to ask
+    const areas = new Set(d.region_choices.map(c => c.drive_lead ? 'g' + c.drive_lead : 's' + c.id));
+    if (areas.size > 1){ regionPickFor(d, st); return false; }
+    regions = d.region_choices.map(c => c.id);
   }
   const body = {driver_id:id, status:st};
   if (regions !== undefined) body.regions = regions;

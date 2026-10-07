@@ -1577,7 +1577,15 @@ def driver_region_choices(did, dispatcher_id=None):
         if view:
             ids = [i for i in ids if i in view]
     names = {r["id"]: r["name"] for r in regs}
-    return [{"id": i, "name": names[i]} for i in ids]
+    return [{"id": i, "name": names[i], "drive_lead": drive_lead_of(i)} for i in ids]
+
+
+def drive_lead_of(rid):
+    """The shared id of a combined driver area (Auburn + Downtown Auburn), else 0."""
+    try:
+        return _drive_map().get(rid, rid) if rid and len(drive_group(rid)) > 1 else 0
+    except Exception:
+        return 0
 
 
 def driver_locked_regions(did):
@@ -1893,8 +1901,16 @@ def driver_covers(region_ids, order_region):
 def region_names(ids):
     if not ids:
         return "All regions"
-    names = [r["name"] for r in all_regions() if r["id"] in ids]
-    return ", ".join(names) or "All regions"
+    regs = [r for r in all_regions() if r["id"] in ids]
+    # regions combined for drivers read as one area: "Auburn + Downtown Auburn"
+    out, seen = [], set()
+    for r in regs:
+        if r["id"] in seen:
+            continue
+        grp = [x for x in regs if x["id"] in drive_group(r["id"])] if drive_lead_of(r["id"]) else [r]
+        seen |= {x["id"] for x in grp}
+        out.append(" + ".join(x["name"] for x in grp))
+    return ", ".join(out) or "All regions"
 
 
 def on_shift_drivers():
@@ -8959,8 +8975,8 @@ def api_regions_list():
     pid = session.get("driver_id") if as_driver else session.get("dispatcher_id")
     allowed = today_slot_regions(kind, pid)
     names = {r["id"]: r["name"] for r in all_regions()}
-    return jsonify({"ok": True, "regions": [{"id": r["id"], "name": r["name"]} for r in regs],
-                    "today_allowed": [{"id": x, "name": names[x]} for x in sorted(allowed, key=lambda i: names[i].lower())],
+    return jsonify({"ok": True, "regions": [{"id": r["id"], "name": r["name"], "drive_lead": drive_lead_of(r["id"])} for r in regs],
+                    "today_allowed": [{"id": x, "name": names[x], "drive_lead": drive_lead_of(x)} for x in sorted(allowed, key=lambda i: names[i].lower())],
                     "today_pick": sorted(day_pick(kind, pid)),
                     "mine": sorted(mine), "driver": as_driver, "none_assigned": as_driver and not mine,
                     "owner": is_owner() if session.get("dispatcher_id") else False})
