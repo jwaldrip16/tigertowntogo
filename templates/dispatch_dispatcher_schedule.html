@@ -54,6 +54,14 @@ Only approved times count.</p>
     d.setDate(d.getDate()+n); WEEK = d.toISOString().slice(0,10); actLoad();
   };
   window.actOpen = function(id){ OPEN = (OPEN===id ? null : id); actLoad(); };
+  async function actPost(b){
+    b.kind = KIND;
+    const j = await fetch('/api/dispatch/active-time/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(b)}).then(x=>x.json()).catch(()=>({ok:false}));
+    if(!j.ok) alert(j.error || 'Could not delete that.');
+    actLoad();
+  }
+  window.actDel = function(id){ if(confirm('Delete this stretch of active time? This can\'t be undone.')) actPost({id:id}); };
+  window.actDelWeek = function(pid){ if(confirm('Delete all of this person\'s active time for this week? This can\'t be undone.')) actPost({person_id:pid, week:WEEK}); };
   async function actLoad(){
     const r = await fetch('/api/dispatch/active-time?kind='+KIND+(WEEK?'&week='+WEEK:'')).then(x=>x.json()).catch(()=>null);
     if(!r || !r.ok) return;
@@ -70,8 +78,9 @@ Only approved times count.</p>
     document.getElementById('actTbl').innerHTML = h;
     const p = r.people.find(x=>x.id===OPEN);
     document.getElementById('actSessions').innerHTML = !p ? '' :
-      '<h3>'+e(p.name)+'</h3>'+(p.sessions.length ? '<table class="tbl"><tr><th>Day</th><th>Status</th><th>From</th><th>To</th><th>Length</th></tr>'+
-      p.sessions.map(s=>'<tr><td>'+e(s.day)+'</td><td>'+e(s.state)+'</td><td>'+e(s.start)+'</td><td>'+e(s.end)+'</td><td>'+e(s.length)+'</td></tr>').join('')+'</table>'
+      '<h3>'+e(p.name)+(r.can_delete && p.sessions.length ? ' <button class="btn tiny danger" onclick="actDelWeek('+p.id+')">Delete this week</button>' : '')+'</h3>'+(p.sessions.length ? '<table class="tbl"><tr><th>Day</th><th>Status</th><th>From</th><th>To</th><th>Length</th>'+(r.can_delete?'<th></th>':'')+'</tr>'+
+      p.sessions.map(s=>'<tr><td>'+e(s.day)+'</td><td>'+e(s.state)+'</td><td>'+e(s.start)+'</td><td>'+e(s.end)+'</td><td>'+e(s.length)+'</td>'+
+        (r.can_delete?'<td><button class="btn tiny danger" onclick="actDel('+s.id+')">Delete</button></td>':'')+'</tr>').join('')+'</table>'
       : '<p class="muted small">No live time this week.</p>');
   }
   actLoad(); setInterval(actLoad, 30000);

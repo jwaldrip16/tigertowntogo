@@ -4583,7 +4583,7 @@ def api_dispatch_rest_chat(rid):
         if not body:
             return jsonify({"ok": False, "error": "Type a message first."}), 400
         db().execute("""INSERT INTO rest_messages(restaurant_id,sender,who,body,created_at,seen_by_dispatch)
-                        VALUES(?,?,?,?,?,1)""", (rid, "dispatch", session.get("dispatcher_name") or "Dispatch", body, now()))
+                        VALUES(?,?,?,?,?,1)""", (rid, "dispatch", (session.get("dispatcher_name") or "Dispatch") + (" (Developer)" if is_dev() else ""), body, now()))
     db().execute("UPDATE rest_messages SET seen_by_dispatch=1 WHERE restaurant_id=? AND sender='restaurant'", (rid,))
     db().commit()
     return jsonify({"ok": True, "messages": rest_chat_rows(rid)})
@@ -6958,7 +6958,7 @@ def api_staff_chat():
     myr = dispatcher_region_ids(me)
     names = {r["id"]: r["name"] for r in all_regions()}
     room = request.args.get("room", "all")
-    rows = db().execute("""SELECT m.*, COALESCE(d.is_owner,0) AS from_owner FROM messages m
+    rows = db().execute("""SELECT m.*, COALESCE(d.is_owner,0) AS from_owner, COALESCE(d.is_dev,0) AS from_dev FROM messages m
                            LEFT JOIN dispatchers d ON d.id=m.dispatcher_id
                            WHERE m.driver_id=0 ORDER BY m.id DESC LIMIT 400""").fetchall()
     out = []
@@ -6969,7 +6969,8 @@ def api_staff_chat():
         if room not in ("all", "") and str(rg) != room and not (rg == 0 and room.isdigit()):
             continue
         out.append({"sender": r["sender_name"] or r["sender"], "body": r["body"],
-                    "mine": r["dispatcher_id"] == me, "owner": bool(r["from_owner"]),
+                    "mine": r["dispatcher_id"] == me, "owner": bool(r["from_owner"]) and not r["from_dev"],
+                    "dev": bool(r["from_dev"]),
                     "region": names.get(rg, "All regions") if rg else "All regions",
                     "at": r["created_at"][11:16]})
         if len(out) >= 80:
@@ -8269,6 +8270,7 @@ def active_week(kind, week_start, person_id=None):
         if live:
             out[r["person_id"]]["now"] = "On break" if key == "break" else ("Online" if kind == "driver" else "Active now")
         out[r["person_id"]]["sessions"].append({
+            "id": r["id"], "live": live,
             "state": ("On break" if key == "break" else ("Online" if kind == "driver" else "Active")),
             "day": DOW_NAMES[st.weekday()][:3] + " " + st.strftime("%-m/%-d"),
             "start": st.strftime("%-I:%M %p"), "end": ("now" if live else en.strftime("%-I:%M %p")),
@@ -8308,7 +8310,40 @@ def api_active_time():
     ws = parse_week(request.args.get("week") or monday_of(dt.date.today()).isoformat())
     me = session.get("dispatcher_id")
     pid = None if (kind == "driver" or is_owner()) else me
-    return jsonify(active_week(kind, ws, pid))
+    out = active_week(kind, ws, pid)
+    out["can_delete"] = is_owner(me)     # owners and developers
+    return jsonify(out)
+
+
+@app.post("/api/dispatch/active-time/delete")
+def api_active_time_delete():
+    """Owners and developers can delete live active time: one stretch (id), or every stretch
+    for one person in one week (person_id + week)."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    if not is_owner():
+        return jsonify({"ok": False, "error": "Only an owner or developer can delete active time."}), 403
+    b = request.get_json(force=True) or {}
+    kind = "dispatcher" if b.get("kind") == "dispatcher" else "driver"
+    who = session.get("dispatcher_name") or "dispatch"
+    if b.get("id"):
+        r = db().execute("SELECT * FROM active_time WHERE id=? AND kind=?", (int(b["id"]), kind)).fetchone()
+        if not r:
+            return jsonify({"ok": False, "error": "That stretch is already gone."}), 404
+        db().execute("DELETE FROM active_time WHERE id=?", (r["id"],))
+        log("active_time", "deleted " + kind + " " + str(r["person_id"]) + " stretch from " + str(r["started_at"]) + " by " + who)
+        db().commit()
+        return jsonify({"ok": True, "deleted": 1})
+    if b.get("person_id") and b.get("week"):
+        ws = parse_week(b.get("week"))
+        a = dt.datetime.combine(ws, dt.time()).isoformat()
+        z = (dt.datetime.combine(ws, dt.time()) + dt.timedelta(days=7)).isoformat()
+        cur = db().execute("DELETE FROM active_time WHERE kind=? AND person_id=? AND started_at>=? AND started_at<?",
+                           (kind, int(b["person_id"]), a, z))
+        log("active_time", "deleted " + kind + " " + str(b["person_id"]) + " week of " + ws.isoformat() + " by " + who)
+        db().commit()
+        return jsonify({"ok": True, "deleted": cur.rowcount})
+    return jsonify({"ok": False, "error": "Nothing picked to delete."}), 400
 
 
 @app.get("/api/driver/active-time")
@@ -10212,10 +10247,12 @@ def api_chat(driver_id):
         db().execute("""UPDATE messages SET seen_by_dispatch=1
                         WHERE driver_id=? AND sender='driver' AND seen_by_dispatch=0""", (driver_id,))
         db().commit()
-    rows = db().execute("""SELECT * FROM messages WHERE driver_id=? ORDER BY id DESC LIMIT 60""",
+    rows = db().execute("""SELECT m.*, COALESCE(d.is_dev,0) AS from_dev FROM messages m
+                           LEFT JOIN dispatchers d ON d.id=m.dispatcher_id
+                           WHERE m.driver_id=? ORDER BY m.id DESC LIMIT 60""",
                         (driver_id,)).fetchall()
-    msgs = [{"id": r["id"], "sender": r["sender"],
-              "who": (r["sender_name"] + " (dispatch)") if r["sender_name"] else
+    msgs = [{"id": r["id"], "sender": r["sender"], "dev": bool(r["from_dev"]),
+              "who": (r["sender_name"] + (" (Developer)" if r["from_dev"] else " (dispatch)")) if r["sender_name"] else
                      ("Dispatch" if r["sender"] == "dispatch" else r["sender"]),
               "body": r["body"], "at": r["created_at"][11:16]}
             for r in reversed(rows)]

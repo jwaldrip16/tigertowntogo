@@ -141,7 +141,7 @@ async function loadStaff(){
   }
   document.getElementById('staff').innerHTML = res.messages.map(m =>
     '<div class="msg '+(m.mine?'me':'them')+'"><span class="muted small">'+m.at+' '+sEsc(m.sender)+
-    (m.owner?' <span class="pill green">owner</span>':'')+' <span class="pill blue">'+sEsc(m.region)+'</span></span><br>'+
+    (m.dev?' <span class="pill amber">Developer</span>':'')+(m.owner?' <span class="pill green">owner</span>':'')+' <span class="pill blue">'+sEsc(m.region)+'</span></span><br>'+
     sEsc(m.body)+'</div>').join('');
   const box = document.getElementById('staff'); box.scrollTop = box.scrollHeight;
 }
