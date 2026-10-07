@@ -10342,6 +10342,37 @@ def set_driver_status(driver_id, status, reply):
 
 # ---------------------------------------------------------------- driver app
 
+def driver_site_ids(did):
+    """Brands a driver works for, from the regions dispatch assigned them (0 = a region not tied to a brand)."""
+    return {int(r["sid"] or 0) for r in db().execute(
+        """SELECT COALESCE(rg.site_id,0) sid FROM driver_regions dr JOIN regions rg ON rg.id=dr.region_id
+           WHERE dr.driver_id=?""", (did,)).fetchall()}
+
+
+def driver_fits_brand(did, site=None):
+    """True when this driver may sign in under the brand being shown. A driver with regions in
+    several brands fits each of them; one with no brand-tied regions fits every brand."""
+    site = staff_brand_site() if site is None else site
+    if site is None:
+        return True
+    sids = driver_site_ids(did)
+    return (not sids) or (0 in sids) or (int(site["id"]) in sids)
+
+
+def restaurant_fits_brand(row, site=None):
+    """True when this restaurant belongs to the brand being shown (by its region's brand)."""
+    site = staff_brand_site() if site is None else site
+    if site is None or row is None:
+        return True
+    rs = site_of_region(row["region_id"]) if row["region_id"] else None
+    return rs is None or int(rs["id"]) == int(site["id"])
+
+
+def wrong_brand_msg(site, who):
+    return ("This %s account isn't set up for %s. Pick your company again with Switch company, "
+            "or call dispatch." % (who, site["name"]))
+
+
 @app.route("/driver/login", methods=["GET", "POST"])
 def driver_login():
     err = None
@@ -10351,6 +10382,8 @@ def driver_login():
         row = db().execute("SELECT * FROM drivers WHERE phone=? AND pin=?", (phone, pin)).fetchone()
         if row and not (row["active"] if row["active"] is not None else 1):
             err = "Your driver account is inactive. Call dispatch."
+        elif row and not driver_fits_brand(row["id"]):
+            err = wrong_brand_msg(staff_brand_site(), "driver")
         elif row:
             session["driver_id"] = row["id"]
             session["driver_name"] = row["name"]
@@ -10358,7 +10391,10 @@ def driver_login():
         else:
             err = "No driver with that phone and PIN."
     if request.method == "GET" and session.get("driver_id"):
-        return redirect(url_for("driver"))
+        if driver_fits_brand(session["driver_id"]):
+            return redirect(url_for("driver"))
+        err = wrong_brand_msg(staff_brand_site(), "driver")   # switched to a brand they don't drive for
+        session.pop("driver_id", None)
     return render_template("driver_login.html", err=err)
 
 @app.route("/driver/logout")
@@ -10368,7 +10404,7 @@ def driver_logout():
 
 @app.route("/driver")
 def driver():
-    if not session.get("driver_id"):
+    if not session.get("driver_id") or not driver_fits_brand(session["driver_id"]):
         return redirect(url_for("driver_login"))
     _ph = dispatch_phone(driver_phone_region(session["driver_id"]))
     _bg = db().execute("SELECT last_bg_at FROM drivers WHERE id=?", (session["driver_id"],)).fetchone()
@@ -10904,13 +10940,21 @@ def rest_login():
         row = db().execute("SELECT * FROM restaurants WHERE slug=? AND pin=?",
                            (request.form.get("slug", "").strip().lower(),
                             request.form.get("pin", ""))).fetchone()
-        if row:
+        if row and not restaurant_fits_brand(row):
+            err = wrong_brand_msg(staff_brand_site(), "restaurant")
+        elif row:
             session["restaurant_id"] = row["id"]
             session["restaurant_name"] = row["name"]
             return redirect(url_for("rest_home"))
-        err = "Wrong store code or PIN."
+        else:
+            err = "Wrong store code or PIN."
     if request.method == "GET" and session.get("restaurant_id"):
-        return redirect(url_for("rest_home"))
+        site = staff_brand_site()
+        r = db().execute("SELECT * FROM restaurants WHERE id=?", (session["restaurant_id"],)).fetchone()
+        if site is None or restaurant_fits_brand(r, site):
+            return redirect(url_for("rest_home"))
+        err = wrong_brand_msg(site, "restaurant")   # switched to another brand's company
+        session.pop("restaurant_id", None)
     return render_template("rest_login.html", err=err)
 
 @app.route("/restaurant/logout")
