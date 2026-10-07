@@ -12083,12 +12083,24 @@ def company_site(c):
     return None
 
 
+def brand_logo(s):
+    """The logo a brand's own website shows: its Design logo, else the main business logo
+    (Tiger Town's tiger), else Fleet Foot Delivery's."""
+    logo = site_logo_url(s) if s is not None else ""
+    if not logo:
+        try:
+            name = (setting("logo_image", str) or "").strip()
+            if name and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(name))):
+                logo = media_url(name)
+        except Exception:
+            logo = ""
+    return logo or DEFAULT_LOGO
+
+
 def company_look(c):
     """Brand name, logo and brand id for a company's button in the shared apps."""
     s = company_site(c)
-    logo = site_logo_url(s) if s is not None else ""
-    if not logo:
-        logo = DEFAULT_LOGO   # a brand with no logo of its own shows Fleet Foot Delivery's
+    logo = brand_logo(s) if s is not None else DEFAULT_LOGO   # no brand matched: Fleet Foot Delivery's
     if logo.startswith("/") and has_request_context():
         logo = request.host_url.rstrip("/") + logo
     return {"brand": (s["name"] if s is not None else "") or c.get("name") or "",
@@ -12148,7 +12160,7 @@ def inject_staff_brand():
         s = staff_brand_site()
         if s is None:
             return {"staff_brand": None}
-        return {"staff_brand": {"name": s["name"], "logo": site_logo_url(s) or DEFAULT_LOGO}}
+        return {"staff_brand": {"name": s["name"], "logo": brand_logo(s)}}
     except Exception:
         return {"staff_brand": None}
 
