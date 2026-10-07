@@ -440,7 +440,8 @@ function renderRun(stack, total){
     (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+
     (o.token ? '<span class="pill blue">'+o.token+'</span> ' : '')+
     '<span class="pill '+(o.kitchen_status==='ready'?'green':'amber')+'">'+kitchenLabel(o)+'</span> '+
-    '<span class="pill blue">'+o.dispatch_status.replace('_',' ')+'</span></div>'+
+    '<span class="pill blue">'+o.dispatch_status.replace('_',' ')+'</span>'+
+    (o.drop_label ? ' <span class="pill '+(o.drop_style==='door'?'grey':'amber')+'">'+o.drop_label+'</span>' : '')+'</div>'+
     '<div class="order-actions">'+
     OrderView.btn(o)+
     '<button class="btn tiny primary" onclick="navStop('+ix+',\'r\')">Navigate to restaurant</button>'+

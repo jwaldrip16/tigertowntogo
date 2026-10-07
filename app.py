@@ -256,6 +256,12 @@ def now():
 def log(kind, detail):
     db().execute("INSERT INTO events(kind,detail,created_at) VALUES(?,?,?)", (kind, detail, now()))
 
+DROP_STYLES = {"door": "Meet at door", "no_contact": "No contact delivery", "call": "Call on delivery"}
+def clean_drop_style(v):
+    v = str(v or "").strip().lower().replace("-", "_").replace(" ", "_")
+    return v if v in DROP_STYLES else "door"
+
+
 def ensure_column(con, table, col, decl):
     cols = dbx.columns(con, table)
     if col not in cols:
@@ -290,6 +296,7 @@ def init_db():
                    name TEXT NOT NULL, mode TEXT DEFAULT 'sandbox', org_id TEXT, api_key TEXT,
                    site_id INTEGER, active INTEGER DEFAULT 1, created_at TEXT)""")
     ensure_column(con, "drivers", "payout_email", "TEXT")
+    ensure_column(con, "orders", "drop_style", "TEXT")   # door / no_contact / call: how the customer wants it handed off
     ensure_column(con, "drivers", "payout_phone", "TEXT")
     con.execute("""CREATE TABLE IF NOT EXISTS driver_payouts (
         id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER NOT NULL, driver_id INTEGER NOT NULL,
@@ -3177,6 +3184,8 @@ def order_dict(o):
         "dispatch_status": o["dispatch_status"], "hold_reason": ("customer must call to confirm" if (confirm_needed(o) and o["dispatch_status"] in ("held", "queued", "awaiting_payment")) else None) or called_in_words(o, ("tap Send to kitchen" if ("kitchen_go" in o.keys() and o["kitchen_go"] == 0 and o["kitchen_status"] == "waiting" and o["dispatch_status"] in ("held", "queued") and o["address_ok"]) else o["hold_reason"])),
         "issue": o["issue"] or "", "issue_note": o["issue_note"] or "",
         "cloned_from": o["cloned_from"] or "",
+        "drop_style": clean_drop_style(_rv(o, "drop_style")),
+        "drop_label": DROP_STYLES[clean_drop_style(_rv(o, "drop_style"))],
         "driver": d["name"] if d else None, "driver_id": o["driver_id"], "stack_seq": o["stack_seq"],
         "prep_minutes": o["prep_minutes"], "timer_seconds": eta,
         "placed_by": o["placed_by"], "created_at": o["created_at"],
@@ -4977,8 +4986,8 @@ def checkout():
         address_note,dispatch_note,lat,lng,items,subtotal_cents,fee_cents,item_fee_cents,tax_cents,
         tip_cents,total_cents,miles,issue,issue_note,cloned_from,address_ok,source,ref_code,token,
         kitchen_status,dispatch_status,hold_reason,placed_by,created_at,
-        pickup_name,pickup_address,pickup_phone,pickup_lat,pickup_lng,service_cents)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        pickup_name,pickup_address,pickup_phone,pickup_lat,pickup_lng,service_cents,drop_style)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (code, r["id"], payload["customer_name"], payload["customer_phone"], formatted,
          payload.get("note", ""), payload.get("dispatch_note", ""), lat, lng,
          json.dumps(items), subtotal, fee, ifee, tax, tip, total, miles,
@@ -4987,7 +4996,8 @@ def checkout():
          (clean_token(payload.get("token")) or token_from_source(src)),
          kitchen_status, dstat, hold_reason, placed_by, now(),
          pu_name or None, pu_addr if pu_name else None, pu_phone if pu_name else None,
-         pu_lat if pu_name else None, pu_lng if pu_name else None, service))
+         pu_lat if pu_name else None, pu_lng if pu_name else None, service,
+         clean_drop_style(payload.get("drop_style"))))
     db().commit()
     log("order", code + " placed for " + r["name"] +
         ("" if address_ok else " (address not verified, waiting on dispatch approval)") +
@@ -6674,6 +6684,7 @@ def api_dispatch_order_edit_load(oid):
                     "primary_no": (o["primary_no"] if "primary_no" in o.keys() else "") or "",
                     "customer_name": o["customer_name"] or "", "customer_phone": o["customer_phone"] or "",
                     "address": o["address"] or "", "address_note": o["address_note"] or "",
+                   "drop_style": clean_drop_style(_rv(o, "drop_style")),
                     "miles": o["miles"] or 0,
                     "menu": menu_payload(o["restaurant_id"]) if o["restaurant_id"] else []})
 
@@ -6708,6 +6719,10 @@ def api_order_edit():
             return jsonify({"ok": False, "error": "Enter a 10-digit phone number."}), 400
         if ph != phone_digits(o["customer_phone"]):
             db().execute("UPDATE orders SET customer_phone=? WHERE id=?", (ph, o["id"])); changed.append("phone")
+    if "drop_style" in data:
+        ds = clean_drop_style(data.get("drop_style"))
+        if ds != clean_drop_style(_rv(o, "drop_style")):
+            db().execute("UPDATE orders SET drop_style=? WHERE id=?", (ds, o["id"])); changed.append("hand-off")
     if "address_note" in data:
         an = str(data.get("address_note") or "").strip()[:200]
         if an != (o["address_note"] or ""):
@@ -6861,6 +6876,7 @@ def dispatch_new_order():
             src = {"id": o["id"], "code": o["code"], "restaurant_id": o["restaurant_id"],
                    "customer_name": o["customer_name"], "customer_phone": o["customer_phone"],
                    "address": o["address"], "address_note": o["address_note"] or "",
+                   "drop_style": clean_drop_style(_rv(o, "drop_style")),
                    "dispatch_note": o["dispatch_note"] or "",
                    "items": json.loads(o["items"]), "tip_cents": o["tip_cents"],
                    "fee_cents": o["fee_cents"], "driver_id": o["driver_id"],
@@ -6879,6 +6895,7 @@ def dispatch_new_order():
             multi_src = {"code": mo["code"], "restaurant_id": mo["restaurant_id"], "customer_name": mo["customer_name"],
                          "customer_phone": mo["customer_phone"], "address": mo["address"],
                          "address_note": mo["address_note"] or "",
+                         "drop_style": clean_drop_style(_rv(mo, "drop_style")),
                          "region_id": int((_mr["region_id"] if _mr else 0) or 0),
                          "pay_method": _rv(mo, "pay_method") or "", "house_name": house_name_of(mo)}
     shown = [r for r in rests if r["slug"] != "oneoff" and can_create_in_region(_rv(r, "region_id"))]

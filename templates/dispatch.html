@@ -374,6 +374,10 @@ async function editOrder(oid){
       '<label>Phone <input id="edCPhone" type="tel" maxlength="20" value="'+edEsc(res.customer_phone)+'"></label></div>'+
       '<label class="small">Address <input id="edCAddr" maxlength="200" style="width:100%" value="'+edEsc(res.address)+'"></label>'+
       '<label class="small">Apt, gate code or note <input id="edCNote" maxlength="200" style="width:100%" value="'+edEsc(res.address_note)+'"></label>'+
+      '<label class="small">Hand-off <select id="edDrop" style="width:100%">'+
+        [['door','Meet at door'],['no_contact','No contact delivery'],['call','Call on delivery']].map(function(x){
+          return '<option value="'+x[0]+'"'+((res.drop_style||'door')===x[0]?' selected':'')+'>'+x[1]+'</option>'; }).join('')+
+      '</select></label>'+
       '<label class="small"><input type="checkbox" id="edCRecalc"> If the address changes, set the delivery fee for the new distance</label>'+
     '</details>'+
     '<div class="im-cols"><div><h3 class="small-sec">Add from the menu</h3><div id="edMenu"></div></div>'+
@@ -449,6 +453,7 @@ async function edSave(){
       customer_phone: document.getElementById('edCPhone').value,
       address: document.getElementById('edCAddr').value,
       address_note: document.getElementById('edCNote').value,
+      drop_style: document.getElementById('edDrop').value,
       recalc_fee: document.getElementById('edCRecalc').checked,
       fee_cents: Math.round((parseFloat(document.getElementById('edFee').value)||0)*100),
       tip_cents: Math.round((parseFloat(document.getElementById('edTip').value)||0)*100)});

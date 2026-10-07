@@ -85,6 +85,7 @@
     <input id="giftCode" placeholder="Gift card number (optional)" autocomplete="off">
     <textarea id="address" rows="2" placeholder="Street, city, state, ZIP"></textarea>
     <input id="note" placeholder="Gate code, apartment, door instructions">
+    <label class="small" style="display:block;margin:6px 0">How should the driver hand it off?<select id="dropStyle" style="width:100%"><option value="door">Meet at door</option><option value="no_contact">No contact delivery</option><option value="call">Call on delivery</option></select></label>
     <label class="small">Part of a multiple order with order # <input id="multiWith" placeholder="FF123456789" style="max-width:180px"></label>
     <div id="quote" class="quote"></div>
     <div id="omap" class="minimap hidden"></div>
@@ -158,6 +159,7 @@ document.addEventListener('DOMContentLoaded', function(){
   document.getElementById('phone').value = MULTI_SRC.customer_phone || '';
   document.getElementById('address').value = MULTI_SRC.address || '';
   document.getElementById('note').value = MULTI_SRC.address_note || '';
+  document.getElementById('dropStyle').value = MULTI_SRC.drop_style || 'door';
   // start on a different restaurant in the same area as the first order
   const sel = document.getElementById('rest');
   // prefer one that has a menu loaded, so there is something to add right away
@@ -361,6 +363,7 @@ async function placeOrder(){
     customer_phone: document.getElementById('phone').value,
     address: document.getElementById('address').value,
     note: document.getElementById('note').value,
+    drop_style: document.getElementById('dropStyle').value,
     items: cart, tip_cents: tipCents(),
     fee_cents_override: (document.getElementById('feeOverride').value === '' ? null : feeNow()),
     from_order_id: SRC ? SRC.id : null,
@@ -421,6 +424,7 @@ function prefill(){
   document.getElementById('phone').value = SRC.customer_phone || '';
   document.getElementById('address').value = SRC.address || '';
   document.getElementById('note').value = SRC.address_note || '';
+  document.getElementById('dropStyle').value = SRC.drop_style || 'door';
   const tip = document.getElementById('tip');
   if(tip) tip.value = ((SRC.tip_cents||0)/100).toFixed(2);
   carryPay(SRC);

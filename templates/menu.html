@@ -55,6 +55,7 @@
     <input id="phone" placeholder="Mobile number">
     <textarea id="address" rows="2" placeholder="Street, city, state, ZIP"></textarea>
     <input id="note" placeholder="Gate code, apartment, door instructions">
+    <label class="small" style="display:block;margin:6px 0">How should the driver hand it off?<select id="dropStyle" style="width:100%"><option value="door">Meet at door</option><option value="no_contact">No contact delivery</option><option value="call">Call on delivery</option></select></label>
     <button class="btn" onclick="validate()">Validate address and price delivery</button>
     <div id="quote" class="quote"></div>
     <h3>When</h3>
@@ -395,6 +396,7 @@ async function placeOrder(){
     customer_phone: document.getElementById('phone').value,
     address: document.getElementById('address').value,
     note: document.getElementById('note').value, items: cart, tip_cents: tipCents,
+    drop_style: document.getElementById('dropStyle').value,
     multi_with: ((document.getElementById('multiOn')||{}).checked ? MULTI.code : ''),
     scheduled_for: document.getElementById('whenMode').value === 'later' ? document.getElementById('whenTime').value : '',
     gift_code: document.getElementById('giftCode').value.trim(),

@@ -59,6 +59,7 @@
       row('Restaurant', '<b>'+esc(o.restaurant||'')+'</b>'+(o.restaurant_address ? '<br>'+esc(o.restaurant_address) : '')+(rph ? '<br>'+rph : ''))+
       row('Driver', o.driver ? esc(o.driver) : '')+
       row('Dispatch note', o.dispatch_note ? '<div class="ovnote">'+esc(o.dispatch_note)+'</div>' : '')+
+      row('Hand-off', o.drop_label ? '<b>'+esc(o.drop_label)+'</b>' : '')+
       row('Problem', o.issue ? esc(o.issue)+(o.issue_note ? ' - '+esc(o.issue_note) : '')+(o.cloned_from ? ' (first order '+esc(o.cloned_from)+')' : '') : '')+
       row('Address check', o.needs_address_approval ? '<div class="ovnote">Address not verified yet, waiting on dispatch approval.</div>' : '')+
       row('Kitchen', kitchenText(o))+
