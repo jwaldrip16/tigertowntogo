@@ -10411,8 +10411,8 @@ def driver_fits_brand(did, site=None):
     site = staff_brand_site() if site is None else site
     sids = driver_site_ids(did)
     if site is None:
-        if staff_main_brand():   # main business: its regions are the ones not tied to a brand
-            return (not sids) or (0 in sids) or bool(sids & main_named_site_ids())
+        if staff_main_brand():   # Tiger Town To Go (the main business): every driver may sign in under it
+            return True
         return True
     return (not sids) or (0 in sids) or (int(site["id"]) in sids)
 
@@ -10424,8 +10424,8 @@ def restaurant_fits_brand(row, site=None):
         return True
     rs = site_of_region(row["region_id"]) if row["region_id"] else None
     if site is None:
-        if staff_main_brand():   # main business: regions not tied to a brand, or tied to its own named row
-            return rs is None or int(rs["id"]) in main_named_site_ids()
+        if staff_main_brand():   # Tiger Town To Go (the main business): every restaurant may sign in under it
+            return True
         return True
     return rs is None or int(rs["id"]) == int(site["id"])
 
@@ -12381,7 +12381,8 @@ def staff_brand_site():
             if host in site_domains(row):
                 s = row
                 break
-        if s is None and session.get("restaurant_id") and not p.startswith("/driver"):
+        if s is None and session.get("restaurant_id") and not p.startswith("/driver") \
+                and session.get("staff_brand") != "main":   # picked Tiger Town To Go: show Tiger Town To Go
             r = db().execute("SELECT region_id FROM restaurants WHERE id=?", (session["restaurant_id"],)).fetchone()
             if r is not None:
                 s = site_of_region(r["region_id"])

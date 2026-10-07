@@ -198,6 +198,7 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
 {% block scripts %}<script>
 // new order sound (the chime file), plays every 5 seconds until the order is accepted
 try { ffSound.setOrderSound('/static/sounds/new-order.mp3'); } catch(e) {}
+const BRAND_NAME = {{ (staff_brand.name if staff_brand else '')|tojson }};
 try { ffSound.setSound('sent', '/static/sounds/chat.mp3'); } catch(e) {}   // your message reached dispatch
 let LATE_BEEP_AT = 0, LATE_LOUD = false;
 function silenceAlert(){
@@ -294,7 +295,7 @@ function gateCheck(res, d){
   let mode = '';
   if (res.business_open === false) mode = 'closed';
   else if (res.scheduled === false && d.status === 'offline') mode = 'unscheduled';
-  const name = res.business_name || 'Dispatch';
+  const name = BRAND_NAME || res.business_name || 'Dispatch';   // the company the driver signed in under
   const show = function(id, on){ const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !on); };
   const tabbar = document.querySelector('.tabbar');
   if (!mode){
