@@ -10424,7 +10424,9 @@ def restaurant_fits_brand(row, site=None):
         return True
     rs = site_of_region(row["region_id"]) if row["region_id"] else None
     if site is None:
-        return rs is None if staff_main_brand() else True
+        if staff_main_brand():   # main business: regions not tied to a brand, or tied to its own named row
+            return rs is None or int(rs["id"]) in main_named_site_ids()
+        return True
     return rs is None or int(rs["id"]) == int(site["id"])
 
 
@@ -11012,6 +11014,13 @@ def rest_login():
         row = db().execute("SELECT * FROM restaurants WHERE slug=? AND pin=?",
                            (request.form.get("slug", "").strip().lower(),
                             request.form.get("pin", ""))).fetchone()
+        if row and not restaurant_fits_brand(row) and not host_brand_site():
+            # Right store code and PIN but the wrong company picked: move them to their own company.
+            rs = site_of_region(row["region_id"]) if row["region_id"] else None
+            session["staff_brand"] = int(rs["id"]) if rs is not None else "main"
+            if rs is not None:
+                session.pop("staff_brand_name", None)
+            g.pop("_staff_site", None)
         if row and not restaurant_fits_brand(row):
             err = wrong_brand_msg(staff_brand_site(), "restaurant")
         elif row:
