@@ -2,7 +2,7 @@
 import urllib.error
 import base64, contextlib, contextvars, difflib, hashlib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
 import dbx
-from flask import Flask, g, has_request_context, request, session, redirect, url_for, render_template, jsonify, send_from_directory, flash, get_flashed_messages
+from flask import Flask, g, has_request_context, request, session, redirect, url_for, render_template, render_template_string, jsonify, send_from_directory, flash, get_flashed_messages
 import presets
 
 # ---------------------------------------------------------------- local time
@@ -1793,7 +1793,7 @@ def dev_guard():
 # signed-in developer keeps full access. Nothing is deleted. Any value other than 2
 # (including a missing variable) keeps the site running.
 # Optional SUSPEND_MESSAGE replaces the wording on the paused page.
-SUSPEND_OPEN_PREFIXES = ("/static/", "/brand/", "/media/", "/uploads/", "/.well-known/", "/manifest/")
+SUSPEND_OPEN_PREFIXES = ("/static/", "/brand/", "/media/", "/uploads/", "/.well-known/", "/manifest/", "/privacy", "/delete-account")
 SUSPEND_OPEN_PATHS = {"/dispatch/login", "/dispatch/logout", "/favicon.ico", "/robots.txt", "/sw.js"}
 
 
@@ -11845,6 +11845,74 @@ def root_service_worker():
     resp.headers["Service-Worker-Allowed"] = "/"
     resp.headers["Cache-Control"] = "no-cache"
     return resp
+
+
+
+# --- privacy policy and account deletion pages (needed for Google Play and the App Store) ---
+# Contact shown on both pages: Railway variable PRIVACY_CONTACT_EMAIL (e.g. privacy@fleetfootdelivery.com).
+LEGAL_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>{{ title }}</title>
+<style>body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:760px;margin:0 auto;padding:24px 18px 60px;color:#1f2937;line-height:1.55}
+h1{font-size:26px;margin:8px 0 4px}h2{font-size:18px;margin:26px 0 6px}.muted{color:#6b7280;font-size:14px}
+header{display:flex;align-items:center;gap:10px}header img{height:44px}</style></head><body>
+<header><img src="/static/brand/logo-default.png" alt="Fleet Foot Delivery"><strong>Fleet Foot Delivery</strong></header>
+{{ body|safe }}</body></html>"""
+
+
+def _privacy_contact():
+    em = (os.environ.get("PRIVACY_CONTACT_EMAIL") or "").strip()
+    if em:
+        return '<a href="mailto:%s">%s</a>' % (em, em)
+    return "the dispatch office of the delivery company you use, or Fleet Foot Delivery LLC, Opelika, Alabama"
+
+
+@app.get("/privacy")
+def privacy_policy():
+    c = _privacy_contact()
+    body = """<h1>Privacy policy</h1><p class="muted">Effective October 7, 2026</p>
+<p>Fleet Foot Delivery LLC ("Fleet Foot") makes the Fleet Foot Driver app, the Fleet Foot Kitchen (restaurant) app
+and the ordering websites used by local delivery companies such as Tiger Town To Go, Bulldawg Food and Crimson To Go.
+This policy explains what information these apps and websites collect and how it is used.</p>
+<h2>Information we collect</h2>
+<p><b>Drivers:</b> name, mobile number, sign-in PIN, the regions and companies you work for, your location while you
+are online or on a delivery, delivery history, earnings and tips, the payout handle you choose (PayPal, Venmo or Branch),
+and messages with dispatch.</p>
+<p><b>Restaurants:</b> restaurant name, contact name and phone number, sign-in PIN, orders, invoices and messages with dispatch.</p>
+<p><b>Customers:</b> name, phone number, delivery address, order details and delivery instructions. Payments are made
+through PayPal; we never see or store your card or bank details.</p>
+<h2>How we use it</h2>
+<p>Only to run deliveries: sending orders to restaurants, assigning and tracking drivers, showing customers and dispatch
+where an order is, paying drivers and restaurants, sending order and shift text messages, and providing support.
+Location is used only while a driver is online or on a delivery.</p>
+<h2>Who we share it with</h2>
+<p>The delivery company you order from or work for, and the service providers we need to run the service: PayPal
+(payments), Google Maps (maps and directions), our text message provider, and our hosting provider. We do not sell
+personal information and we do not show ads.</p>
+<h2>How long we keep it</h2>
+<p>Order and payment records are kept as long as needed for accounting and legal reasons. Chat messages are cleared
+regularly when the business opens or closes. Driver and restaurant accounts are kept until they are closed.</p>
+<h2>Your choices</h2>
+<p>You can ask to see, correct or delete your information at any time. See <a href="/delete-account">how to delete your account</a>.
+Drivers can stop location sharing by going offline or turning off location for the app in phone settings.</p>
+<h2>Children</h2><p>The apps are not meant for children under 13, and we do not knowingly collect their information.</p>
+<h2>Changes</h2><p>If this policy changes, the new version will be posted on this page with a new effective date.</p>
+<h2>Contact</h2><p>Questions or requests: %s.</p>""" % c
+    return render_template_string(LEGAL_PAGE, title="Privacy policy | Fleet Foot Delivery", body=body)
+
+
+@app.get("/delete-account")
+def delete_account_info():
+    c = _privacy_contact()
+    body = """<h1>Delete your account</h1>
+<p>Drivers, restaurants and customers of Fleet Foot Delivery (Fleet Foot Driver, Fleet Foot Kitchen and the
+Tiger Town To Go, Bulldawg Food and Crimson To Go websites) can ask for their account and personal information to be deleted.</p>
+<h2>How to ask</h2><ol><li>Contact %s, or call the dispatch office of the company you work with or order from.</li>
+<li>Give your name and the mobile number on the account.</li>
+<li>We confirm it is you and delete the account within 30 days.</li></ol>
+<h2>What is deleted</h2><p>Your sign-in, name, phone number, saved addresses, location history and messages.</p>
+<h2>What we keep</h2><p>Records of completed orders and payments, kept only as long as tax and accounting rules require,
+then deleted.</p>""" % c
+    return render_template_string(LEGAL_PAGE, title="Delete your account | Fleet Foot Delivery", body=body)
 
 
 @app.get("/.well-known/assetlinks.json")
