@@ -845,23 +845,47 @@ function drawRegionQueues(res){
   const box = document.getElementById('rgQueues'); if(!box) return;
   const qs = res.region_queues || [];
   if (qs.length < 2 && !(qs[0] && qs[0].id)){ box.innerHTML = ''; return; }
-  window.RG_ORDER = qs.map(q=>q.id);
-  const anyOpen = qs.some(q=>RGQ_OPEN[q.id]);
+  // regions combined for drivers (Auburn + Downtown Auburn) show as one queue; each keeps its own Pause
+  const merged = [], byLead = {};
+  qs.forEach(q => {
+    const k = q.drive_lead ? 'g' + q.drive_lead : 's' + q.id;
+    if (q.drive_lead && byLead[k]) { byLead[k].push(q); return; }
+    byLead[k] = [q]; merged.push(byLead[k]);
+  });
+  const view = merged.map(ms => {
+    if (ms.length === 1) { const q = ms[0]; return Object.assign({}, q, {parts: [q], combined: false}); }
+    const orders = [];
+    ms.forEach(m => (m.orders||[]).forEach(o => orders.push(Object.assign({}, o, {area: m.name}))));
+    orders.sort((x, y) => (y.minutes - x.minutes) || (x.id - y.id));
+    orders.forEach((o, i) => { o.pos = i + 1; });
+    const seen = {}, choices = [];
+    ms.forEach(m => (m.driver_choices||[]).forEach(d => { if (!seen[d.id]) { seen[d.id] = 1; choices.push(d); } }));
+    return {id: ms[0].id, name: ms.map(m => m.name).join(' + '), parts: ms, combined: true,
+            waiting: ms.reduce((n, m) => n + (m.waiting||0), 0),
+            oldest_min: Math.max.apply(null, ms.map(m => m.oldest_min||0)),
+            drivers_on: Math.max.apply(null, ms.map(m => m.drivers_on||0)),
+            drivers: ms[0].drivers, driver_choices: choices, orders: orders};
+  });
+  window.RG_ORDER = view.map(q=>q.id);
+  const anyOpen = view.some(q=>RGQ_OPEN[q.id]);
   box.innerHTML = '<div class="row between"><span class="muted small">' + (res.is_owner ? 'Queue in every region (owner view)' : 'Queue in your regions') +
     '</span><button class="btn tiny" onclick="rgOpenAll(' + (anyOpen ? 'false' : 'true') + ')">' + (anyOpen ? 'Close all queues' : 'Open all queues') + '</button></div>' +
-    qs.map(q => {
+    view.map(q => {
       const late = q.oldest_min >= 15;
       const head = '<button class="btn tiny" onclick="RGQ_OPEN['+q.id+']=!RGQ_OPEN['+q.id+'];board(true)">' +
         esc(q.name) + ': <strong>' + q.waiting + '</strong> waiting' +
-        (q.waiting ? ', oldest ' + q.oldest_min + ' min' : '') + ', ' + q.drivers_on + ' driver' + (q.drivers_on===1?'':'s') + ' on</button>';
-      const pill = (q.paused ? ' <span class="pill red">Paused' + (q.paused_by ? ' by ' + esc(q.paused_by) : '') + '</span>' : '') +
-        (q.waiting && late ? ' <span class="pill red">late</span>' : '') +
-        (q.id ? ' <button class="btn tiny' + (q.paused ? '' : ' danger') + '" onclick="pauseRegion(' + q.id + ',' + (q.paused ? 'false' : 'true') + ',\'' + esc(q.name).replace(/'/g, "\\'") + '\')">' +
-          (q.paused ? 'Resume' : 'Pause') + '</button>' : '');
+        (q.waiting ? ', oldest ' + q.oldest_min + ' min' : '') + ', ' + q.drivers_on + ' driver' + (q.drivers_on===1?'':'s') + ' on' +
+        (q.combined ? ' <span class="muted">(shared drivers)</span>' : '') + '</button>';
+      const pill = q.parts.map(m =>
+        (m.paused ? ' <span class="pill red">' + (q.combined ? esc(m.name) + ' paused' : 'Paused') + (m.paused_by ? ' by ' + esc(m.paused_by) : '') + '</span>' : '') +
+        (m.id ? ' <button class="btn tiny' + (m.paused ? '' : ' danger') + '" onclick="pauseRegion(' + m.id + ',' + (m.paused ? 'false' : 'true') + ',\'' + esc(m.name).replace(/'/g, "\\'") + '\')">' +
+          (m.paused ? 'Resume' : 'Pause') + (q.combined ? ' ' + esc(m.name) : '') + '</button>' : '')).join('') +
+        (q.waiting && late ? ' <span class="pill red">late</span>' : '');
       let body = '';
       if (RGQ_OPEN[q.id]){
         body = '<div class="small" style="margin:4px 0 8px 10px">' +
-          ((q.orders||[]).map(o => '<div class="row" style="gap:6px;align-items:center;margin:2px 0">#' + o.pos + ' ' + esc(ordMain(o)) + ' ' + esc(o.restaurant) + ' (' + o.minutes + ' min' +
+          ((q.orders||[]).map(o => '<div class="row" style="gap:6px;align-items:center;margin:2px 0">#' + o.pos + ' ' + esc(ordMain(o)) + ' ' + esc(o.restaurant) +
+             (o.area ? ' <span class="muted">' + esc(o.area) + '</span>' : '') + ' (' + o.minutes + ' min' +
              (o.reason ? ', ' + esc(o.reason) : '') + ')' +
              ((q.driver_choices||[]).length
                ? ' <select class="tiny" id="rgs' + o.id + '"><option value="">Send to driver...</option>' +

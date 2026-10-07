@@ -1999,7 +1999,9 @@ def region_queues(region_ids=None, detail=True):
         q = {"id": rid, "name": name, "waiting": len(mine),
              "paused": bool(pi and pi["paused"]), "paused_by": (pi["paused_by"] if pi and pi["paused"] else "") or "",
              "oldest_min": mins(mine[0]) if mine else 0,
-             "drivers_on": len(on)}
+             "drivers_on": len(on),
+             # regions combined for drivers (Auburn + Downtown Auburn) share this id so the board shows one queue
+             "drive_lead": (_drive_map().get(rid, rid) if rid and len(drive_group(rid)) > 1 else 0)}
         if detail:
             q["drivers"] = on
             q["driver_choices"] = choices
