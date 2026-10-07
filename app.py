@@ -15644,5 +15644,107 @@ def api_dispatch_customer_reset_code():
                     request.host_url.rstrip("/") + "/account/reset?step=verify and enter it with their phone number. It works for 30 minutes."})
 
 
+
+# ---------------------------------------------------------------- staff password / PIN reset
+# Dispatchers (username), drivers (mobile number) and restaurants (store code) can reset their
+# own password or PIN with a 6 digit code texted to the phone on file. Without texting set up
+# (TWILIO_*), or with no phone on file, the page tells them who to ask instead.
+STAFF_RESET = {
+    "dispatch":   {"title": "Dispatcher", "ask": "Username", "secret": "password", "login": "/dispatch/login"},
+    "driver":     {"title": "Driver", "ask": "Mobile number", "secret": "PIN", "login": "/driver/login"},
+    "restaurant": {"title": "Restaurant", "ask": "Store code", "secret": "PIN", "login": "/restaurant/login"},
+}
+
+def _staff_reset_table():
+    db().execute("""CREATE TABLE IF NOT EXISTS staff_resets (
+        kind TEXT NOT NULL, ref_id INTEGER NOT NULL, code_hash TEXT NOT NULL,
+        expires TEXT NOT NULL, tries INTEGER DEFAULT 0, created_at TEXT,
+        PRIMARY KEY (kind, ref_id))""")
+
+def _staff_find(kind, who):
+    who = (who or "").strip()
+    if not who:
+        return None, ""
+    if kind == "dispatch":
+        r = db().execute("SELECT * FROM dispatchers WHERE lower(username)=lower(?)", (who,)).fetchone()
+        return r, phone_digits((r["phone"] if r else "") or "")
+    if kind == "driver":
+        ph = phone_digits(who)[-10:]
+        r = db().execute("SELECT * FROM drivers WHERE phone=? AND COALESCE(active,1)=1", (ph,)).fetchone() if len(ph) == 10 else None
+        return r, phone_digits((r["phone"] if r else "") or "")
+    r = db().execute("SELECT * FROM restaurants WHERE slug=? AND slug!='oneoff'", (who.lower(),)).fetchone()
+    return r, phone_digits((r["phone"] if r else "") or "")
+
+@app.route("/reset/<kind>", methods=["GET", "POST"])
+def staff_reset(kind):
+    if kind not in STAFF_RESET:
+        return redirect("/")
+    cfg = STAFF_RESET[kind]
+    _staff_reset_table()
+    step = request.form.get("step") or request.args.get("step") or "send"
+    who = (request.form.get("who") or request.args.get("who") or "").strip()[:80]
+    msg, err = "", ""
+    biz = (setting("business_name", str) or "Fleet Foot Delivery").strip()
+    helper = "an owner" if kind == "dispatch" else "dispatch"
+    call = nice_phone(dispatch_phone())
+    if request.method == "POST" and step == "send":
+        key = "staff_reset_sends_" + kind
+        sends = [t for t in session.get(key, []) if time.time() - t < 3600]
+        if not who:
+            err = "Enter your " + cfg["ask"].lower() + "."
+        elif len(sends) >= 3:
+            err = "Too many codes asked for. Try again in an hour, or ask " + helper + " to reset it."
+        else:
+            sends.append(time.time()); session[key] = sends
+            row, ph = _staff_find(kind, who)
+            if not texting_on():
+                msg = ("Text codes aren't set up yet. Ask " + helper + (" at " + call if call and kind != "dispatch" else "") +
+                       " to set a new " + cfg["secret"] + " for you.")
+                step = "send"
+            else:
+                if row and len(ph) >= 10:
+                    code = str(secrets.randbelow(900000) + 100000)
+                    exp = (dt.datetime.now() + dt.timedelta(minutes=15)).isoformat(timespec="seconds")
+                    db().execute("INSERT OR REPLACE INTO staff_resets(kind,ref_id,code_hash,expires,tries,created_at) VALUES(?,?,?,?,0,?)",
+                                 (kind, row["id"], generate_password_hash(code), exp, now()))
+                    db().commit()
+                    send_text("+1" + ph[-10:], biz + " " + cfg["title"].lower() + " " + cfg["secret"] + " reset code: " + code + ". It works for 15 minutes.")
+                    log("reset", cfg["title"] + " reset code sent for " + (row["name"] or who))
+                msg = ("If that matches an account with a phone on file, we just texted a 6 digit code. "
+                       "No text? Ask " + helper + " to set a new " + cfg["secret"] + " for you.")
+                step = "verify"
+    elif request.method == "POST" and step == "verify":
+        code = "".join(ch for ch in (request.form.get("code") or "") if ch.isdigit())
+        new = (request.form.get("new") or "").strip()
+        row, _ph = _staff_find(kind, who)
+        rec = db().execute("SELECT * FROM staff_resets WHERE kind=? AND ref_id=?", (kind, row["id"])).fetchone() if row else None
+        if kind == "dispatch" and len(new) < 6:
+            err = "Pick a password with at least 6 characters."
+        elif kind != "dispatch" and not (new.isdigit() and 4 <= len(new) <= 8):
+            err = "Your new PIN has to be 4 to 8 numbers."
+        elif new != (request.form.get("new2") or "").strip():
+            err = "The two entries don't match."
+        elif not rec or (rec["expires"] or "") < now():
+            err = "That code has expired or is wrong. Ask for a new one."
+        elif int(rec["tries"] or 0) >= 5:
+            err = "Too many wrong tries. Ask for a new code."
+        elif not check_password_hash(rec["code_hash"], code):
+            db().execute("UPDATE staff_resets SET tries=tries+1 WHERE kind=? AND ref_id=?", (kind, row["id"]))
+            db().commit()
+            err = "That code is wrong. Check it and try again."
+        else:
+            if kind == "dispatch":
+                db().execute("UPDATE dispatchers SET password=? WHERE id=?", (new, row["id"]))
+            elif kind == "driver":
+                db().execute("UPDATE drivers SET pin=? WHERE id=?", (new, row["id"]))
+            else:
+                db().execute("UPDATE restaurants SET pin=? WHERE id=?", (new, row["id"]))
+            db().execute("DELETE FROM staff_resets WHERE kind=? AND ref_id=?", (kind, row["id"]))
+            db().commit()
+            log("reset", cfg["title"] + " " + (row["name"] or who) + " reset their " + cfg["secret"])
+            return redirect(cfg["login"] + "?reset=1")
+    return render_template("staff_reset.html", kind=kind, cfg=cfg, step=step, who=who, msg=msg, err=err,
+                           texting=texting_on())
+
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)

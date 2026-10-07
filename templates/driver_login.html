@@ -1,12 +1,14 @@
 {% extends "base.html" %}{% block body %}
 <div class="panel narrow">
   <h1>Driver sign in</h1>
+  {% if request.args.get('reset') %}<p class="good">Saved. Sign in with your new PIN.</p>{% endif %}
   {% if err %}<p class="bad">{{ err }}</p>{% endif %}
   <form method="post">
     <input name="phone" placeholder="Mobile number" autofocus>
     <input name="pin" type="password" placeholder="4 digit PIN">
     <button class="btn primary">Sign in</button>
   </form>
+  <p class="small"><a href="/reset/driver">Forgot your PIN?</a></p>
 </div>
 <script src="/static/hubswitch.js"></script>
 {% endblock %}

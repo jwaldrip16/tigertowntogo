@@ -1,0 +1,34 @@
+{% extends "base.html" %}{% block title %}Reset your {{ cfg.secret }}{% endblock %}{% block body %}
+<div class="panel narrow" style="max-width:440px;margin:20px auto">
+  <h1 style="margin-top:0">{{ cfg.title }}: reset your {{ cfg.secret }}</h1>
+  {% if err %}<p class="bad">{{ err }}</p>{% endif %}
+  {% if msg %}<p>{{ msg }}</p>{% endif %}
+  {% if step == 'verify' %}
+  <form method="post">
+    <input type="hidden" name="step" value="verify">
+    <label>{{ cfg.ask }}</label><input name="who" value="{{ who }}" required {{ 'type=tel' if kind == 'driver' else '' }}>
+    <label>6 digit code from the text</label><input name="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" required>
+    {% if kind == 'dispatch' %}
+    <label>New password (at least 6 characters)</label><input name="new" type="password" minlength="6" autocomplete="new-password" required>
+    <label>New password again</label><input name="new2" type="password" minlength="6" autocomplete="new-password" required>
+    {% else %}
+    <label>New PIN (4 to 8 numbers)</label><input name="new" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" required>
+    <label>New PIN again</label><input name="new2" type="password" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" required>
+    {% endif %}
+    <button class="btn primary" style="width:100%;margin-top:10px">Set new {{ cfg.secret }}</button>
+  </form>
+  <p class="small"><a href="/reset/{{ kind }}">Get a new code</a></p>
+  {% else %}
+  <p class="muted">{% if texting %}Enter your {{ cfg.ask|lower }} and we'll text a code to the phone on file.{% else %}Text codes aren't set up yet, so {{ 'an owner' if kind == 'dispatch' else 'dispatch' }} has to set a new {{ cfg.secret }} for you.{% endif %}</p>
+  {% if texting %}
+  <form method="post">
+    <input type="hidden" name="step" value="send">
+    <label>{{ cfg.ask }}</label><input name="who" value="{{ who }}" required autofocus {{ 'type=tel autocomplete=tel' if kind == 'driver' else '' }}>
+    <button class="btn primary" style="width:100%;margin-top:10px">Text me a code</button>
+  </form>
+  <p class="small"><a href="/reset/{{ kind }}?step=verify">I already have a code</a></p>
+  {% endif %}
+  {% endif %}
+  <p class="small"><a href="{{ cfg.login }}">Back to sign in</a></p>
+</div>
+{% endblock %}
