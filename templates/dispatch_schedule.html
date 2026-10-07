@@ -11,6 +11,32 @@ until you approve them, and anything you add or change is approved straight away
 <div class="row"><span class="pill amber" id="pendCount">0 waiting</span>
   <span class="muted small">Approved hours are green, denied are red.</span></div>
 
+<style>
+#stGrid td.stc{min-width:92px;font-size:12px}
+#stGrid td.st-short{background:#fdeeee;color:#8a2020}
+#stGrid td.st-ok{background:#eefaf1;color:#1d5d34}
+#stGrid td.st-over{background:#fff7e0;color:#7a5a00}
+#stGrid td.st-quiet{background:#f9fafb;color:#9aa3af}
+#stGrid .stn{font-weight:600;font-size:13px}
+</style>
+<div class="panel mt" id="staffPanel">
+  <div class="row" style="justify-content:space-between;align-items:center">
+    <h2 style="margin:0">Drivers needed by shift</h2>
+    <div class="row">
+      <select id="stRegion" onchange="loadStaff()"></select>
+      <select id="stWeeks" onchange="loadStaff()">
+        <option value="4">Last 4 weeks</option><option value="8" selected>Last 8 weeks</option>
+        <option value="12">Last 12 weeks</option><option value="26">Last 26 weeks</option>
+      </select>
+      <a class="btn tiny" href="/dispatch/shift-stats">Best shifts</a>
+    </div>
+  </div>
+  <p class="muted small" id="stNote"></p>
+  <div id="stShort"></div>
+  <div style="overflow-x:auto"><table class="weekgrid" id="stGrid"></table></div>
+  <p class="muted small">Red is short, green is covered, yellow has 2 or more extra drivers. Hover a box to see who is on and the busiest hour.</p>
+</div>
+
 <h2 class="mt">Weekly submissions</h2>
 <div class="row">
   <select id="wkPick" onchange="loadWeek(this.value).then(load)"></select>
@@ -193,12 +219,55 @@ function editDay(did, name, date, day, start, end){
 load(); setInterval(load, 15000);
 
 
+function stEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+async function loadStaff(){
+  const sel = document.getElementById('stRegion');
+  const q = '?week=' + encodeURIComponent(WEEK || '') + '&weeks=' + document.getElementById('stWeeks').value +
+            (sel.value ? '&region=' + sel.value : '');
+  const r = await jget('/api/dispatch/staffing' + q);
+  if(!r || !r.ok) return;
+  sel.innerHTML = r.regions.map(x=>'<option value="'+x.id+'"'+(x.id===r.region_id?' selected':'')+'>'+stEsc(x.name)+'</option>').join('');
+  sel.style.display = r.regions.length > 1 ? '' : 'none';
+  document.getElementById('stNote').textContent = r.has_history
+    ? 'Based on delivered orders in ' + r.region_name + ' over the last ' + r.weeks + ' weeks, with one driver handling about ' +
+      r.rate + ' orders an hour (change this in Settings). Counts approved hours for the week picked below; requests not yet approved show as waiting.'
+    : 'No delivered orders in ' + r.region_name + ' in the last ' + r.weeks + ' weeks, so there is nothing yet to work out how many drivers each shift needs.';
+  const sh = document.getElementById('stShort');
+  if(!r.has_history){ sh.innerHTML = ''; }
+  else if(r.short.length){
+    sh.innerHTML = '<div class="duebar late"><strong>Short this week:</strong> ' + r.short.slice(0,8).map(x=>
+      stEsc(x.day.slice(0,3)+' '+x.date_label+' '+x.block.toLowerCase()) + ' needs ' + x.need + ', has ' + x.have +
+      ' (' + x.gap + ' short at ' + x.gap_at + (x.pending ? ', ' + x.pending + ' waiting on you' : '') + ')').join('; ') +
+      (r.short.length > 8 ? '; and ' + (r.short.length-8) + ' more' : '') + '</div>';
+  } else {
+    sh.innerHTML = '<div class="duebar ok">Every shift this week has enough drivers.</div>';
+  }
+  let html = '<tr><th>Shift</th>' + r.days.map(d=>'<th>'+d.day.slice(0,3)+' '+stEsc(d.date_label)+'</th>').join('') + '</tr>';
+  r.blocks.forEach((bn, bi)=>{
+    html += '<tr><th>'+stEsc(bn)+'<br><span class="muted small">'+stEsc(r.days[0].blocks[bi].hours)+'</span></th>';
+    r.days.forEach(d=>{
+      const b = d.blocks[bi];
+      const tip = (b.drivers.length ? 'On: ' + b.drivers.join(', ') : 'Nobody scheduled') +
+        (b.pending.length ? '\nWaiting on you: ' + b.pending.join(', ') : '') +
+        (b.peak_hour ? '\nBusiest hour ' + b.peak_hour + ', about ' + b.peak_orders + ' orders' : '') +
+        '\nAbout ' + b.orders + ' orders this shift';
+      const line = b.status==='short' ? b.gap + ' short at ' + b.gap_at
+                 : b.status==='over' ? b.extra + ' extra'
+                 : b.status==='quiet' ? 'quiet' : 'covered';
+      html += '<td class="stc st-'+b.status+'" title="'+stEsc(tip)+'"><span class="stn">Need '+b.need+' \u00b7 Have '+b.have+'</span><br>'+
+        stEsc(line) + (b.pending.length ? '<br><span class="pill amber">'+b.pending.length+' waiting</span>' : '') + '</td>';
+    });
+    html += '</tr>';
+  });
+  document.getElementById('stGrid').innerHTML = html;
+}
 async function loadWeek(start){
   const r = await jget('/api/dispatch/week' + (start ? ('?start=' + start) : ''));
   if(!r.ok) return;
   document.getElementById('wkPick').innerHTML = r.weeks.map(w=>
     '<option value="'+w+'"'+(w===r.week_start?' selected':'')+'>'+((r.week_labels||{})[w]||w)+'</option>').join('');
   WEEK = r.week_start; WEEK_DATES = r.dates || [];
+  loadStaff();
   document.getElementById('wkDue').textContent =
     (r.range || r.label) + ' \u00b7 opens ' + r.opens_human + ', closes ' + r.due_human +
     (r.window_open ? ' \u00b7 open now' : (r.past_due ? ' \u00b7 closed' : ' \u00b7 not open yet'));

@@ -9991,6 +9991,13 @@ def dispatch_settings():
                 _v = -1
             if 0 <= _v <= 50000:
                 db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('driver_pay_flat_cents',?)", (str(_v),))
+        if "sched_orders_per_hr" in request.form:
+            try:
+                _f = float(request.form["sched_orders_per_hr"] or 0)
+            except ValueError:
+                _f = 0
+            if 0.5 <= _f <= 10:
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('sched_orders_per_hr',?)", (("%g" % _f),))
         if "sched_lead_min" in request.form:
             try:
                 _v = int(request.form["sched_lead_min"] or 0)
@@ -14386,6 +14393,155 @@ def shift_summary(st, rname, n=4):
 def _region_rows():
     rows = db().execute("SELECT id, name FROM regions ORDER BY sort, name").fetchall()
     return [(r["id"], r["name"]) for r in rows] or [(0, "All areas")]
+
+def staff_rate():
+    """Orders one driver can handle in an hour (setting sched_orders_per_hr, default 2)."""
+    try:
+        r = float(setting("sched_orders_per_hr") or 2)
+    except (TypeError, ValueError):
+        r = 2.0
+    return max(0.5, min(10.0, r))
+
+def _hour_key(hs, ws):
+    """Hour start -> (day index in the week of ws, hour 6..29) or None. Hours before 6 AM
+    belong to the night before, like the Best shifts blocks."""
+    h, day = hs.hour, hs.date()
+    if h < 6:
+        h += 24
+        day = day - dt.timedelta(days=1)
+    idx = (day - ws).days
+    return (idx, h) if 0 <= idx <= 6 else None
+
+def staffing_plan(rid, ws, weeks=8):
+    """Drivers each shift should have in a region (from past orders) against who is
+    scheduled for the week starting ws."""
+    weeks = max(2, min(26, int(weeks or 8)))
+    rate = staff_rate()
+    con = db()
+    nowdt = dt.datetime.now().replace(microsecond=0)
+    start = (nowdt - dt.timedelta(days=7 * weeks)).isoformat(timespec="seconds")
+    q = "SELECT created_at, region_id FROM orders WHERE dispatch_status='delivered' AND created_at>=?"
+    args = [start]
+    if rid:
+        q += " AND region_id=?"; args.append(rid)
+    hourly = {}
+    for o in con.execute(q, args).fetchall():
+        try:
+            t = dt.datetime.fromisoformat(str(o["created_at"])[:19])
+        except ValueError:
+            continue
+        t = to_region(t, rid or o["region_id"])
+        wd, h = t.weekday(), t.hour
+        if h < 6:
+            wd, h = (wd - 1) % 7, h + 24
+        hourly[(wd, h)] = hourly.get((wd, h), 0) + 1
+    names = {}
+    for d in con.execute("SELECT id, name, COALESCE(active,1) a FROM drivers").fetchall():
+        if d["a"]:
+            names[d["id"]] = d["name"]
+    allr = {r["driver_id"] for r in con.execute("SELECT DISTINCT driver_id FROM driver_regions").fetchall()}
+    mine = {r["driver_id"] for r in con.execute("SELECT driver_id FROM driver_regions WHERE region_id=?", (rid,)).fetchall()} if rid else set()
+    cover, pend = {}, {}
+    for r in con.execute("""SELECT * FROM availability WHERE week_start=?
+                            AND COALESCE(status,'approved') IN ('approved','pending')""", (ws.isoformat(),)).fetchall():
+        did = r["driver_id"]
+        if did not in names:
+            continue
+        if rid:
+            sr = slot_regions(r)
+            if sr:
+                if rid not in sr:
+                    continue
+            elif not (did in mine or did not in allr):
+                continue
+        day = ws + dt.timedelta(days=int(r["dow"]))
+        approved = (r["status"] or "approved") == "approved"
+        if off_today(did, day.isoformat()):
+            continue
+        try:
+            s0 = dt.datetime.combine(day, dt.time.fromisoformat(str(r["start_time"]).strip()))
+            s1 = dt.datetime.combine(day, dt.time.fromisoformat(str(r["end_time"]).strip()))
+        except ValueError:
+            continue
+        if s1 <= s0:
+            s1 += dt.timedelta(days=1)
+        hs = s0.replace(minute=0, second=0)
+        while hs < s1:
+            he = hs + dt.timedelta(hours=1)
+            if (min(s1, he) - max(s0, hs)).total_seconds() >= 1800:
+                k = _hour_key(hs, ws)
+                if k:
+                    (cover if approved else pend).setdefault(k, set()).add(did)
+            hs = he
+    days, short = [], []
+    for wd in range(7):
+        date = ws + dt.timedelta(days=wd)
+        blocks = []
+        for bi, (bname, a, b) in enumerate(SHIFT_BLOCKS):
+            hrs = []
+            for h in range(a, b):
+                avg = hourly.get((wd, h), 0) / float(weeks)
+                need = int(math.ceil(avg / rate - 1e-9)) if avg >= 0.2 else 0
+                hrs.append({"h": h, "avg": avg, "need": need, "have": cover.get((wd, h), set())})
+            need = max(x["need"] for x in hrs)
+            busy = [x for x in hrs if x["need"] > 0] or hrs
+            have = min(len(x["have"]) for x in busy)
+            have_max = max(len(x["have"]) for x in hrs)
+            gap, gap_h = max((x["need"] - len(x["have"]), -x["h"]) for x in hrs)
+            gap_h = -gap_h
+            who = {i for x in hrs for i in x["have"]}
+            waiting = {i for h in range(a, b) for i in pend.get((wd, h), set())} - who
+            peak = max(hrs, key=lambda x: x["avg"])
+            if gap > 0:
+                status = "short"
+            elif need == 0 and have_max == 0:
+                status = "quiet"
+            elif (need > 0 and have - need >= 2) or (need == 0 and have_max >= 2):
+                status = "over"
+            else:
+                status = "ok"
+            row = {"block": bname, "bi": bi, "hours": "%s to %s" % (_hr12(a), _hr12(b)),
+                   "orders": round(sum(x["avg"] for x in hrs), 1),
+                   "peak_hour": _hr12(peak["h"]) if peak["avg"] >= 0.2 else "",
+                   "peak_orders": round(peak["avg"], 1),
+                   "need": need, "have": have, "status": status,
+                   "gap": max(0, gap), "gap_at": _hr12(gap_h) if gap > 0 else "",
+                   "extra": max(0, (have - need) if need else have_max),
+                   "drivers": sorted(names[i] for i in who),
+                   "pending": sorted(names[i] for i in waiting)}
+            blocks.append(row)
+            if status == "short":
+                short.append({"day": WEEKDAYS[wd], "date": date.isoformat(), "date_label": short_date(date),
+                              "block": bname, "hours": row["hours"], "gap": row["gap"],
+                              "gap_at": row["gap_at"], "need": need, "have": have,
+                              "pending": len(row["pending"])})
+        days.append({"day": WEEKDAYS[wd], "date": date.isoformat(), "date_label": short_date(date),
+                     "blocks": blocks})
+    short.sort(key=lambda x: (-x["gap"], x["date"]))
+    return {"region_id": int(rid or 0), "week_start": ws.isoformat(), "weeks": weeks,
+            "rate": rate, "days": days, "short": short,
+            "has_history": bool(hourly)}
+
+@app.get("/api/dispatch/staffing")
+def api_dispatch_staffing():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    regs = _region_rows()
+    scope = dispatcher_driver_scope()
+    if scope is not None:
+        regs = [r for r in regs if r[0] in scope] or regs
+    try:
+        rid = int(request.args.get("region") or regs[0][0])
+        weeks = int(request.args.get("weeks") or 8)
+    except ValueError:
+        rid, weeks = regs[0][0], 8
+    if rid not in dict(regs):
+        rid = regs[0][0]
+    ws = parse_week(request.args.get("week"))
+    out = staffing_plan(rid, ws, weeks)
+    out.update({"ok": True, "regions": [{"id": i, "name": n} for i, n in regs],
+                "region_name": dict(regs).get(rid, "All areas"), "blocks": [b[0] for b in SHIFT_BLOCKS]})
+    return jsonify(out)
 
 @app.get("/dispatch/shift-stats")
 def dispatch_shift_stats():

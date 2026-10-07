@@ -199,6 +199,9 @@ async function setLogo(inp){
   <label>Show a driver as Scheduled this many minutes before their shift starts (0 to 240)</label>
   <input name="sched_lead_min" type="number" min="0" max="240" value="{{ s['sched_lead_min'] if s['sched_lead_min'] not in (None,'') else 60 }}">
   <div class="muted small">Before that the driver sits in Unavailable and the driver app says they are not scheduled. They stay Scheduled until the shift ends, or longer while they are still online.</div>
+  <label>Orders one driver can handle in an hour (0.5 to 10)</label>
+  <input name="sched_orders_per_hr" type="number" min="0.5" max="10" step="0.5" value="{{ s['sched_orders_per_hr'] if s['sched_orders_per_hr'] not in (None,'') else 2 }}">
+  <div class="muted small">The Driver schedule page uses this to work out how many drivers each shift needs from past orders. Lower it if your drivers cover long distances.</div>
   <h2>Future orders</h2>
   <label>Send a future order to the kitchen this many minutes before its delivery time</label>
   <input name="future_lead_min" type="number" min="10" max="240" value="{{ s['future_lead_min'] or 45 }}">
