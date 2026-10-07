@@ -14272,6 +14272,180 @@ def rewards_page():
     rr = reward_rules()
     return render_template("rewards.html", rules=rr, me=customer_public(current_customer()))
 
+# ---------------------------------------------------------------- best shifts (statistics for drivers)
+# For each region: which day and time of day pays drivers best, from the last few weeks of
+# delivered orders (driver pay = trip pay sent, else the pay rule's suggestion) and the hours
+# drivers were online then. Times are the region's own local time.
+SHIFT_BLOCKS = [("Breakfast", 6, 11), ("Lunch", 11, 14), ("Afternoon", 14, 17), ("Dinner", 17, 21), ("Late night", 21, 26)]
+WEEKDAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"]
+_shift_cache = {}
+
+def _hr12(h):
+    h = h % 24
+    return ("12" if h % 12 == 0 else str(h % 12)) + (" AM" if h < 12 else " PM")
+
+def _shift_slot(t):
+    """Local datetime -> (weekday, block index). Hours before 6 AM count as the night before."""
+    h = t.hour
+    if h < 6:
+        t = t - dt.timedelta(days=1)
+        return t.weekday(), len(SHIFT_BLOCKS) - 1
+    for i, (_n, a, b) in enumerate(SHIFT_BLOCKS):
+        if a <= h < b:
+            return t.weekday(), i
+    return t.weekday(), len(SHIFT_BLOCKS) - 1
+
+def shift_stats(rid, weeks=8):
+    """Best shifts for one region (rid 0 = every order). Cached 10 minutes."""
+    weeks = max(2, min(26, int(weeks or 8)))
+    ck = (int(rid or 0), weeks)
+    hit = _shift_cache.get(ck)
+    if hit and time.time() - hit[0] < 600:
+        return hit[1]
+    con = db()
+    nowdt = dt.datetime.now().replace(microsecond=0)
+    start = (nowdt - dt.timedelta(days=7 * weeks)).isoformat(timespec="seconds")
+    slots = {}
+    def slot(wd, bi):
+        return slots.setdefault((wd, bi), {"orders": 0, "pay": 0, "tips": 0, "dh": 0.0})
+    q = """SELECT id, created_at, fee_cents, tip_cents, region_id FROM orders
+           WHERE dispatch_status='delivered' AND created_at>=?"""
+    args = [start]
+    if rid:
+        q += " AND region_id=?"; args.append(rid)
+    orders = con.execute(q, args).fetchall()
+    paid = {}
+    if orders:
+        for r in con.execute("""SELECT order_id, SUM(cents) c FROM driver_payouts
+                                WHERE created_at>=? AND COALESCE(kind,'trip')='trip'
+                                  AND COALESCE(status,'') NOT IN ('FAILED','RETURNED','BLOCKED','REFUNDED','REVERSED','DENIED','ERROR','CANCELED')
+                                GROUP BY order_id""", (start,)).fetchall():
+            paid[r["order_id"]] = int(r["c"] or 0)
+    for o in orders:
+        try:
+            t = dt.datetime.fromisoformat(str(o["created_at"])[:19])
+        except ValueError:
+            continue
+        t = to_region(t, rid or o["region_id"])
+        sl = slot(*_shift_slot(t))
+        sl["orders"] += 1
+        sl["pay"] += paid.get(o["id"], drv_pay_suggest(o))
+        sl["tips"] += int(o["tip_cents"] or 0)
+    # driver hours online, for drivers who work this region (no regions picked = all regions)
+    who = None
+    if rid:
+        allr = {r["driver_id"] for r in con.execute("SELECT DISTINCT driver_id FROM driver_regions").fetchall()}
+        mine = {r["driver_id"] for r in con.execute("SELECT driver_id FROM driver_regions WHERE region_id=?", (rid,)).fetchall()}
+        who = lambda did: did in mine or did not in allr
+    for a in con.execute("""SELECT person_id, started_at, COALESCE(ended_at, last_beat) e FROM active_time
+                            WHERE kind='driver' AND state='online' AND COALESCE(ended_at, last_beat)>=?""", (start,)).fetchall():
+        if who and not who(a["person_id"]):
+            continue
+        try:
+            t0 = max(dt.datetime.fromisoformat(str(a["started_at"])[:19]), dt.datetime.fromisoformat(start))
+            t1 = min(dt.datetime.fromisoformat(str(a["e"])[:19]), nowdt)
+        except ValueError:
+            continue
+        if (t1 - t0).total_seconds() > 20 * 3600:
+            t1 = t0 + dt.timedelta(hours=20)   # a session left open for days is not real driving time
+        t0, t1 = to_region(t0, rid), to_region(t1, rid)
+        cur = t0
+        while cur < t1:
+            nxt = min(t1, cur.replace(minute=0, second=0) + dt.timedelta(hours=1))
+            slot(*_shift_slot(cur))["dh"] += (nxt - cur).total_seconds() / 3600.0
+            cur = nxt
+    rows = []
+    for (wd, bi), v in slots.items():
+        name, a, b = SHIFT_BLOCKS[bi]
+        blen = b - a
+        n = v["orders"]
+        avg = v["pay"] / n if n else 0
+        per_hr = v["pay"] / v["dh"] if v["dh"] >= 1 else None
+        est = per_hr if per_hr is not None else (n / float(weeks * blen)) * avg
+        rows.append({"day": WEEKDAYS[wd], "wd": wd, "block": name, "bi": bi,
+                     "hours": "%s to %s" % (_hr12(a), _hr12(b)),
+                     "orders": n, "per_shift": round(n / float(weeks), 1),
+                     "avg_pay": money(int(avg)), "avg_tip": money(int(v["tips"] / n)) if n else money(0),
+                     "per_hr_cents": int(est), "per_hr": money(int(est)),
+                     "driver_hours": round(v["dh"], 1), "measured": per_hr is not None,
+                     "enough": n >= 3})
+    best = sorted([r for r in rows if r["enough"]], key=lambda r: -r["per_hr_cents"])
+    out = {"region_id": int(rid or 0), "weeks": weeks, "orders": len(orders),
+           "best": best[:6], "worst": list(reversed(best[-3:])) if len(best) > 6 else [],
+           "grid": sorted(rows, key=lambda r: (r["wd"], r["bi"]))}
+    _shift_cache[ck] = (time.time(), out)
+    return out
+
+def shift_summary(st, rname, n=4):
+    if not st["best"]:
+        return ""
+    parts = ["%s %s (%s): about %s/hr, %s orders a shift" % (r["day"][:3], r["block"].lower(), r["hours"], r["per_hr"], r["per_shift"])
+             for r in st["best"][:n]]
+    return "Best shifts in %s, last %d weeks: " % (rname, st["weeks"]) + "; ".join(parts) + "."
+
+def _region_rows():
+    rows = db().execute("SELECT id, name FROM regions ORDER BY sort, name").fetchall()
+    return [(r["id"], r["name"]) for r in rows] or [(0, "All areas")]
+
+@app.get("/dispatch/shift-stats")
+def dispatch_shift_stats():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    regs = _region_rows()
+    try:
+        rid = int(request.args.get("region") or regs[0][0])
+        weeks = int(request.args.get("weeks") or 8)
+    except ValueError:
+        rid, weeks = regs[0][0], 8
+    rname = dict(regs).get(rid, "All areas")
+    st = shift_stats(rid, weeks)
+    return render_template("dispatch_shift_stats.html", regs=regs, rid=rid, rname=rname, st=st,
+                           blocks=SHIFT_BLOCKS, days=WEEKDAYS, summary=shift_summary(st, rname),
+                           sent=request.args.get("sent"))
+
+@app.post("/dispatch/shift-stats/send")
+def dispatch_shift_stats_send():
+    """Message every active driver who works the region the best-shift summary (and text it when asked)."""
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    try:
+        rid = int(request.form.get("region") or 0)
+        weeks = int(request.form.get("weeks") or 8)
+    except ValueError:
+        rid, weeks = 0, 8
+    rname = dict(_region_rows()).get(rid, "All areas")
+    body = shift_summary(shift_stats(rid, weeks), rname)
+    if not body:
+        return redirect(url_for("dispatch_shift_stats", region=rid, weeks=weeks, sent="none"))
+    allr = {r["driver_id"] for r in db().execute("SELECT DISTINCT driver_id FROM driver_regions").fetchall()}
+    n = 0
+    for d in db().execute("SELECT * FROM drivers WHERE COALESCE(active,1)=1").fetchall():
+        if rid and d["id"] in allr and rid not in driver_region_ids(d["id"]):
+            continue
+        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)", (d["id"], "system", body, now()))
+        if request.form.get("text"):
+            ph = phone_digits(d["phone"] or "")
+            if len(ph) >= 10:
+                send_text("+1" + ph[-10:], body)
+        n += 1
+    db().commit()
+    log("shift_stats", "Sent best shifts for %s to %d drivers" % (rname, n))
+    return redirect(url_for("dispatch_shift_stats", region=rid, weeks=weeks, sent=str(n)))
+
+@app.get("/api/driver/shift-stats")
+def api_driver_shift_stats():
+    did = session.get("driver_id")
+    if not did:
+        return jsonify({"ok": False}), 403
+    mine = driver_region_ids(did)
+    out = []
+    for rid, rname in _region_rows():
+        if rid and mine and rid not in mine:
+            continue
+        st = shift_stats(rid, 8)
+        out.append({"region": rname, "best": st["best"][:5], "worst": st["worst"], "orders": st["orders"], "weeks": st["weeks"]})
+    return jsonify({"ok": True, "regions": out})
+
 @app.get("/dispatch/reviews")
 def dispatch_reviews():
     if not dispatcher_required():

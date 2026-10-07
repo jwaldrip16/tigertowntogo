@@ -52,6 +52,7 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
     <span class="pill red hidden" id="chatBadge"></span></button>
   <button class="tab" id="tabSched" onclick="dtab('sched')">Schedule</button>
   <button class="tab" id="tabDone" onclick="dtab('done')">Completed <span id="cntDone"></span></button>
+  <button class="tab" id="tabBest" onclick="dtab('best')">Best shifts</button>
 </div>
 <div id="chatAlert" class="chatalert hidden" onclick="dtab('chat')"></div>
 
@@ -89,6 +90,7 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
 </div>
 
 <div id="paneDone" class="hidden"><div id="doneList"></div></div>
+<div id="paneBest" class="hidden"><div id="bestList" class="panel"><p class="muted">Loading...</p></div></div>
 
 <div id="paneSched" class="hidden">
   <aside class="panel"><h2>My time this week</h2>
@@ -678,14 +680,30 @@ let CHAT_SEEN = null;      // highest message id the driver has actually looked 
 let CHAT_UNREAD = 0;
 function dtab(which){
   DTAB = which;
-  ['run','chat','sched','done'].forEach(function(k){
+  ['run','chat','sched','done','best'].forEach(function(k){
     document.getElementById('pane'+k[0].toUpperCase()+k.slice(1)).classList.toggle('hidden', k!==which);
   });
   document.getElementById('tabRun').classList.toggle('on', which==='run');
   document.getElementById('tabChat').classList.toggle('on', which==='chat');
   document.getElementById('tabSched').classList.toggle('on', which==='sched');
   document.getElementById('tabDone').classList.toggle('on', which==='done');
+  document.getElementById('tabBest').classList.toggle('on', which==='best');
   if (which==='chat'){ clearChatBadge(); chat(); }
+  if (which==='best') bestShifts();
+}
+function bestShifts(){
+  const box = document.getElementById('bestList');
+  const e = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  fetch('/api/driver/shift-stats', {credentials:'same-origin'}).then(r => r.json()).then(function(j){
+    if (!j.ok){ box.innerHTML = '<p class="muted">Could not load best shifts.</p>'; return; }
+    box.innerHTML = '<p class="muted small" style="margin-top:0">Where drivers earned the most per hour online, from the last 8 weeks of deliveries.</p>' +
+      (j.regions.length ? j.regions.map(function(g){
+        return '<h3 style="margin:10px 0 4px">' + e(g.region) + '</h3>' + (g.best.length
+          ? '<ol style="margin:0;padding-left:20px">' + g.best.map(r => '<li style="margin:4px 0"><b>' + e(r.day) + ' ' + e(r.block.toLowerCase()) + '</b> (' + e(r.hours) + '): about <b>' + e(r.per_hr) + '/hr</b>' + (r.measured ? '' : ' (estimate)') + ', ' + r.per_shift + ' orders a shift</li>').join('') + '</ol>' +
+            (g.worst.length ? '<p class="muted small">Slowest: ' + g.worst.map(r => e(r.day.slice(0,3)) + ' ' + e(r.block.toLowerCase())).join(', ') + '</p>' : '')
+          : '<p class="muted small">Not enough deliveries here yet.</p>');
+      }).join('') : '<p class="muted">No regions yet.</p>');
+  }).catch(function(){ box.innerHTML = '<p class="muted">Could not load best shifts.</p>'; });
 }
 function clearChatBadge(){
   CHAT_UNREAD = 0;
