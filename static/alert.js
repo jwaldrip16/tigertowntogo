@@ -39,21 +39,23 @@
     o.start(ctx.currentTime + start); o.stop(ctx.currentTime + start + len + 0.05);
   }
 
-  // Optional sound file for new orders (driver and kitchen apps). Decoded once, then played
-  // through the same unlocked audio as the tones. Falls back to the tones until it loads.
-  var orderUrl = null, orderBuf = null, orderLoading = false;
-  function loadOrderSound(){
-    if (!orderUrl || orderBuf || orderLoading) return;
+  // Optional sound files per alert ('order' on the driver and kitchen apps, 'chat' on the
+  // dispatch board). Decoded once, then played through the same unlocked audio as the tones.
+  // Falls back to the tones until the file loads.
+  var files = {}, bufs = {}, loading = {};
+  function loadSound(name){
+    var url = files[name];
+    if (!url || bufs[name] || loading[name]) return;
     make(); if (!ctx) return;
-    orderLoading = true;
-    fetch(orderUrl).then(function(r){ return r.arrayBuffer(); }).then(function(ab){
-      ctx.decodeAudioData(ab, function(b){ orderBuf = b; orderLoading = false; },
-                              function(){ orderLoading = false; });
-    }).catch(function(){ orderLoading = false; });
+    loading[name] = true;
+    fetch(url).then(function(r){ return r.arrayBuffer(); }).then(function(ab){
+      ctx.decodeAudioData(ab, function(b){ bufs[name] = b; loading[name] = false; },
+                              function(){ loading[name] = false; });
+    }).catch(function(){ loading[name] = false; });
   }
-  function playOrderFile(){
+  function playFile(name){
     var src = ctx.createBufferSource(), g = ctx.createGain();
-    src.buffer = orderBuf; g.gain.value = 1.0;
+    src.buffer = bufs[name]; g.gain.value = 1.0;
     src.connect(g); g.connect(ctx.destination); src.start(0);
   }
 
@@ -81,7 +83,14 @@
         if (ctx.state !== 'running'){ pending = pattern || 'order'; armed = false; return; }
       }
       armed = true;
-      if (pattern === 'ping'){ beep(880, 0, 0.18, 0.25); return; }
+      var name = pattern || 'order';
+      if (bufs[name]){
+        playFile(name);
+        if (name === 'order' && navigator.vibrate) navigator.vibrate([120, 60, 120]);
+        return;
+      }
+      loadSound(name);
+      if (pattern === 'ping' || pattern === 'chat'){ beep(880, 0, 0.18, 0.25); return; }
       if (pattern === 'call'){
         // phone style double ring, loud enough to hear across the room
         beep(988, 0.00, 0.22, 0.45); beep(784, 0.25, 0.22, 0.45);
@@ -89,12 +98,6 @@
         if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
         return;
       }
-      if (orderBuf){
-        playOrderFile();
-        if (navigator.vibrate) navigator.vibrate([120, 60, 120]);
-        return;
-      }
-      loadOrderSound();
       beep(660, 0.00, 0.16, 0.3);
       beep(880, 0.20, 0.16, 0.3);
       beep(1175, 0.40, 0.30, 0.3);
@@ -109,7 +112,9 @@
     },
     armed: function(){ return running(); },
     // use a sound file for the 'order' alert on this page
-    setOrderSound: function(url){ orderUrl = url; orderBuf = null; loadOrderSound(); },
+    setOrderSound: function(url){ window.ffSound.setSound('order', url); },
+    // use a sound file for one alert ('order', 'chat', ...) on this page
+    setSound: function(name, url){ files[name] = url; bufs[name] = null; loadSound(name); },
     unlock: unlock
   };
 })();

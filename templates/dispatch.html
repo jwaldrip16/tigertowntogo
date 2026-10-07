@@ -144,6 +144,8 @@
 {% block scripts %}
 <script src="/static/itempick.js"></script><script src="/static/cardbox.js"></script><script src="/static/ppcard.js"></script>
 <script>
+// chat sound: plays when a driver's or restaurant's message reaches dispatch
+try { ffSound.setSound('chat', '/static/sounds/chat.mp3'); } catch(e) {}
 const ORDSHOW = "{{ ordshow('dispatch') }}";
 function ordMain(o){ return (ORDSHOW !== 'secondary' && o && o.primary_no) ? o.primary_no : (o ? o.code : ''); }
 function ordSub(o){ return (ORDSHOW === 'both' && o && o.primary_no) ? o.code : ''; }
@@ -226,7 +228,7 @@ function chatNotify(res){
     const first = CHAT_SEEN === null;
     CHAT_SEEN = m.id;
     if (!first){
-      try { ffSound.play('ping'); } catch(e){}
+      try { ffSound.play('chat'); } catch(e){}
       document.title = '(' + n + ') Dispatch board';
       try {
         const pop = ffNotify.show('Driver chat: ' + m.driver, m.body, 'drvchat');
@@ -237,7 +239,7 @@ function chatNotify(res){
   }
   // keep a soft reminder chime going every 30 seconds while driver messages sit unread
   if (n > 0 && PAGE !== 'comms'){
-    if (!CHAT_REMIND) CHAT_REMIND = setInterval(function(){ try { ffSound.play('ping'); } catch(e){} }, 30000);
+    if (!CHAT_REMIND) CHAT_REMIND = setInterval(function(){ try { ffSound.play('chat'); } catch(e){} }, 30000);
   } else if (CHAT_REMIND){ clearInterval(CHAT_REMIND); CHAT_REMIND = null; }
   if (n === 0) document.title = 'Dispatch board';
 }
@@ -1649,7 +1651,7 @@ function restChatNotify(res){
     }
   }
   if (m && REST_LAST !== null && lid > REST_LAST){
-    try { ffSound.beep(); } catch(e) {}
+    try { ffSound.play('chat'); } catch(e) {}
     try {
       const pop = ffNotify.show('Restaurant chat: ' + m.name, m.body, 'restchat');
       if (pop) pop.onclick = function(){ window.focus(); openRestChat(m.restaurant_id); this.close(); };
