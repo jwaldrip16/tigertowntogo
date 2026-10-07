@@ -199,7 +199,8 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
 // new order sound (the chime file), plays every 5 seconds until the order is accepted
 try { ffSound.setOrderSound('/static/sounds/new-order.mp3'); } catch(e) {}
 const BRAND_NAME = {{ (staff_brand.name if staff_brand else '')|tojson }};
-try { ffSound.setSound('sent', '/static/sounds/chat.mp3'); } catch(e) {}   // your message reached dispatch
+try { ffSound.setSound('sent', '/static/sounds/chat.mp3'); } catch(e) {}
+try { ffSound.setSound('message', '/static/sounds/driver-message.mp3'); } catch(e) {}   // dispatch / system message to the driver   // your message reached dispatch
 let LATE_BEEP_AT = 0, LATE_LOUD = false;
 function silenceAlert(){
   if (LATE_LOUD){ alert('This order is late. The chime stops once you accept it.'); return; }
@@ -740,7 +741,7 @@ async function chat(){
                  '<span class="muted small"> Tap to open chat.</span>';
   al.classList.remove('hidden');
   document.title = '(' + CHAT_UNREAD + ') Driver app';
-  try { ffSound.play('ping'); } catch(e){}
+  try { ffSound.play('message'); } catch(e){}   // dispatch or system wrote to the driver
   try { ffNotify.show((last.who || 'Dispatch'), last.body, 'chat'); } catch(e){}
 }
 async function send(){
