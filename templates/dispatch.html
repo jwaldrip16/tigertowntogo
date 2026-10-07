@@ -813,7 +813,6 @@ function renderCompleted(res){
     ' &middot; '+milesLabel(o)+' &middot; fee '+o.fee+' &middot; <strong>tip '+o.tip+'</strong>'+(o.discount ? ' &middot; discount '+o.discount : '')+' &middot; total '+o.total+
     (o.driver?' &middot; driver '+o.driver:'')+'</div>'+
     '<div class="order-actions">'+
-      (canReorder(o) ? '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>' : '')+
       (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
       (!o.driver_id && o.dispatch_status!=='cancelled' ? '<select class="sendsel" id="sd'+o.id+'">'+
         '<option value="">Next up</option>'+ (res.drivers||[]).filter(d=>d.status==='online')
@@ -825,7 +824,6 @@ function renderCompleted(res){
           .map(d=>'<option value="'+d.id+'">'+d.name+'</option>').join('')+'</select>'+
         '<button class="btn tiny" onclick="moveToDriver('+o.id+')">Move order</button>' : '')+
     (canReorder(o) ? '<button class="btn tiny primary" onclick="redoDialog('+o.id+')">New order from this</button>' : '')+
-    (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
     (o.card_on_file ? '<button class="btn tiny" onclick="viewCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">View card &bull;'+o.card_last4+'</button>' : '')+
 
     payBlock(o)+
