@@ -9,6 +9,7 @@
 <script src="/static/nosleep.min.js"></script>
 <script src="/static/keepawake.js"></script>
 <script src="/static/orderlines.js"></script>
+<script src="/static/orderview.js"></script>
 <script>
 const ORDSHOW = "{{ ordshow('rest') }}";
 function ordMain(o){ return (ORDSHOW !== 'secondary' && o && o.primary_no) ? o.primary_no : (o ? o.code : ''); }
@@ -184,7 +185,7 @@ async function load(force){
     '<div class="panel slim"><div class="row between"><div><strong>'+ordMain(o)+'</strong> '+(ordSub(o) ? '<span class="muted small">'+ordSub(o)+'</span> ' : '')+
     (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+o.customer+
     '<div class="small">'+OrderLines.block(o)+'</div>'+
-    '<div class="small">Delivery fee '+o.fee+' &middot; Tip '+o.tip+'</div></div>'+
+    '<div class="small">Delivery fee '+o.fee+' &middot; Tip '+o.tip+'</div>'+OrderView.btn(o)+'</div>'+
     '<div class="right muted small">'+({enroute:'Driver en route',delivered:'Delivered',
       cancelled:'Cancelled'}[o.dispatch_status]||'')+
     (o.ready_time ? '<div>Ready '+o.ready_time+'</div>' : '')+'</div></div></div>').join('')
@@ -223,6 +224,7 @@ async function load(force){
                   : 'assigned once you confirm this ticket')+'</span></div>'+
       '</div>'+
       '<div class="order-actions">'+
+        OrderView.btn(o)+
       '<button class="btn tiny" onclick="nudge('+o.id+',-5)">-5</button>'+
       '<input class="mins" id="m'+o.id+'" type="number" value="'+
       (o.prep_minutes||res.prep_default)+'" min="1" max="180" onchange="setTimer('+o.id+')"> min'+

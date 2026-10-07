@@ -142,7 +142,7 @@
 </div>
 {% endblock %}
 {% block scripts %}
-<script src="/static/itempick.js"></script><script src="/static/orderlines.js"></script><script src="/static/cardbox.js"></script><script src="/static/ppcard.js"></script>
+<script src="/static/itempick.js"></script><script src="/static/orderlines.js"></script><script src="/static/orderview.js"></script><script src="/static/cardbox.js"></script><script src="/static/ppcard.js"></script>
 <script>
 const ORDSHOW = "{{ ordshow('dispatch') }}";
 function ordMain(o){ return (ORDSHOW !== 'secondary' && o && o.primary_no) ? o.primary_no : (o ? o.code : ''); }
@@ -1397,6 +1397,7 @@ function orderCard(o, opts, drivers){
     (o.dispatch_note ? '<div class="notebar">Note: '+o.dispatch_note+'</div>' : '')+
     trailLine(o)+
     '<div class="order-actions">'+
+      OrderView.btn(o)+
       payButtons(o)+
       etaPill(o)+kitchenGo(o)+
       manualButtons(o)+

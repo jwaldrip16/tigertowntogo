@@ -8,6 +8,7 @@
 <link rel="apple-touch-icon" href="/static/icons/driver-192.png">
 <script src="/static/regionpick.js"></script>
 <script src="/static/orderlines.js"></script>
+<script src="/static/orderview.js"></script>
 <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="/static/maptiles.js"></script>
@@ -335,6 +336,7 @@ function renderDone(list){
       '<div class="small">' + OrderLines.block(o) + '</div>' +
       '<div class="small">Order total ' + o.total + '</div>' +
       '<div class="row" style="gap:6px;flex-wrap:wrap;margin-top:6px">' +
+        OrderView.btn(o) +
         (o.phone ? '<a class="btn tiny" href="tel:' + ph + '">Call customer</a><a class="btn tiny" href="sms:' + ph + '">Text customer</a>' : '') +
         (o.address ? '<button class="btn tiny" onclick=\'navGoTo(' + JSON.stringify(o.customer_ll||null) + ',' + JSON.stringify(o.customer||'Customer').replace(/'/g,"&#39;") + ',' + JSON.stringify(o.address).replace(/'/g,"&#39;") + ')\'>Directions</button>' : '') +
       '</div></div>';
@@ -450,6 +452,7 @@ function renderRun(stack, total){
     ((o.timeline||[]).length ? '<div class="trailline"><b>Times:</b> '+
       o.timeline.map(x=>x.label+' '+x.time).join(' &middot; ')+'</div>' : '')+
     '<div class="order-actions">'+
+    OrderView.btn(o)+
     '<button class="btn tiny primary" onclick="navStop('+ix+',\'r\')">Navigate to restaurant</button>'+
     '<button class="btn tiny primary" onclick="navStop('+ix+',\'c\')">Navigate to customer</button>'+
     (o.restaurant_phone ? '<a class="btn tiny" href="'+o.restaurant_tel+'">Call '+o.restaurant+'</a>' : '')+
