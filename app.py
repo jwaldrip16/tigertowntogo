@@ -11904,8 +11904,26 @@ LEGAL_PAGE = """<!doctype html><html lang="en"><head><meta charset="utf-8">
 <style>body{font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;max-width:760px;margin:0 auto;padding:24px 18px 60px;color:#1f2937;line-height:1.55}
 h1{font-size:26px;margin:8px 0 4px}h2{font-size:18px;margin:26px 0 6px}.muted{color:#6b7280;font-size:14px}
 header{display:flex;align-items:center;gap:10px}header img{height:44px}</style></head><body>
-<header><img src="/static/brand/logo-default.png" alt="Fleet Foot Delivery"><strong>Fleet Foot Delivery</strong></header>
-{{ body|safe }}</body></html>"""
+<header><a href="/"><img src="{{ logo }}" alt="{{ brand }}"></a><strong>{{ brand }}</strong></header>
+{{ body|safe }}
+<p class="muted" style="margin-top:36px"><a href="/">Back to {{ brand }}</a> &middot; <a href="/privacy">Privacy policy</a> &middot;
+<a href="/delete-account">Delete account</a><br>{{ brand }} runs on Fleet Foot Delivery software.</p></body></html>"""
+
+
+def _legal_brand():
+    """Name and logo of the brand whose web address this is (Tiger Town To Go, Bulldawg Food,
+    Crimson To Go...), else Fleet Foot Delivery."""
+    name, logo = "Fleet Foot Delivery", DEFAULT_LOGO
+    try:
+        s = current_site()
+        if s is not None:
+            name = (s["name"] or "").strip() or name
+        else:
+            name = (setting("business_name", str) or "").strip() or name
+        logo = logo_url() or logo
+    except Exception:
+        pass
+    return name, logo
 
 
 def _privacy_contact():
@@ -11946,7 +11964,8 @@ Drivers can stop location sharing by going offline or turning off location for t
 <h2>Children</h2><p>The apps are not meant for children under 13, and we do not knowingly collect their information.</p>
 <h2>Changes</h2><p>If this policy changes, the new version will be posted on this page with a new effective date.</p>
 <h2>Contact</h2><p>Questions or requests: %s.</p>""" % c
-    return render_template_string(LEGAL_PAGE, title="Privacy policy | Fleet Foot Delivery", body=body)
+    _b, _l = _legal_brand()
+    return render_template_string(LEGAL_PAGE, title="Privacy policy | " + _b, body=body, brand=_b, logo=_l)
 
 
 @app.get("/delete-account")
@@ -11961,7 +11980,8 @@ Tiger Town To Go, Bulldawg Food and Crimson To Go websites) can ask for their ac
 <h2>What is deleted</h2><p>Your sign-in, name, phone number, saved addresses, location history and messages.</p>
 <h2>What we keep</h2><p>Records of completed orders and payments, kept only as long as tax and accounting rules require,
 then deleted.</p>""" % c
-    return render_template_string(LEGAL_PAGE, title="Delete your account | Fleet Foot Delivery", body=body)
+    _b, _l = _legal_brand()
+    return render_template_string(LEGAL_PAGE, title="Delete your account | " + _b, body=body, brand=_b, logo=_l)
 
 
 @app.get("/.well-known/assetlinks.json")

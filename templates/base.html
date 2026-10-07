@@ -80,10 +80,10 @@ function money(c){ return '$' + (c/100).toFixed(2); }
   </div>
   <div class="custfoot-bottom">
     {% for k, u in socials %}<a class="social" href="{{ u }}" target="_blank" rel="noopener">{{ {'x':'X','facebook':'Facebook','instagram':'Instagram'}[k] }}</a>{% endfor %}
-    <p>&copy; {{ year }} {{ biz_name }}. All rights reserved. &middot; <a href="/faq">FAQ's</a> &middot; <a href="/drive">Drive with us</a> &middot; <a href="/partner">Partner with us</a></p>
+    <p>&copy; {{ year }} {{ biz_name }}. All rights reserved. &middot; <a href="/faq">FAQ's</a> &middot; <a href="/drive">Drive with us</a> &middot; <a href="/partner">Partner with us</a> &middot; <a href="/privacy">Privacy policy</a> &middot; <a href="/delete-account">Delete account</a></p>
   </div>
 </footer>{% endif %}
-<div class="poweredby"><img src="/static/brand/logo-default.png" alt="" style="height:22px;width:auto;vertical-align:middle;margin-right:6px">Powered by Fleet Foot Delivery</div>
+<div class="poweredby"><img src="/static/brand/logo-default.png" alt="" style="height:22px;width:auto;vertical-align:middle;margin-right:6px">Powered by Fleet Foot Delivery{% if portal or staff_area %} &middot; <a href="/privacy">Privacy policy</a> &middot; <a href="/delete-account">Delete account</a>{% endif %}</div>
 <script src="{{ url_for('static', filename='alert.js') }}"></script>
 <script src="{{ url_for('static', filename='notify.js') }}"></script>
 <script>
