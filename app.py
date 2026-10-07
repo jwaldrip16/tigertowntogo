@@ -9714,11 +9714,25 @@ def dispatch_restaurants():
                     db().execute("UPDATE restaurants SET address=? WHERE id=?", (addr, rid))
         db().commit()
         saved = True
-    rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
-    data = [{"r": r, "hours": json.loads(r["hours"]), "open": is_open(r), "method": order_method(r)} for r in rs]
     stamp_regions()
+    regs = [{"id": g["id"], "name": g["name"]} for g in all_regions()]
+    rank = {g["id"]: i for i, g in enumerate(regs)}
+    rname = {g["id"]: g["name"] for g in regs}
+    rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
+    data = []
+    for r in rs:
+        rg = int(r["region_id"] or 0)
+        if rg not in rname:
+            rg = 0   # no region, or a region that was removed
+        data.append({"r": r, "hours": json.loads(r["hours"]), "open": is_open(r), "method": order_method(r),
+                     "rg": rg, "rg_name": rname.get(rg, "No region")})
+    # Grouped by region in the Regions page order, restaurants with no region last, A to Z inside each region.
+    data.sort(key=lambda d: (rank.get(d["rg"], len(regs)), (d["r"]["name"] or "").lower()))
+    counts = {}
+    for d in data:
+        counts[d["rg"]] = counts.get(d["rg"], 0) + 1
     return render_template("dispatch_restaurants.html", is_owner_view=is_owner(session.get("dispatcher_id")), data=data, week=WEEK, saved=saved,
-                           regions=[{"id": g["id"], "name": g["name"]} for g in all_regions()])
+                           regions=regs, rg_counts=counts)
 
 @app.route("/dispatch/restaurants/delete", methods=["POST"])
 def dispatch_delete_restaurant():

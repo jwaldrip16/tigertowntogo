@@ -26,6 +26,19 @@
     <div><input name="lng" placeholder="Longitude (optional)"></div></div>
   <button class="btn primary">Add restaurant</button>
 </form>
+<div class="panel" id="rgFilter">
+  <h2 style="margin-top:0">Show regions</h2>
+  <p class="muted small" style="margin-top:0">Restaurants are grouped by region. Tick one region or several to see just those. Your pick stays the next time you open this page.</p>
+  <div class="row" style="flex-wrap:wrap;gap:6px 16px;align-items:center">
+    {% for g in regions %}<label class="small" style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" class="rgPick" value="{{ g.id }}" style="width:auto;margin:0" onchange="rgApply(true)"> {{ g.name }} ({{ rg_counts.get(g.id, 0) }})</label>{% endfor %}
+    {% if rg_counts.get(0) or not regions %}<label class="small" style="display:flex;gap:6px;align-items:center;margin:0"><input type="checkbox" class="rgPick" value="0" style="width:auto;margin:0" onchange="rgApply(true)"> No region ({{ rg_counts.get(0, 0) }})</label>{% endif %}
+  </div>
+  <div class="row" style="gap:6px;margin-top:8px;align-items:center">
+    <button type="button" class="btn small" onclick="rgAll(true)">Show all</button>
+    <button type="button" class="btn small" onclick="rgAll(false)">Clear</button>
+    <span class="muted small" id="rgShown"></span>
+  </div>
+</div>
 {% set appl = data|selectattr('method','equalto','app')|list %}
 {% set onl = data|selectattr('method','equalto','online')|list %}
 {% set phl = data|selectattr('method','equalto','phone')|list %}
@@ -37,15 +50,18 @@
   <div class="howcols">
     {% for title, lst in [('Restaurant app', appl), ('Called in by dispatch: online', onl), ('Called in by dispatch: telephone', phl)] %}
     <div><h3>{{ title }} ({{ lst|length }})</h3>
-      {% if lst %}<ul class="howlist">{% for d in lst %}<li><a href="#rest{{ d.r['id'] }}">{{ d.r['name'] }}</a></li>{% endfor %}</ul>
+      {% if lst %}<ul class="howlist">{% for d in lst %}<li class="rgItem" data-rg="{{ d.rg }}"><a href="#rest{{ d.r['id'] }}">{{ d.r['name'] }}</a> <span class="muted small">{{ d.rg_name }}</span></li>{% endfor %}</ul>
       {% else %}<p class="muted small">None yet.</p>{% endif %}</div>
     {% endfor %}
   </div>
 </div>
 {% for d in data %}
+{% if loop.first or loop.previtem.rg != d.rg %}<h2 class="rgItem rgHead" data-rg="{{ d.rg }}" style="margin:22px 0 8px">{{ d.rg_name }} <span class="muted small">({{ rg_counts.get(d.rg, 0) }} restaurant{{ '' if rg_counts.get(d.rg, 0) == 1 else 's' }})</span></h2>{% endif %}
+<div class="rgItem" data-rg="{{ d.rg }}">
 <form class="panel" method="post" id="rest{{ d.r['id'] }}">
   <input type="hidden" name="restaurant_id" value="{{ d.r['id'] }}">
   <h2>{{ d.r['name'] }} <span class="pill {{ 'green' if d.open else 'grey' }}">{{ 'Open' if d.open else 'Closed' }}</span>
+    <span class="pill grey">{{ d.rg_name }}</span>
     <span class="pill {{ 'blue' if d.method == 'app' else 'amber' }}">{{ {'app':'Restaurant app','online':'Called in: online','phone':'Called in: telephone'}[d.method] }}</span></h2>
   <div class="cols">
     <div><label>Name</label><input name="name" value="{{ d.r['name'] }}"></div>
@@ -93,7 +109,9 @@
   <input type="hidden" name="restaurant_id" value="{{ d.r['id'] }}">
   <button class="btn small danger">Delete {{ d.r['name'] }}</button>
 </form>
+</div>
 {% endfor %}
+<p class="muted" id="rgNone" style="display:none">No restaurants in the regions you picked. Tick another region or press Show all.</p>
 {% endblock %}
 {% block scripts %}<script>
 async function restPhoto(id, inp){
@@ -104,4 +122,37 @@ async function restPhoto(id, inp){
   if (!res.ok){ document.getElementById('rp'+id).textContent = res.error || 'Upload failed.'; return; }
   location.reload();
 }
+// ---- show one region or several (blank pick = every region). Saved on this device.
+const RG_KEY = 'ffRestRegions';
+function rgPicked(){ return Array.from(document.querySelectorAll('.rgPick:checked')).map(b=>b.value); }
+function rgApply(save){
+  const pick = rgPicked();
+  if (save){ try { localStorage.setItem(RG_KEY, JSON.stringify(pick)); } catch(e){} }
+  const all = !pick.length || pick.length === document.querySelectorAll('.rgPick').length;
+  document.querySelectorAll('.rgItem').forEach(el=>{
+    el.style.display = (all || pick.indexOf(el.dataset.rg) >= 0) ? '' : 'none';
+  });
+  const shown = document.querySelectorAll('form.panel[id^="rest"]');
+  let n = 0; shown.forEach(f=>{ if (f.parentElement.style.display !== 'none') n++; });
+  const total = shown.length;
+  document.getElementById('rgShown').textContent = all ? 'Showing all ' + total + ' restaurants.' : 'Showing ' + n + ' of ' + total + ' restaurants.';
+  document.getElementById('rgNone').style.display = (total && !n) ? '' : 'none';
+}
+function rgAll(on){
+  document.querySelectorAll('.rgPick').forEach(b=>{ b.checked = on; });
+  rgApply(true);
+}
+(function(){
+  let pick = [];
+  try { pick = JSON.parse(localStorage.getItem(RG_KEY) || '[]') || []; } catch(e){ pick = []; }
+  const boxes = Array.from(document.querySelectorAll('.rgPick'));
+  const valid = pick.filter(v=>boxes.some(b=>b.value === String(v)));
+  boxes.forEach(b=>{ b.checked = !valid.length || valid.indexOf(b.value) >= 0; });
+  rgApply(false);
+  // jumping to a restaurant from the lists above: make sure its region is showing
+  if (location.hash && /^#rest\d+$/.test(location.hash)){
+    const f = document.querySelector(location.hash);
+    if (f && f.parentElement.style.display === 'none'){ rgAll(true); f.scrollIntoView(); }
+  }
+})();
 </script>{% endblock %}
