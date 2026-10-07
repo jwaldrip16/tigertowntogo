@@ -90,7 +90,7 @@
         return;
       }
       loadSound(name);
-      if (pattern === 'ping' || pattern === 'chat'){ beep(880, 0, 0.18, 0.25); return; }
+      if (pattern === 'ping' || pattern === 'chat' || pattern === 'sent'){ beep(880, 0, 0.18, 0.25); return; }
       if (pattern === 'call'){
         // phone style double ring, loud enough to hear across the room
         beep(988, 0.00, 0.22, 0.45); beep(784, 0.25, 0.22, 0.45);

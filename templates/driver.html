@@ -198,6 +198,7 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
 {% block scripts %}<script>
 // new order sound (the chime file), plays every 5 seconds until the order is accepted
 try { ffSound.setOrderSound('/static/sounds/new-order.mp3'); } catch(e) {}
+try { ffSound.setSound('sent', '/static/sounds/chat.mp3'); } catch(e) {}   // your message reached dispatch
 let LATE_BEEP_AT = 0, LATE_LOUD = false;
 function silenceAlert(){
   if (LATE_LOUD){ alert('This order is late. The chime stops once you accept it.'); return; }
@@ -743,7 +744,8 @@ async function chat(){
 }
 async function send(){
   const b=document.getElementById('chatBox'); if(!b.value.trim()) return;
-  await jpost('/api/chat/'+DID, {sender:'driver', body:b.value}); b.value='';
+  const res = await jpost('/api/chat/'+DID, {sender:'driver', body:b.value}); b.value='';
+  if (!res || res.ok !== false){ try { ffSound.play('sent'); } catch(e){} }   // sent to dispatch
   CHAT_SEEN = null; clearChatBadge(); chat(); state();
 }
 let LAST_FIX = null;

@@ -91,6 +91,7 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
 {% block scripts %}<script>
 // new order sound (the chime file), plays every 5 seconds until the order is accepted
 try { ffSound.setOrderSound('/static/sounds/new-order.mp3'); } catch(e) {}
+try { ffSound.setSound('sent', '/static/sounds/chat.mp3'); } catch(e) {}   // your message reached dispatch
 ffAwake.init('kitchen', {{ 'true' if awake_default != '0' else 'false' }});
 async function askCall(level){
   const code = document.getElementById('callCode').value.trim();
@@ -258,7 +259,7 @@ async function sendChat(){
   const box = document.getElementById('rchatBox');
   const body = box.value.trim(); if (!body) return;
   const res = await jpost('/api/restaurant/chat', {body: body});
-  if (res && res.ok){ box.value=''; loadChat(true); } else alert((res && res.error) || 'Message did not send.');
+  if (res && res.ok){ box.value=''; try { ffSound.play('sent'); } catch(e){} loadChat(true); } else alert((res && res.error) || 'Message did not send.');
 }
 function chatBadge(n){
   const b = document.getElementById('chatBadge');
