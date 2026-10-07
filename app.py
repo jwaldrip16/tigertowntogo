@@ -533,7 +533,8 @@ def init_db():
     ensure_column(con, "regions", "per_mile_cents", "INTEGER")    # blank = the business per-mile fee
     ensure_column(con, "regions", "tz", "TEXT")                   # blank = the app's time zone (APP_TZ)
     ensure_column(con, "regions", "faq_text", "TEXT")
-    ensure_column(con, "regions", "stats_with", "INTEGER DEFAULT 0")   # count this region's statistics with another region
+    ensure_column(con, "regions", "stats_with", "INTEGER DEFAULT 0")
+    ensure_column(con, "regions", "drive_with", "INTEGER DEFAULT 0")   # drivers treat this region and another as one area   # count this region's statistics with another region
     ensure_column(con, "regions", "auto_kitchen", "INTEGER DEFAULT 0")   # 1 = Send to kitchen happens on its own             # blank = the business FAQ
     ensure_column(con, "restaurants", "min_order_cents", "INTEGER")  # blank = use the region's
     ensure_column(con, "restaurants", "max_miles", "REAL")           # blank = use the region's
@@ -1581,9 +1582,12 @@ def driver_region_choices(did, dispatcher_id=None):
 
 def driver_locked_regions(did):
     """Regions a driver has live orders in. They stay in that region until it is delivered."""
-    return {o["region_id"] for o in db().execute(
-        """SELECT region_id FROM orders WHERE driver_id=? AND region_id IS NOT NULL AND region_id != 0
-           AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""", (did,)).fetchall()}
+    out = set()
+    for o in db().execute(
+            """SELECT region_id FROM orders WHERE driver_id=? AND region_id IS NOT NULL AND region_id != 0
+               AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""", (did,)).fetchall():
+        out |= drive_group(o["region_id"])   # a combined area counts as one region here
+    return out
 
 
 _ALL = object()
@@ -1850,6 +1854,42 @@ def covers(region_ids, order_region):
     return not region_ids or not order_region or order_region in region_ids
 
 
+def _drive_map():
+    """{region_id: lead region} for regions whose drivers are combined (Auburn + Downtown Auburn)."""
+    cache = g.get("_drive_map") if has_request_context() else None
+    if cache is not None:
+        return cache
+    try:
+        rows = db().execute("SELECT id, COALESCE(drive_with,0) dw FROM regions").fetchall()
+    except Exception:
+        rows = []
+    m = {r["id"]: (r["dw"] or r["id"]) for r in rows}
+    if has_request_context():
+        g._drive_map = m
+    return m
+
+
+def drive_group(rid):
+    """Every region a driver treats as the same area as this one (just itself when not combined)."""
+    try:
+        rid = int(rid or 0)
+    except (TypeError, ValueError):
+        return set()
+    if not rid:
+        return set()
+    m = _drive_map()
+    root = m.get(rid, rid)
+    return {x for x, r in m.items() if r == root} | {rid}
+
+
+def driver_covers(region_ids, order_region):
+    """covers() for drivers: regions combined for drivers count as one area. Restaurants and
+    pausing stay per region, so a combined region can still be paused on its own."""
+    if covers(region_ids, order_region):
+        return True
+    return bool(set(region_ids) & drive_group(order_region))
+
+
 def region_names(ids):
     if not ids:
         return "All regions"
@@ -1893,7 +1933,7 @@ def cross_region_driver(o, shift=None):
     for r in shift:
         if r["load"] == 0 or r["load"] >= (r["max_stack"] or 1):
             continue
-        if not covers(driver_work_regions(r["id"]), rg):
+        if not driver_covers(driver_work_regions(r["id"]), rg):
             continue
         held = {(x["region_id"] or 0) for x in db().execute(
             """SELECT region_id FROM orders WHERE driver_id=?
@@ -1913,7 +1953,7 @@ def region_conflict(did, order_region, exclude_id=None):
                              AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
                           (did, exclude_id or 0)).fetchall():
         rg = x["region_id"] or 0
-        if rg and rg != order_region:
+        if rg and rg != order_region and rg not in drive_group(order_region):
             names = {r["id"]: r["name"] for r in all_regions()}
             d = db().execute("SELECT name FROM drivers WHERE id=?", (did,)).fetchone()
             def an(w):
@@ -1950,11 +1990,11 @@ def region_queues(region_ids=None, detail=True):
                   (x["name"] + (" (locked to " + x["locked_to"] + " until delivered)" if x.get("locked_to") else " (at stack limit)"))
                   for x in lineups[rid]["line"]]
         elif rid:
-            on = [d["name"] for d in shift if covers(driver_work_regions(d["id"]), rid)]
+            on = [d["name"] for d in shift if driver_covers(driver_work_regions(d["id"]), rid)]
         else:
             on = [d["name"] for d in shift]
         choices = [{"id": d["id"], "name": d["name"]} for d in shift
-                   if not rid or covers(driver_work_regions(d["id"]), rid)]
+                   if not rid or driver_covers(driver_work_regions(d["id"]), rid)]
         pi = pinfo.get(rid)
         q = {"id": rid, "name": name, "waiting": len(mine),
              "paused": bool(pi and pi["paused"]), "paused_by": (pi["paused_by"] if pi and pi["paused"] else "") or "",
@@ -2007,7 +2047,7 @@ def region_lineups():
     locks = {r["id"]: driver_locked_regions(r["id"]) for r in rows}
     out = {}
     for rg in regs:
-        members = [r for r in rows if covers(driver_work_regions(r["id"]), rg["id"])]
+        members = [r for r in rows if driver_covers(driver_work_regions(r["id"]), rg["id"])]
         n, line = 0, []
         for r in members:
             lk = locks.get(r["id"]) or set()
@@ -2027,9 +2067,24 @@ def region_lineups():
 
 
 def driver_region_lines(lineups, did):
-    """[{region_id, region, pos}] for one driver; pos None = holding their stack limit there."""
-    return [{"region_id": rid, "region": v["name"], "pos": x["pos"], "locked_to": x.get("locked_to") or ""}
-            for rid, v in lineups.items() for x in v["line"] if x["id"] == did]
+    """[{region_id, region, pos}] for one driver; pos None = holding their stack limit there.
+    Regions combined for drivers show once, as 'Auburn + Downtown Auburn'."""
+    out, seen = [], set()
+    for rid, v in lineups.items():
+        for x in v["line"]:
+            if x["id"] != did:
+                continue
+            grp = drive_group(rid)
+            key = min(grp) if len(grp) > 1 else rid
+            if key in seen:
+                continue
+            seen.add(key)
+            name = v["name"]
+            if len(grp) > 1:
+                names = [lineups[k]["name"] for k in lineups if k in grp]
+                name = " + ".join(names) or name
+            out.append({"region_id": rid, "region": name, "pos": x["pos"], "locked_to": x.get("locked_to") or ""})
+    return out
 
 
 def recompute_queue():
@@ -2052,7 +2107,7 @@ def recompute_queue():
     paused = paused_region_ids()
     rnames = {r["id"]: r["name"] for r in all_regions()}
     for i, o in enumerate(waiting):
-        fit = next((fd for fd in pool if covers(driver_work_regions(fd["id"]), o["region_id"])), None)
+        fit = next((fd for fd in pool if driver_covers(driver_work_regions(fd["id"]), o["region_id"])), None)
         if o["address_ok"] == 0:
             status, reason = "held", "address needs dispatch approval"
         elif o["region_id"] and o["region_id"] in paused:
@@ -2067,7 +2122,7 @@ def recompute_queue():
         elif fit is None:
             status, reason = "held", short
             if len(shift) >= 2 and o["region_id"] and not any(
-                    covers(driver_work_regions(sd["id"]), o["region_id"]) for sd in shift):
+                    driver_covers(driver_work_regions(sd["id"]), o["region_id"]) for sd in shift):
                 status, reason = "held", "no driver in this region on shift, dispatcher to assign"
         else:
             pool.remove(fit)
@@ -2191,7 +2246,7 @@ def stack_match(cand, shift):
         load = r["load"] or 0
         if load == 0 or load >= (r["max_stack"] or 3):
             continue
-        if not covers(driver_work_regions(r["id"]), cand["region_id"]) or region_conflict(r["id"], cand["region_id"]):
+        if not driver_covers(driver_work_regions(r["id"]), cand["region_id"]) or region_conflict(r["id"], cand["region_id"]):
             continue
         live = db().execute("SELECT * FROM orders WHERE driver_id=? AND dispatch_status NOT IN ('delivered','cancelled')",
                             (r["id"],)).fetchall()
@@ -2262,7 +2317,7 @@ def short_staff_alert():
             need[o["region_id"]] = need.get(o["region_id"], 0) + 1
         short = {}
         for reg, n in need.items():
-            have = sum(1 for d in free if covers(driver_work_regions(d["id"]), reg))
+            have = sum(1 for d in free if driver_covers(driver_work_regions(d["id"]), reg))
             if n > have:
                 short[reg] = n
         if not short:
@@ -2274,7 +2329,7 @@ def short_staff_alert():
                               AND (short_alert_at IS NULL OR short_alert_at < ?)""", (cut,)).fetchall()
         for d in rows:
             mine = driver_region_ids(d["id"])
-            regs = [r for r in short if covers(mine, r)]
+            regs = [r for r in short if driver_covers(mine, r)]
             if not regs:
                 continue
             n = sum(short[r] for r in regs)
@@ -2330,7 +2385,7 @@ def auto_assign():
                 pick = (cand, m[0], m[1])
                 break
             for fd in free:
-                if covers(driver_work_regions(fd["id"]), cand["region_id"]) and not region_conflict(fd["id"], cand["region_id"]):
+                if driver_covers(driver_work_regions(fd["id"]), cand["region_id"]) and not region_conflict(fd["id"], cand["region_id"]):
                     pick = (cand, fd, None)
                     break
             if pick:
@@ -2382,7 +2437,7 @@ def rebalance_stacks():
             if cand["id"] in moved:
                 continue
             for fd in free:
-                if (fd["id"] != cand["driver_id"] and covers(driver_work_regions(fd["id"]), cand["region_id"])
+                if (fd["id"] != cand["driver_id"] and driver_covers(driver_work_regions(fd["id"]), cand["region_id"])
                         and not region_conflict(fd["id"], cand["region_id"])):
                     pick = (cand, fd)
                     break
@@ -8762,6 +8817,7 @@ def regions_payload():
                          "tz": (_rv(_region(r["id"]), "tz") or ""), "tz_now": clock(now(), r["id"]) if region_tz(r["id"]) != APP_TZ else clock(now()),
                          "faq_text": _rv(_region(r["id"]), "faq_text") or "",
                          "stats_with": int(_rv(_region(r["id"]), "stats_with") or 0),
+                         "drive_with": int(_rv(_region(r["id"]), "drive_with") or 0),
                          "phone": nice_phone((_region(r["id"])["phone"] or "")) if (_region(r["id"])["phone"] or "") else "",
                          "business_phone": nice_phone(dispatch_phone()),
                          "hours_label": business_hours_label(r["id"]) or "no hours limit",
@@ -9125,6 +9181,7 @@ def api_regions_edit():
         con.execute("DELETE FROM driver_regions WHERE region_id=?", (rid,))
         con.execute("DELETE FROM dispatcher_regions WHERE region_id=?", (rid,))
         con.execute("UPDATE regions SET stats_with=0 WHERE stats_with=?", (rid,))
+        con.execute("UPDATE regions SET drive_with=0 WHERE drive_with=?", (rid,))
         con.execute("DELETE FROM regions WHERE id=?", (rid,))
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('regions_seeded','1')")
         log("region", who + " deleted region " + nm)
@@ -9140,6 +9197,25 @@ def api_regions_edit():
         con.execute("""UPDATE orders SET region_id=? WHERE restaurant_id=? AND COALESCE(pickup_address,'')=''
                        AND dispatch_status NOT IN ('delivered','cancelled')""", (rid, r["id"]))
         log("region", who + " put " + r["name"] + " in " + region_names({rid} if rid else set()).replace("All regions", "no region"))
+    elif op == "drive_with":
+        rid = int(b.get("id") or 0)
+        tgt = int(b.get("with") or 0)
+        if rid not in valid or (tgt and tgt not in valid):
+            return jsonify({"ok": False, "error": "That region is gone."}), 404
+        if tgt == rid:
+            tgt = 0
+        if tgt:
+            row = con.execute("SELECT COALESCE(drive_with,0) dw FROM regions WHERE id=?", (tgt,)).fetchone()
+            tgt = (row["dw"] if row and row["dw"] else tgt)   # join the area that region is already in
+            if tgt == rid:
+                return jsonify({"ok": False, "error": "That region already shares drivers with this one."}), 400
+        con.execute("UPDATE regions SET drive_with=? WHERE id=?", (tgt, rid))
+        if tgt:   # anything sharing drivers with this region now shares with the new lead too
+            con.execute("UPDATE regions SET drive_with=? WHERE drive_with=?", (tgt, rid))
+        g.pop("_drive_map", None)
+        nm = con.execute("SELECT name FROM regions WHERE id=?", (rid,)).fetchone()["name"]
+        tn = con.execute("SELECT name FROM regions WHERE id=?", (tgt,)).fetchone()["name"] if tgt else ""
+        log("region", who + (" combined %s drivers with %s" % (nm, tn) if tgt else " gave %s its own drivers" % nm))
     elif op == "stats_with":
         if not is_owner():
             return jsonify({"ok": False, "error": "Only an owner can combine region statistics."}), 403
@@ -10818,7 +10894,7 @@ def api_driver_state():
     lineups = region_lineups()
     dr = driver_work_regions(did)
     waiting = len([1 for o in db().execute("""SELECT region_id FROM orders
-                              WHERE dispatch_status IN ('queued','held')""").fetchall() if covers(dr, o["region_id"])])
+                              WHERE dispatch_status IN ('queued','held')""").fetchall() if driver_covers(dr, o["region_id"])])
     mine = db().execute("""SELECT * FROM orders WHERE driver_id=? AND dispatch_status IN
                            ('assigned','received','at_restaurant','enroute')
                            ORDER BY stack_seq ASC""", (did,)).fetchall()
@@ -14205,7 +14281,7 @@ def staff_alerts():
         opened = setting("business_opened_at", str) or ""
         for rid, rname in areas:
             mine = [o for o in waiting if not rid or (o["region_id"] or 0) in (rid, 0)]
-            on = [d for d in shift if covers(work.get(d["id"]), rid)]
+            on = [d for d in shift if driver_covers(work.get(d["id"]), rid)]
             free = [d for d in on if d["load"] == 0]
             if sa_get("sa_nodrv"):
                 cut = (nowdt - dt.timedelta(minutes=sa_get("sa_nodrv_min"))).isoformat(timespec="seconds")

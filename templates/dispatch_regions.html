@@ -283,6 +283,7 @@ function draw(){
     '<div class="muted small">Delivery fee: '+feeLabel(r.fees)+(r.fees && r.fees.from==='region' ? '' : ' (business fee)')+'</div>'+
     '<div class="muted small">FAQ: '+(r.faq_text ? 'its own ('+faqCount(r.faq_text)+' questions)' : 'business FAQ')+'</div>'+
     '<div class="muted small">Time zone: '+tzSelect(r)+' <span id="tzNow'+r.id+'">now '+e(r.tz_now||'')+'</span></div>'+
+    '<div class="muted small">Drivers: '+driveSelect(r)+'</div>'+
     '<div class="muted small">Statistics: '+statsSelect(r)+'</div></span>'+
     '<span><button class="btn tiny" onclick="hoursRegion('+r.id+')">Hours &amp; closed days</button>'+
     '<button class="btn tiny" onclick="phoneRegion('+r.id+')">Dispatch number</button>'+
@@ -312,6 +313,14 @@ function statsSelect(r){
     '<option value="0">Counted on its own</option>'+others.map(x=>'<option value="'+x.id+'" '+(x.id===r.stats_with?'selected':'')+'>Count with '+e(x.name)+'</option>').join('')+'</select>';
 }
 async function statsWith(id, w){ send({op:'stats_with', id:id, with:+w}); }
+function driveSelect(r){
+  // Combined regions share one driver line (a driver on an order in one can take the other),
+  // while restaurants, hours and Pause stay per region.
+  const others = RG.regions.filter(x=>x.id!==r.id && !x.drive_with);
+  return '<select onchange="driveWith('+r.id+',this.value)" title="Drivers treat combined regions as one area. Restaurants and Pause stay separate.">'+
+    '<option value="0">Own driver line</option>'+others.map(x=>'<option value="'+x.id+'" '+(x.id===r.drive_with?'selected':'')+'>Share drivers with '+e(x.name)+'</option>').join('')+'</select>';
+}
+async function driveWith(id, w){ send({op:'drive_with', id:id, with:+w}); }
 function tzSelect(r){
   const cur = r.tz || RG.app_tz;
   return '<select onchange="tzRegion('+r.id+',this.value)">'+(RG.tz_choices||[]).map(z=>
