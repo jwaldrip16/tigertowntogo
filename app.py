@@ -530,6 +530,7 @@ def init_db():
     ensure_column(con, "regions", "per_mile_cents", "INTEGER")    # blank = the business per-mile fee
     ensure_column(con, "regions", "tz", "TEXT")                   # blank = the app's time zone (APP_TZ)
     ensure_column(con, "regions", "faq_text", "TEXT")
+    ensure_column(con, "regions", "stats_with", "INTEGER DEFAULT 0")   # count this region's statistics with another region
     ensure_column(con, "regions", "auto_kitchen", "INTEGER DEFAULT 0")   # 1 = Send to kitchen happens on its own             # blank = the business FAQ
     ensure_column(con, "restaurants", "min_order_cents", "INTEGER")  # blank = use the region's
     ensure_column(con, "restaurants", "max_miles", "REAL")           # blank = use the region's
@@ -8682,6 +8683,7 @@ def regions_payload():
                          "fees": fee_rules(r["id"]),
                          "tz": (_rv(_region(r["id"]), "tz") or ""), "tz_now": clock(now(), r["id"]) if region_tz(r["id"]) != APP_TZ else clock(now()),
                          "faq_text": _rv(_region(r["id"]), "faq_text") or "",
+                         "stats_with": int(_rv(_region(r["id"]), "stats_with") or 0),
                          "phone": nice_phone((_region(r["id"])["phone"] or "")) if (_region(r["id"])["phone"] or "") else "",
                          "business_phone": nice_phone(dispatch_phone()),
                          "hours_label": business_hours_label(r["id"]) or "no hours limit",
@@ -9044,6 +9046,7 @@ def api_regions_edit():
         con.execute("UPDATE orders SET region_id=0 WHERE region_id=?", (rid,))
         con.execute("DELETE FROM driver_regions WHERE region_id=?", (rid,))
         con.execute("DELETE FROM dispatcher_regions WHERE region_id=?", (rid,))
+        con.execute("UPDATE regions SET stats_with=0 WHERE stats_with=?", (rid,))
         con.execute("DELETE FROM regions WHERE id=?", (rid,))
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('regions_seeded','1')")
         log("region", who + " deleted region " + nm)
@@ -9059,6 +9062,26 @@ def api_regions_edit():
         con.execute("""UPDATE orders SET region_id=? WHERE restaurant_id=? AND COALESCE(pickup_address,'')=''
                        AND dispatch_status NOT IN ('delivered','cancelled')""", (rid, r["id"]))
         log("region", who + " put " + r["name"] + " in " + region_names({rid} if rid else set()).replace("All regions", "no region"))
+    elif op == "stats_with":
+        if not is_owner():
+            return jsonify({"ok": False, "error": "Only an owner can combine region statistics."}), 403
+        rid = int(b.get("id") or 0)
+        tgt = int(b.get("with") or 0)
+        if rid not in valid or (tgt and tgt not in valid):
+            return jsonify({"ok": False, "error": "That region is gone."}), 404
+        if tgt == rid:
+            tgt = 0
+        if tgt:
+            tgt = stats_root(tgt)
+            if tgt == rid:   # picking one of my own members: make it count with me instead
+                return jsonify({"ok": False, "error": "That region already counts its statistics with this one."}), 400
+        con.execute("UPDATE regions SET stats_with=? WHERE id=?", (tgt, rid))
+        if tgt:   # anything counted with this region now counts with the new one too
+            con.execute("UPDATE regions SET stats_with=? WHERE stats_with=?", (tgt, rid))
+        _shift_cache.clear()
+        nm = con.execute("SELECT name FROM regions WHERE id=?", (rid,)).fetchone()["name"]
+        tn = con.execute("SELECT name FROM regions WHERE id=?", (tgt,)).fetchone()["name"] if tgt else ""
+        log("region", who + (" counts %s statistics with %s" % (nm, tn) if tgt else " counts %s statistics on its own" % nm))
     elif op == "set_self":
         me = session.get("dispatcher_id")
         if not me:
@@ -14305,7 +14328,9 @@ def _shift_slot(t):
 def shift_stats(rid, weeks=8):
     """Best shifts for one region (rid 0 = every order). Cached 10 minutes."""
     weeks = max(2, min(26, int(weeks or 8)))
-    ck = (int(rid or 0), weeks)
+    rid = stats_root(rid)
+    grp = stats_group(rid)
+    ck = (int(rid or 0), weeks, tuple(sorted(grp)))
     hit = _shift_cache.get(ck)
     if hit and time.time() - hit[0] < 600:
         return hit[1]
@@ -14319,7 +14344,8 @@ def shift_stats(rid, weeks=8):
            WHERE dispatch_status='delivered' AND created_at>=?"""
     args = [start]
     if rid:
-        q += " AND region_id=?"; args.append(rid)
+        ph, gi = _in_ids(grp)
+        q += " AND region_id IN " + ph; args += gi
     orders = con.execute(q, args).fetchall()
     paid = {}
     if orders:
@@ -14342,7 +14368,8 @@ def shift_stats(rid, weeks=8):
     who = None
     if rid:
         allr = {r["driver_id"] for r in con.execute("SELECT DISTINCT driver_id FROM driver_regions").fetchall()}
-        mine = {r["driver_id"] for r in con.execute("SELECT driver_id FROM driver_regions WHERE region_id=?", (rid,)).fetchall()}
+        ph, gi = _in_ids(grp)
+        mine = {r["driver_id"] for r in con.execute("SELECT driver_id FROM driver_regions WHERE region_id IN " + ph, gi).fetchall()}
         who = lambda did: did in mine or did not in allr
     for a in con.execute("""SELECT person_id, started_at, COALESCE(ended_at, last_beat) e FROM active_time
                             WHERE kind='driver' AND state='online' AND COALESCE(ended_at, last_beat)>=?""", (start,)).fetchall():
@@ -14394,6 +14421,59 @@ def _region_rows():
     rows = db().execute("SELECT id, name FROM regions ORDER BY sort, name").fetchall()
     return [(r["id"], r["name"]) for r in rows] or [(0, "All areas")]
 
+def _stats_map():
+    """Regions in order, and the region each one's statistics are counted under."""
+    rows = db().execute("SELECT id, name, COALESCE(stats_with,0) sw FROM regions ORDER BY sort, name").fetchall()
+    par = {r["id"]: int(r["sw"] or 0) for r in rows}
+    root = {}
+    for r in rows:
+        cur, seen = r["id"], set()
+        while True:
+            seen.add(cur)
+            nxt = par.get(cur, 0)
+            if not nxt or nxt not in par or nxt in seen:
+                break
+            cur = nxt
+        root[r["id"]] = cur
+    return rows, root
+
+def stats_root(rid):
+    try:
+        rid = int(rid or 0)
+    except (TypeError, ValueError):
+        return 0
+    if not rid:
+        return 0
+    return _stats_map()[1].get(rid, rid)
+
+def stats_group(rid):
+    """Every region counted together with rid for statistics (Best shifts, Drivers needed)."""
+    try:
+        rid = int(rid or 0)
+    except (TypeError, ValueError):
+        return set()
+    if not rid:
+        return set()
+    root = _stats_map()[1]
+    rt = root.get(rid, rid)
+    return {i for i, x in root.items() if x == rt} or {rid}
+
+def stats_region_rows():
+    """Region picks for the statistics pages: combined regions show once, as 'Auburn + Downtown Auburn'."""
+    rows, root = _stats_map()
+    names = {r["id"]: r["name"] for r in rows}
+    out = []
+    for r in rows:
+        if root[r["id"]] != r["id"]:
+            continue
+        others = [names[i] for i in names if root[i] == r["id"] and i != r["id"]]
+        out.append((r["id"], " + ".join([r["name"]] + others)))
+    return out or [(0, "All areas")]
+
+def _in_ids(ids):
+    ids = sorted(int(i) for i in ids)
+    return "(" + ",".join("?" * len(ids)) + ")", ids
+
 def staff_rate():
     """Orders one driver can handle in an hour (setting sched_orders_per_hr, default 2)."""
     try:
@@ -14416,6 +14496,8 @@ def staffing_plan(rid, ws, weeks=8):
     """Drivers each shift should have in a region (from past orders) against who is
     scheduled for the week starting ws."""
     weeks = max(2, min(26, int(weeks or 8)))
+    rid = stats_root(rid)
+    grp = stats_group(rid)
     rate = staff_rate()
     con = db()
     nowdt = dt.datetime.now().replace(microsecond=0)
@@ -14423,7 +14505,8 @@ def staffing_plan(rid, ws, weeks=8):
     q = "SELECT created_at, region_id FROM orders WHERE dispatch_status='delivered' AND created_at>=?"
     args = [start]
     if rid:
-        q += " AND region_id=?"; args.append(rid)
+        ph, gi = _in_ids(grp)
+        q += " AND region_id IN " + ph; args += gi
     hourly = {}
     for o in con.execute(q, args).fetchall():
         try:
@@ -14440,7 +14523,11 @@ def staffing_plan(rid, ws, weeks=8):
         if d["a"]:
             names[d["id"]] = d["name"]
     allr = {r["driver_id"] for r in con.execute("SELECT DISTINCT driver_id FROM driver_regions").fetchall()}
-    mine = {r["driver_id"] for r in con.execute("SELECT driver_id FROM driver_regions WHERE region_id=?", (rid,)).fetchall()} if rid else set()
+    if rid:
+        ph, gi = _in_ids(grp)
+        mine = {r["driver_id"] for r in con.execute("SELECT driver_id FROM driver_regions WHERE region_id IN " + ph, gi).fetchall()}
+    else:
+        mine = set()
     cover, pend = {}, {}
     for r in con.execute("""SELECT * FROM availability WHERE week_start=?
                             AND COALESCE(status,'approved') IN ('approved','pending')""", (ws.isoformat(),)).fetchall():
@@ -14450,7 +14537,7 @@ def staffing_plan(rid, ws, weeks=8):
         if rid:
             sr = slot_regions(r)
             if sr:
-                if rid not in sr:
+                if not (set(sr) & grp):
                     continue
             elif not (did in mine or did not in allr):
                 continue
@@ -14526,15 +14613,16 @@ def staffing_plan(rid, ws, weeks=8):
 def api_dispatch_staffing():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
-    regs = _region_rows()
+    regs = stats_region_rows()
     scope = dispatcher_driver_scope()
     if scope is not None:
-        regs = [r for r in regs if r[0] in scope] or regs
+        regs = [r for r in regs if stats_group(r[0]) & set(scope)] or regs
     try:
         rid = int(request.args.get("region") or regs[0][0])
         weeks = int(request.args.get("weeks") or 8)
     except ValueError:
         rid, weeks = regs[0][0], 8
+    rid = stats_root(rid) or rid
     if rid not in dict(regs):
         rid = regs[0][0]
     ws = parse_week(request.args.get("week"))
@@ -14547,12 +14635,13 @@ def api_dispatch_staffing():
 def dispatch_shift_stats():
     if not dispatcher_required():
         return redirect(url_for("dispatch_login"))
-    regs = _region_rows()
+    regs = stats_region_rows()
     try:
         rid = int(request.args.get("region") or regs[0][0])
         weeks = int(request.args.get("weeks") or 8)
     except ValueError:
         rid, weeks = regs[0][0], 8
+    rid = stats_root(rid) or rid
     rname = dict(regs).get(rid, "All areas")
     st = shift_stats(rid, weeks)
     return render_template("dispatch_shift_stats.html", regs=regs, rid=rid, rname=rname, st=st,
@@ -14569,14 +14658,16 @@ def dispatch_shift_stats_send():
         weeks = int(request.form.get("weeks") or 8)
     except ValueError:
         rid, weeks = 0, 8
-    rname = dict(_region_rows()).get(rid, "All areas")
+    rid = stats_root(rid) or rid
+    grp = stats_group(rid)
+    rname = dict(stats_region_rows()).get(rid, "All areas")
     body = shift_summary(shift_stats(rid, weeks), rname)
     if not body:
         return redirect(url_for("dispatch_shift_stats", region=rid, weeks=weeks, sent="none"))
     allr = {r["driver_id"] for r in db().execute("SELECT DISTINCT driver_id FROM driver_regions").fetchall()}
     n = 0
     for d in db().execute("SELECT * FROM drivers WHERE COALESCE(active,1)=1").fetchall():
-        if rid and d["id"] in allr and rid not in driver_region_ids(d["id"]):
+        if rid and d["id"] in allr and not (set(driver_region_ids(d["id"])) & grp):
             continue
         db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)", (d["id"], "system", body, now()))
         if request.form.get("text"):
@@ -14595,8 +14686,8 @@ def api_driver_shift_stats():
         return jsonify({"ok": False}), 403
     mine = driver_region_ids(did)
     out = []
-    for rid, rname in _region_rows():
-        if rid and mine and rid not in mine:
+    for rid, rname in stats_region_rows():
+        if rid and mine and not (stats_group(rid) & set(mine)):
             continue
         st = shift_stats(rid, 8)
         out.append({"region": rname, "best": st["best"][:5], "worst": st["worst"], "orders": st["orders"], "weeks": st["weeks"]})
