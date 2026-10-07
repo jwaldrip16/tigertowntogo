@@ -2,7 +2,7 @@ import type { CapacitorConfig } from '@capacitor/cli';
 
 // The app opens your live site. Set SITE_URL when building, for example
 // SITE_URL=https://your-app.up.railway.app npx cap sync
-const site = (process.env.SITE_URL || 'https://YOUR-SITE.up.railway.app').replace(/\/$/, '');
+const site = (process.env.SITE_URL || 'https://tigertowntogo.up.railway.app').replace(/\/$/, '');
 
 const config: CapacitorConfig = {
   appId: 'com.fleetfootdelivery.kitchen',

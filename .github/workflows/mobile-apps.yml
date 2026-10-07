@@ -4,8 +4,9 @@ on:
   workflow_dispatch:
     inputs:
       site_url:
-        description: "Your live site address, like https://your-app.up.railway.app"
-        required: true
+        description: "Your live site address"
+        required: false
+        default: "https://tigertowntogo.up.railway.app"
 
 jobs:
   android:
