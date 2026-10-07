@@ -7,11 +7,12 @@
 {% if brand_css %}<style>{{ brand_css|safe }}</style>{% endif %}
 {% set _sb = staff_brand if (staff_brand and portal != 'dispatch' and not request.path.startswith('/dispatch')) else None %}
 {% set tab_logo = _sb.logo if _sb else ('/static/brand/logo-default.png' if (portal or staff_area or request.path.startswith('/dispatch')) else logo_url) %}
-<link rel="icon" type="image/png" sizes="64x64" href="/brand/tab-64.png?src={{ tab_logo|urlencode }}">
+{% set _tab_q = ('src=' ~ (all_logos|map('urlencode')|join('&src='))) if (all_logos and not _sb and not portal and not staff_area) else ('src=' ~ (tab_logo|urlencode)) %}
+<link rel="icon" type="image/png" sizes="64x64" href="/brand/tab-64.png?{{ _tab_q }}">
 {% if request.path.startswith('/dispatch') or request.path.startswith('/driver') or request.path.startswith('/restaurant') or request.path.startswith('/reset/') %}
 <link rel="apple-touch-icon" href="/static/icons/{{ 'driver' if request.path.startswith('/driver') else 'kitchen' }}-192.png">
 {% else %}
-<link rel="apple-touch-icon" href="/brand/tab-180.png?src={{ tab_logo|urlencode }}">
+<link rel="apple-touch-icon" href="/brand/tab-180.png?{{ _tab_q }}">
 {% endif %}
 <script>
 async function jpost(url, data){
@@ -39,7 +40,7 @@ function money(c){ return '$' + (c/100).toFixed(2); }
 {% set staff_area = request.path.startswith('/dispatch') or request.path.startswith('/driver') or request.path.startswith('/restaurant') %}
 <body class="{% if not portal and not staff_area %}cust {% endif %}{% block bodyclass %}{% endblock %}">
 <header class="topbar">
-  <a class="brand" href="{% if portal == 'dispatch' %}/dispatch{% elif portal == 'driver' %}/driver{% elif portal == 'kitchen' %}/restaurant{% elif staff_area %}{{ request.path }}{% else %}/{% endif %}">{% set sb = staff_brand if (staff_brand and portal != 'dispatch' and not request.path.startswith('/dispatch')) else None %}{% set sb_kind = ' Driver' if (portal == 'driver' or request.path.startswith('/driver')) else ' Restaurant' %}<img class="brandlogo" src="{{ sb.logo if sb else ('/static/brand/logo-default.png' if (portal or staff_area) else logo_url) }}" alt="">{% if sb %}{{ sb.name }}{{ sb_kind }}{% elif portal == 'dispatch' or request.path.startswith('/dispatch') %}Fleet Foot Delivery Dispatch{% elif portal == 'driver' or request.path.startswith('/driver') %}Fleet Foot Driver{% elif portal == 'kitchen' or request.path.startswith('/restaurant') %}Fleet Foot Restaurant{% else %}{{ biz_name }}{% endif %}</a>
+  <a class="brand" href="{% if portal == 'dispatch' %}/dispatch{% elif portal == 'driver' %}/driver{% elif portal == 'kitchen' %}/restaurant{% elif staff_area %}{{ request.path }}{% else %}/{% endif %}">{% set sb = staff_brand if (staff_brand and portal != 'dispatch' and not request.path.startswith('/dispatch')) else None %}{% set sb_kind = ' Driver' if (portal == 'driver' or request.path.startswith('/driver')) else ' Restaurant' %}{% if all_logos and not sb and not portal and not staff_area %}<span class="alllogos">{% for lg in all_logos %}<img class="brandlogo" src="{{ lg }}" alt="">{% endfor %}</span>{% else %}<img class="brandlogo" src="{{ sb.logo if sb else ('/static/brand/logo-default.png' if (portal or staff_area) else logo_url) }}" alt="">{% if sb %}{{ sb.name }}{{ sb_kind }}{% elif portal == 'dispatch' or request.path.startswith('/dispatch') %}Fleet Foot Delivery Dispatch{% elif portal == 'driver' or request.path.startswith('/driver') %}Fleet Foot Driver{% elif portal == 'kitchen' or request.path.startswith('/restaurant') %}Fleet Foot Restaurant{% else %}{{ biz_name }}{% endif %}{% endif %}</a>
   <nav>
     {% if portal == 'dispatch' %}
       <a href="/dispatch">Board</a>

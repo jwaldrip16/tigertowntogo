@@ -12043,12 +12043,44 @@ def _tab_logo_file(src):
     return ""
 
 
+def _tab_icon_many(files, size):
+    """Several brand logos in one square icon: two on top and one centered below (or a 2x2)."""
+    from PIL import Image
+    import io
+    canvas = Image.new("RGBA", (size, size), (255, 255, 255, 0))
+    half = size // 2
+    cells = [(0, 0), (half, 0), (half // 2, half)] if len(files) == 3 else \
+            [(0, 0), (half, 0), (0, half), (half, half)][:len(files)]
+    if len(files) == 2:
+        cells = [(0, half // 2), (half, half // 2)]
+    for f, (x, y) in zip(files, cells):
+        im = Image.open(f).convert("RGBA")
+        bb = im.getbbox()
+        if bb:
+            im = im.crop(bb)
+        box = int(half * 0.96)
+        k = box / max(im.size)
+        im = im.resize((max(1, int(im.width * k)), max(1, int(im.height * k))), Image.LANCZOS)
+        canvas.paste(im, (x + (half - im.width) // 2, y + (half - im.height) // 2), im)
+    out = io.BytesIO()
+    canvas.save(out, "PNG")
+    resp = app.response_class(out.getvalue(), mimetype="image/png")
+    resp.headers["Cache-Control"] = "public, max-age=3600"
+    return resp
+
+
 @app.get("/brand/tab-<int:size>.png")
 def brand_tab_icon(size):
     """Browser-tab icon made from the logo the page itself shows (?src=), so each brand's
     tab carries that brand's logo. The address differs per logo, so tabs never mix them up."""
     size = size if size in (32, 64, 180) else 64
-    f = _tab_logo_file(request.args.get("src")) or os.path.join(APP_DIR_STATIC, "brand", "logo-default.png")
+    files = [x for x in (_tab_logo_file(v) for v in request.args.getlist("src")[:4]) if x]
+    if len(files) > 1:
+        try:
+            return _tab_icon_many(files, size)
+        except Exception:
+            pass
+    f = files[0] if files else os.path.join(APP_DIR_STATIC, "brand", "logo-default.png")
     try:
         from PIL import Image
         import io
@@ -12641,6 +12673,25 @@ def remember_staff_brand():
                 session.pop("staff_brand", None)
     except Exception:
         pass
+
+
+@app.context_processor
+def inject_all_brand_logos():
+    """On the shared customer website with no brand picked (All brands), every brand's logo,
+    so the header and the browser tab show all of them together."""
+    try:
+        if request.path.startswith(_STAFF_PREFIXES) or request.path.startswith(("/go/", "/reset/")):
+            return {"all_logos": []}
+        if not brands_on() or current_site() is not None:
+            return {"all_logos": []}
+        logos = []
+        for srow in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
+            lg = brand_logo(srow)
+            if lg and lg not in logos:
+                logos.append(lg)
+        return {"all_logos": logos if len(logos) > 1 else []}
+    except Exception:
+        return {"all_logos": []}
 
 
 @app.context_processor

@@ -646,3 +646,6 @@ section.hero{max-height:none;overflow:visible}
 .hero .herobrands{margin:16px auto 0;max-width:720px}
 .hero .herobrands .brandlabel{color:#fff;font-weight:600;font-size:14px;text-shadow:0 1px 3px rgba(0,0,0,.5)}
 .hero .herobrands .brandbtn{background:rgba(255,255,255,.95)}
+
+.alllogos{display:inline-flex;align-items:center;gap:14px;flex-wrap:wrap;justify-content:center}
+.alllogos .brandlogo{height:38px;width:auto}
