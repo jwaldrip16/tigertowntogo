@@ -39,7 +39,7 @@
       <button class="btn primary" onclick="addDriver()">Add driver</button>
       <p class="muted" id="dMsg"></p>
     </div>
-    <div id="drivers"></div>
+    <div id="drivers"><p class="muted small">Loading drivers...</p></div>
   </section>
 </div>
 {% endblock %}
@@ -69,16 +69,26 @@ async function open24(id){ await jpost('/api/restaurant/open24', {restaurant_id:
 async function pauseRest(id){ await jpost('/api/dispatch/pause-restaurant', {restaurant_id:id}); loadStatus(); }
 loadStatus(); setInterval(function(){ loadStatus().catch(function(){}); }, 15000);
 
-async function load(){
-  let res;
-  try { res = await jget('/api/dispatch/catalog'); }
-  catch(e){ document.getElementById('drivers').innerHTML = '<p class="muted">Could not load drivers. Refresh the page.</p>'; return; }
-  if(!res.ok){ window.location='/dispatch/login'; return; }
+// Drivers load on their own (no menus), so the list shows right away.
+function showDrivers(res){
   BRANCH_ACCTS = res.branch_accounts || [];
   try { drawDrivers(res); }
   catch(e){ console.error('drivers list', e); document.getElementById('drivers').innerHTML = '<p class="muted">The driver list hit a problem: '+esc(e.message)+'</p>'; }
+}
+async function loadDrivers(){
+  let res;
+  try { res = await jget('/api/dispatch/drivers-manage'); }
+  catch(e){ document.getElementById('drivers').innerHTML = '<p class="muted">Could not load drivers. Refresh the page.</p>'; return; }
+  if(!res.ok){ window.location='/dispatch/login'; return; }
+  showDrivers(res);
+}
+async function loadRests(){
+  let res;
+  try { res = await jget('/api/dispatch/catalog'); } catch(e){ return; }
+  if(!res.ok) return;
   try { drawRests(res); } catch(e){ console.error('restaurant list', e); }
 }
+function load(){ loadDrivers(); loadRests(); }
 function drawRests(res){
   document.getElementById('rests').innerHTML = (res.restaurants||[]).map(r=>{
     r.items = r.items || [];
@@ -192,10 +202,10 @@ function unlockDriver(id){
     const r = await jpost('/api/dispatch/driver-unlock', {driver_id:id,
       username: document.getElementById('ulUser').value, password: document.getElementById('ulPw').value});
     if (!r.ok){ document.getElementById('ulMsg').textContent = r.error || 'Could not unlock.'; document.getElementById('ulPw').value=''; return; }
-    m.remove(); load();
+    m.remove(); loadDrivers();
   };
 }
-async function lockDriver(id){ await jpost('/api/dispatch/driver-unlock', {driver_id:id, op:'lock'}); load(); }
+async function lockDriver(id){ await jpost('/api/dispatch/driver-unlock', {driver_id:id, op:'lock'}); loadDrivers(); }
 
 async function addRest(){
   const res = await jpost('/api/dispatch/restaurant', {op:'create',
@@ -257,7 +267,7 @@ async function addDriver(){
     pin:document.getElementById('dPin').value}); }
   catch(e){ document.getElementById('dMsg').textContent = 'Could not reach the server. Refresh and try again.'; return; }
   document.getElementById('dMsg').textContent = res.ok ? 'Driver added.' : (res.error||'Could not add.');
-  if(res.ok){ ['dName','dPhone','dPin'].forEach(i=>document.getElementById(i).value=''); load(); }
+  if(res.ok){ ['dName','dPhone','dPin'].forEach(i=>document.getElementById(i).value=''); loadDrivers(); }
 }
 async function saveDriver(id){
   const res = await jpost('/api/dispatch/driver', {op:'update', driver_id:id,
@@ -272,19 +282,21 @@ async function saveDriver(id){
     auto_pay:document.getElementById('dap'+id).checked?1:0,
     bank_name:document.getElementById('dbn'+id).value,
     bank_last4:document.getElementById('dbl'+id).value});
-  if(!res.ok) alert(res.error); load();
+  if(!res.ok) alert(res.error); loadDrivers();
 }
 async function setActive(id, on){
   if (!on && !confirm('Make this driver inactive? They will be signed out and cannot sign in, go online or get orders until you make them active again.')) return;
   const res = await jpost('/api/dispatch/driver-active', {driver_id:id, active:on});
-  if(!res.ok) alert(res.error); load();
+  if(!res.ok) alert(res.error); loadDrivers();
 }
 async function delDriver(id, name){
   if(!confirm('Delete driver '+name+'?')) return;
   let res;
   try { res = await jpost('/api/dispatch/driver', {op:'delete', driver_id:id}); }
   catch(e){ alert('Could not reach the server. Refresh and try again.'); return; }
-  if(!res.ok) alert(res.error || 'Could not delete that driver.'); load();
+  if(!res.ok) alert(res.error || 'Could not delete that driver.'); loadDrivers();
 }
-load();
+const INIT_DRIVERS = {{ init_drivers|tojson }};
+if (INIT_DRIVERS && INIT_DRIVERS.ok) showDrivers(INIT_DRIVERS); else loadDrivers();
+loadRests();
 </script>{% endblock %}

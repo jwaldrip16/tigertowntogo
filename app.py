@@ -11073,6 +11073,33 @@ def api_rest_open24():
 
 
 # ---------------- dispatcher management APIs ----------------
+def manage_driver_rows():
+    """Driver cards for Restaurants and drivers (no menus, so it is quick)."""
+    return [{"id": d["id"], "name": d["name"], "phone": d["phone"], "pin": d["pin"],
+                "status": d["status"], "payout_wallet": d["payout_wallet"] or "paypal",
+                "active": 0 if d["active"] == 0 else 1,
+                "bank_name": d["bank_name"] or "", "bank_last4": d["bank_last4"] or "",
+                "payout_email": d["payout_email"] or "", "payout_phone": d["payout_phone"] or "",
+                "payout_branch_id": d["payout_branch_id"] or "", "auto_pay": 0 if d["auto_pay"] == 0 else 1,
+                "branch_account_id": d["branch_account_id"] or 0,
+                "payout_branch_ids": {str(k): v for k, v in br_worker_ids(d).items()},
+                "active_orders": db().execute("""SELECT COUNT(*) c FROM orders WHERE driver_id=?
+                                   AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
+                                              (d["id"],)).fetchone()["c"],
+                "regions_label": region_names(driver_region_ids(d["id"])) if driver_region_ids(d["id"]) else "No region",
+                "locked": not driver_unlocked(d["id"]),
+                "unlock_block": driver_unlock_block(d["id"]) or ""}
+               for d in scoped_drivers(db().execute("SELECT * FROM drivers ORDER BY name").fetchall())]
+
+
+@app.get("/api/dispatch/drivers-manage")
+def api_drivers_manage():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    return jsonify({"ok": True, "drivers": manage_driver_rows(), "owner": is_owner(),
+                    "branch_accounts": [{"id": a["id"], "name": a["name"]} for a in _br_rows()]})
+
+
 @app.get("/api/dispatch/catalog")
 def api_catalog():
     if not dispatcher_required():
@@ -11088,21 +11115,7 @@ def api_catalog():
         rests.append({"id": r["id"], "name": r["name"], "slug": r["slug"], "address": r["address"],
                       "phone": r["phone"], "prep_default": r["prep_default"],
                       "paused": r["closed_override"], "open_24": r["open_24"], "items": items})
-    drivers = [{"id": d["id"], "name": d["name"], "phone": d["phone"], "pin": d["pin"],
-                "status": d["status"], "payout_wallet": d["payout_wallet"] or "paypal",
-                "active": 0 if d["active"] == 0 else 1,
-                "bank_name": d["bank_name"] or "", "bank_last4": d["bank_last4"] or "",
-                "payout_email": d["payout_email"] or "", "payout_phone": d["payout_phone"] or "",
-                "payout_branch_id": d["payout_branch_id"] or "", "auto_pay": 0 if d["auto_pay"] == 0 else 1,
-                "branch_account_id": d["branch_account_id"] or 0,
-                "payout_branch_ids": {str(k): v for k, v in br_worker_ids(d).items()},
-                "active_orders": db().execute("""SELECT COUNT(*) c FROM orders WHERE driver_id=?
-                                   AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
-                                              (d["id"],)).fetchone()["c"],
-                "regions_label": region_names(driver_region_ids(d["id"])) if driver_region_ids(d["id"]) else "No region",
-                "locked": not driver_unlocked(d["id"]),
-                "unlock_block": driver_unlock_block(d["id"]) or ""}
-               for d in scoped_drivers(db().execute("SELECT * FROM drivers ORDER BY name").fetchall())]
+    drivers = manage_driver_rows()
     return jsonify({"ok": True, "restaurants": rests, "drivers": drivers, "owner": is_owner(),
                     "branch_accounts": [{"id": a["id"], "name": a["name"]} for a in _br_rows()]})
 
@@ -11477,7 +11490,12 @@ def api_driver_crud():
 def dispatch_manage():
     if not dispatcher_required():
         return redirect(url_for("dispatch_login"))
-    return render_template("dispatch_manage.html")
+    try:
+        init = {"ok": True, "drivers": manage_driver_rows(), "owner": is_owner(),
+                "branch_accounts": [{"id": a["id"], "name": a["name"]} for a in _br_rows()]}
+    except Exception:
+        init = None
+    return render_template("dispatch_manage.html", init_drivers=init)
 
 
 # ---------------- photos ----------------
