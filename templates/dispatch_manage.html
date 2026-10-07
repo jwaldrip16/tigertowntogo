@@ -70,11 +70,20 @@ async function pauseRest(id){ await jpost('/api/dispatch/pause-restaurant', {res
 loadStatus(); setInterval(function(){ loadStatus().catch(function(){}); }, 15000);
 
 async function load(){
-  const res = await jget('/api/dispatch/catalog');
+  let res;
+  try { res = await jget('/api/dispatch/catalog'); }
+  catch(e){ document.getElementById('drivers').innerHTML = '<p class="muted">Could not load drivers. Refresh the page.</p>'; return; }
   if(!res.ok){ window.location='/dispatch/login'; return; }
-  document.getElementById('rests').innerHTML = res.restaurants.map(r=>{
+  BRANCH_ACCTS = res.branch_accounts || [];
+  try { drawDrivers(res); }
+  catch(e){ console.error('drivers list', e); document.getElementById('drivers').innerHTML = '<p class="muted">The driver list hit a problem: '+esc(e.message)+'</p>'; }
+  try { drawRests(res); } catch(e){ console.error('restaurant list', e); }
+}
+function drawRests(res){
+  document.getElementById('rests').innerHTML = (res.restaurants||[]).map(r=>{
+    r.items = r.items || [];
     const items = r.items.map(it=>{
-      const groups = (it.groups||[]).map(g=>
+      const groups = (it.groups||[]).map(g=>{ g.options = g.options || []; return g; }).map(g=>
         '<div class="layer"><strong>'+g.name+'</strong> <span class="muted">pick '+g.min+
         (g.max>g.min?(' to '+g.max):'')+'</span> '+
         '<button class="btn tiny" onclick="delGroup('+g.id+')">Remove layer</button>'+
@@ -108,9 +117,9 @@ async function load(){
       '<input id="id'+r.id+'" placeholder="Description">'+
       '<button class="btn tiny" onclick="addItem('+r.id+')">Add item</button></div></div>';
   }).join('');
-
-  BRANCH_ACCTS = res.branch_accounts || [];
-  document.getElementById('drivers').innerHTML = res.drivers.map(d=>{
+}
+function drawDrivers(res){
+  document.getElementById('drivers').innerHTML = ((res.drivers||[]).map(d=>{
     const L = d.locked, dis = L ? ' disabled' : '';
     const lockRow = res.owner ? '' : (L
       ? '<div class="row"><span class="pill grey">Locked</span>'+
@@ -145,7 +154,7 @@ async function load(){
     '<input id="dbn'+d.id+'" value="'+esc(d.bank_name||'')+'" placeholder="Bank name, like Regions" style="max-width:180px"'+dis+'>'+
     '<input id="dbl'+d.id+'" value="'+esc(d.bank_last4||'')+'" placeholder="Last 4 of account" maxlength="4" style="max-width:130px"'+dis+'>'+
     '<span class="muted small">Only the last 4. Never save full account or routing numbers here.</span></div></div>';
-  }).join('');
+  }).join('')) || '<p class="muted">No drivers yet. Add one above.</p>';
 }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 function unlockDriver(id){
@@ -221,9 +230,13 @@ async function addOption(gid){
 async function delOption(oid){ await jpost('/api/dispatch/option',{op:'delete',option_id:oid}); load(); }
 
 async function addDriver(){
-  const res = await jpost('/api/dispatch/driver', {op:'create',
+  const name = document.getElementById('dName').value.trim(), ph = document.getElementById('dPhone').value.replace(/\D/g,'');
+  if(!name || ph.length < 10){ document.getElementById('dMsg').textContent = 'Type the driver\'s name and a 10 digit phone.'; return; }
+  let res;
+  try { res = await jpost('/api/dispatch/driver', {op:'create',
     name:document.getElementById('dName').value, phone:document.getElementById('dPhone').value,
-    pin:document.getElementById('dPin').value});
+    pin:document.getElementById('dPin').value}); }
+  catch(e){ document.getElementById('dMsg').textContent = 'Could not reach the server. Refresh and try again.'; return; }
   document.getElementById('dMsg').textContent = res.ok ? 'Driver added.' : (res.error||'Could not add.');
   if(res.ok){ ['dName','dPhone','dPin'].forEach(i=>document.getElementById(i).value=''); load(); }
 }
@@ -249,8 +262,10 @@ async function setActive(id, on){
 }
 async function delDriver(id, name){
   if(!confirm('Delete driver '+name+'?')) return;
-  const res = await jpost('/api/dispatch/driver', {op:'delete', driver_id:id});
-  if(!res.ok) alert(res.error); load();
+  let res;
+  try { res = await jpost('/api/dispatch/driver', {op:'delete', driver_id:id}); }
+  catch(e){ alert('Could not reach the server. Refresh and try again.'); return; }
+  if(!res.ok) alert(res.error || 'Could not delete that driver.'); load();
 }
 load();
 </script>{% endblock %}
