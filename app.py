@@ -12087,6 +12087,10 @@ def brand_logo(s):
     """The logo a brand's own website shows: its Design logo, else the main business logo
     (Tiger Town's tiger), else Fleet Foot Delivery's."""
     logo = site_logo_url(s) if s is not None else ""
+    if not logo and s is not None:
+        key = (s["name"] or "").lower().replace(" ", "")
+        if key.startswith("tigertown") or "tigertown" in (s["domains"] or "").lower():
+            logo = "/static/brand/tigertown-logo.png"
     if not logo:
         try:
             name = (setting("logo_image", str) or "").strip()
@@ -12260,26 +12264,21 @@ def seed_brand_photos():
 
 
 def seed_tiger_town_logo():
-    """First start after this update: give the Tiger Town To Go brand its tiger logo (the main
-    business logo) when the brand has no logo of its own. Runs once."""
+    """First start after this update: put the tiger (static/brand/tigertown-logo.png) on the
+    Tiger Town To Go brand as its Design logo. Runs once."""
     try:
         con = sqlite3.connect(DB_PATH)
         con.row_factory = sqlite3.Row
-        if con.execute("SELECT 1 FROM settings WHERE key='tt_brand_logo_v1'").fetchone():
+        if con.execute("SELECT 1 FROM settings WHERE key='tt_brand_logo_v2'").fetchone():
             con.close()
             return
-        row = con.execute("SELECT value FROM settings WHERE key='logo_image'").fetchone()
-        main = (row["value"] if row else "") or ""
-        src = os.path.join(UPLOAD_DIR, os.path.basename(main)) if main.strip() else ""
+        src = os.path.join(APP_DIR_STATIC, "brand", "tigertown-logo.png")
         done = False
         if src and os.path.exists(src):
             for s in con.execute("SELECT id, name, domains, logo FROM sites").fetchall():
                 key = (s["name"] or "").lower().replace(" ", "")
                 doms = (s["domains"] or "").lower()
                 if not (key.startswith("tigertown") or "tigertown" in doms):
-                    continue
-                has = (s["logo"] or "").strip() and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(s["logo"])))
-                if has:
                     continue
                 import shutil
                 name = secrets.token_hex(10) + (os.path.splitext(src)[1] or ".png")
@@ -12289,11 +12288,11 @@ def seed_tiger_town_logo():
             # only mark it finished once the brand exists, so it still runs after the brand is added
             if done or con.execute("SELECT 1 FROM sites WHERE LOWER(REPLACE(name,' ','')) LIKE 'tigertown%' "
                                    "OR LOWER(COALESCE(domains,'')) LIKE '%tigertown%'").fetchone():
-                con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('tt_brand_logo_v1','1')")
+                con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('tt_brand_logo_v2','1')")
         con.commit()
         con.close()
         if done:
-            print("Tiger Town To Go brand logo set from the main business logo")
+            print("Tiger Town To Go brand logo set to the tiger")
     except Exception as e:
         print("tiger town logo seed skipped:", e)
 
