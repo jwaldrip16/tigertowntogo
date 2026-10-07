@@ -8,6 +8,7 @@
 <link rel="apple-touch-icon" href="/static/icons/kitchen-192.png">
 <script src="/static/nosleep.min.js"></script>
 <script src="/static/keepawake.js"></script>
+<script src="/static/orderlines.js"></script>
 <script>
 const ORDSHOW = "{{ ordshow('rest') }}";
 function ordMain(o){ return (ORDSHOW !== 'secondary' && o && o.primary_no) ? o.primary_no : (o ? o.code : ''); }
@@ -182,7 +183,7 @@ async function load(force){
   document.getElementById('ordersDone').innerHTML = done.length ? done.map(o=>
     '<div class="panel slim"><div class="row between"><div><strong>'+ordMain(o)+'</strong> '+(ordSub(o) ? '<span class="muted small">'+ordSub(o)+'</span> ' : '')+
     (o.ref ? '<span class="pill grey">#'+o.ref+'</span> ' : '')+o.customer+
-    '<div class="muted small">'+o.lines.join(', ')+'</div>'+
+    '<div class="small">'+OrderLines.block(o)+'</div>'+
     '<div class="small">Delivery fee '+o.fee+' &middot; Tip '+o.tip+'</div></div>'+
     '<div class="right muted small">'+({enroute:'Driver en route',delivered:'Delivered',
       cancelled:'Cancelled'}[o.dispatch_status]||'')+
@@ -209,7 +210,7 @@ async function load(force){
         '<span class="notebar">'+o.dispatch_note+'</span></div>' : '')+
       '<div class="detail-row"><span class="lbl">Order ('+(o.item_count||o.items.length)+' items)</span>'+
         '<span><ul class="lines">'+
-        (o.lines||o.items.map(i=>i.qty+' x '+i.name)).map(l=>'<li>'+l+'</li>').join('')+
+        OrderLines.lis(o)+
         '</ul></span></div>'+
       '<div class="detail-row"><span class="lbl">Times</span><span>'+
         (o.timeline||[]).map(x=>x.time+' '+x.label).join('<br>')+'</span></div>'+

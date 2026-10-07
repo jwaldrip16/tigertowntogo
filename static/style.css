@@ -655,3 +655,7 @@ section.hero{max-height:none;overflow:visible}
 .faqbrand p{margin:4px 0}
 .faqbrandname{font-weight:700;display:flex;align-items:center;gap:8px}
 .faqbrandname img{height:28px;width:auto}
+
+ul.subopts{margin:2px 0 4px;padding-left:16px;list-style:circle;font-size:.92em;color:#374151}
+ul.subopts li{margin:1px 0}
+ul.ordlines{margin:4px 0}

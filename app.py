@@ -2674,6 +2674,27 @@ def line_label(it):
     return base
 
 
+def line_parts(it):
+    """One order line split for display: the item, then each add-on, side and note on its own row."""
+    subs = []
+    for p_ in (it.get("options") or []):
+        if not isinstance(p_, dict):
+            continue
+        grp = str(p_.get("group") or "").strip()
+        if grp == "Instructions":
+            grp = "Note"
+        grp = grp.rstrip("?").strip()
+        txt = (grp + ": " if grp else "") + str(p_.get("name") or "").strip()
+        if p_.get("delta_cents"):
+            txt += " (+" + money(int(p_["delta_cents"])) + ")"
+        if txt.strip():
+            subs.append(txt)
+    note = str(it.get("note") or "").strip()
+    if note and not any(x == "Note: " + note for x in subs):
+        subs.append("Note: " + note)
+    return {"main": "%d x %s" % (int(it.get("qty", 1) or 1), it.get("name", "item")), "subs": subs}
+
+
 def new_code():
     issue_key = (payload.get("issue") or "").strip()
     issue_label, issue_note, from_code = "", (payload.get("issue_note") or "").strip(), ""
@@ -3103,6 +3124,7 @@ def order_dict(o):
         "paged_at": (o["paged_at"] if "paged_at" in o.keys() else "") or "",
         "items": _safe_items(o["items"]),
         "lines": [line_label(x) for x in json.loads(o["items"])],
+        "line_parts": [line_parts(x) for x in _safe_items(o["items"]) if isinstance(x, dict)],
         "item_count": sum(int(x.get("qty", 1)) for x in json.loads(o["items"])),
         "timeline": order_timeline(o["id"]),
         "placed_time": clock(o["created_at"], _rv(o, "region_id")),
