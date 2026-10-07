@@ -10353,24 +10353,29 @@ def driver_fits_brand(did, site=None):
     """True when this driver may sign in under the brand being shown. A driver with regions in
     several brands fits each of them; one with no brand-tied regions fits every brand."""
     site = staff_brand_site() if site is None else site
-    if site is None:
-        return True
     sids = driver_site_ids(did)
+    if site is None:
+        if staff_main_brand():   # main business: its regions are the ones not tied to a brand
+            return (not sids) or (0 in sids)
+        return True
     return (not sids) or (0 in sids) or (int(site["id"]) in sids)
 
 
 def restaurant_fits_brand(row, site=None):
     """True when this restaurant belongs to the brand being shown (by its region's brand)."""
     site = staff_brand_site() if site is None else site
-    if site is None or row is None:
+    if row is None:
         return True
     rs = site_of_region(row["region_id"]) if row["region_id"] else None
+    if site is None:
+        return rs is None if staff_main_brand() else True
     return rs is None or int(rs["id"]) == int(site["id"])
 
 
 def wrong_brand_msg(site, who):
+    nm = site["name"] if site is not None else (session.get("staff_brand_name") or main_brand_name())
     return ("This %s account isn't set up for %s. Pick your company again with Switch company, "
-            "or call dispatch." % (who, site["name"]))
+            "or call dispatch." % (who, nm))
 
 
 @app.route("/driver/login", methods=["GET", "POST"])
@@ -10951,7 +10956,7 @@ def rest_login():
     if request.method == "GET" and session.get("restaurant_id"):
         site = staff_brand_site()
         r = db().execute("SELECT * FROM restaurants WHERE id=?", (session["restaurant_id"],)).fetchone()
-        if site is None or restaurant_fits_brand(r, site):
+        if restaurant_fits_brand(r, site):
             return redirect(url_for("rest_home"))
         err = wrong_brand_msg(site, "restaurant")   # switched to another brand's company
         session.pop("restaurant_id", None)
@@ -12145,14 +12150,32 @@ def brand_logo(s):
     return logo or DEFAULT_LOGO
 
 
+def main_brand_logo():
+    """The main business's own logo (Tiger Town's tiger), else the tiger file, else Fleet Foot's."""
+    try:
+        name = (setting("logo_image", str) or "").strip()
+        if name and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(name))):
+            return media_url(name)
+    except Exception:
+        pass
+    return "/static/brand/tigertown-logo.png"
+
+
+def main_brand_name():
+    return (setting("business_name", str) or "").strip() or "Tiger Town To Go"
+
+
 def company_look(c):
     """Brand name, logo and brand id for a company's button in the shared apps."""
     s = company_site(c)
-    logo = brand_logo(s) if s is not None else DEFAULT_LOGO   # no brand matched: Fleet Foot Delivery's
+    if s is not None:
+        logo, brand, bs = brand_logo(s), s["name"] or c.get("name") or "", s["id"]
+    else:
+        # no brand row: the company is the main business (Tiger Town To Go), with the main logo
+        logo, brand, bs = main_brand_logo(), c.get("name") or main_brand_name(), "main"
     if logo.startswith("/") and has_request_context():
         logo = request.host_url.rstrip("/") + logo
-    return {"brand": (s["name"] if s is not None else "") or c.get("name") or "",
-            "logo": logo, "bs": s["id"] if s is not None else 0}
+    return {"brand": brand, "logo": logo, "bs": bs}
 
 
 def hub_company(c):
@@ -12180,12 +12203,23 @@ def staff_brand_site():
             r = db().execute("SELECT region_id FROM restaurants WHERE id=?", (session["restaurant_id"],)).fetchone()
             if r is not None:
                 s = site_of_region(r["region_id"])
-        if s is None and session.get("staff_brand"):
+        if s is None and session.get("staff_brand") and session.get("staff_brand") != "main":
             s = site_by_id(session.get("staff_brand"))
     except Exception:
         s = None
     g._staff_site = s
     return s
+
+
+def staff_main_brand():
+    """True when a driver/restaurant page is shown under the main business (Tiger Town To Go),
+    picked in the shared app."""
+    if not has_request_context():
+        return False
+    p = request.path
+    if not (p.startswith("/driver") or p.startswith("/restaurant") or p.startswith("/reset/")):
+        return False
+    return session.get("staff_brand") == "main" and staff_brand_site() is None
 
 
 @app.before_request
@@ -12196,6 +12230,11 @@ def remember_staff_brand():
         if bs is not None and (request.path.startswith("/driver") or request.path.startswith("/restaurant")):
             if bs.isdigit() and int(bs) and site_by_id(int(bs)) is not None:
                 session["staff_brand"] = int(bs)
+            elif bs == "main":
+                session["staff_brand"] = "main"
+                co = (request.args.get("co") or "").strip()[:80]
+                if co:
+                    session["staff_brand_name"] = co
             else:
                 session.pop("staff_brand", None)
     except Exception:
@@ -12207,6 +12246,9 @@ def inject_staff_brand():
     try:
         s = staff_brand_site()
         if s is None:
+            if staff_main_brand():
+                return {"staff_brand": {"name": session.get("staff_brand_name") or main_brand_name(),
+                                        "logo": main_brand_logo()}}
             return {"staff_brand": None}
         return {"staff_brand": {"name": s["name"], "logo": brand_logo(s)}}
     except Exception:
