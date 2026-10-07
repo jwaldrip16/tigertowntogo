@@ -7,8 +7,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-title" content="{{ title }}">
-<link rel="icon" type="image/png" href="/brand/icon-32.png">
-<link rel="apple-touch-icon" href="/brand/icon-180.png">
+<link rel="icon" type="image/png" href="/static/brand/logo-default.png">
+<link rel="apple-touch-icon" href="/static/icons/{{ which }}-192.png">
 <style>
 *{box-sizing:border-box}body{margin:0;font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f5f6f8;color:#1f2937}
 .wrap{max-width:460px;margin:0 auto;padding:28px 18px 40px}
@@ -70,8 +70,7 @@ button{font-size:16px;padding:12px 16px;border:0;border-radius:10px;background:{
       document.getElementById('picker').style.display='none';
       document.getElementById('opening').style.display='block';
       document.getElementById('openName').textContent = saved.brand || saved.name;
-      if (saved.logo) { document.getElementById('openLogo').src = saved.logo; document.getElementById('headLogo').src = saved.logo; }
-      document.getElementById('headTitle').textContent = (saved.brand || saved.name) + KIND;
+      if (saved.logo) document.getElementById('openLogo').src = saved.logo;
       document.getElementById('switchNow').onclick = function(ev){ ev.preventDefault();
         try{ localStorage.removeItem(KEY); }catch(e){} showPicker(); };
       setTimeout(function(){ location.href = target(saved); }, 400);

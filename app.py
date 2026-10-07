@@ -11744,10 +11744,16 @@ def app_manifest(which):
         biz = "Fleet Foot Delivery"
     name = m.get("name") or (biz + m["suffix"])[:45]
     short = m["short"] or (biz if len(biz) <= 12 else biz.split()[0][:12])
-    icons = [{"src": "/brand/icon-%d.png" % s, "sizes": "%dx%d" % (s, s), "type": "image/png", "purpose": "any"}
-             for s in (192, 512)]
-    icons += [{"src": "/brand/maskable-%d.png" % s, "sizes": "%dx%d" % (s, s), "type": "image/png",
-               "purpose": "maskable"} for s in (192, 512)]
+    if which in ("driver", "hub-driver", "kitchen", "hub-kitchen"):
+        # the staff apps are Fleet Foot Delivery's own: always its logo, never a client brand's
+        _ic = "driver" if "driver" in which else "kitchen"
+        icons = [{"src": "/static/icons/%s-%d.png" % (_ic, s), "sizes": "%dx%d" % (s, s), "type": "image/png",
+                  "purpose": "any"} for s in (192, 512)]
+    else:
+        icons = [{"src": "/brand/icon-%d.png" % s, "sizes": "%dx%d" % (s, s), "type": "image/png", "purpose": "any"}
+                 for s in (192, 512)]
+        icons += [{"src": "/brand/maskable-%d.png" % s, "sizes": "%dx%d" % (s, s), "type": "image/png",
+                   "purpose": "maskable"} for s in (192, 512)]
     body = {
         "id": m["start"], "name": name, "short_name": short, "description": m["desc"],
         "start_url": m["start"], "scope": m["scope"], "display": "standalone",
@@ -12082,11 +12088,7 @@ def company_look(c):
     s = company_site(c)
     logo = site_logo_url(s) if s is not None else ""
     if not logo:
-        try:
-            name = (setting("logo_image", str) or "").strip()
-            logo = media_url(name) if name and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(name))) else DEFAULT_LOGO
-        except Exception:
-            logo = DEFAULT_LOGO
+        logo = DEFAULT_LOGO   # a brand with no logo of its own shows Fleet Foot Delivery's
     if logo.startswith("/") and has_request_context():
         logo = request.host_url.rstrip("/") + logo
     return {"brand": (s["name"] if s is not None else "") or c.get("name") or "",
@@ -12156,10 +12158,7 @@ def hub_pick(which):
     if which not in HUB_APPS:
         return redirect("/go/driver")
     title, login_path, manifest = HUB_APPS[which]
-    try:
-        logo = logo_url()
-    except Exception:
-        logo = DEFAULT_LOGO
+    logo = DEFAULT_LOGO   # the shared apps always open on the Fleet Foot Delivery logo
     return render_template("hub_pick.html", which=which, title=title, login_path=login_path,
                            manifest=manifest, logo=logo)
 
