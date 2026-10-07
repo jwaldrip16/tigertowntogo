@@ -172,6 +172,22 @@ async function setLogo(inp){
   <input style="margin-left:28px;max-width:120px" name="short_staff_every_min" type="number" min="5" max="120" value="{{ s['short_staff_every_min'] or 15 }}">
   {% endif %}
   {% endfor %}
+  <h2 style="margin-top:18px">Staffing alerts for dispatch</h2>
+  <p class="muted small">Shown on the dispatch board with a sound and a notification, worked out for each region on its own, only while the business is open. Tap Got it to hide one for a while.</p>
+  <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0">
+    <input type="checkbox" name="sa_nodrv" value="1" {{ 'checked' if (s['sa_nodrv'] or '1') == '1' else '' }} style="width:auto;margin-top:3px">
+    <span><b>Orders waiting, no driver free</b><br><span class="muted small">A region has orders waiting and no free driver who works that region.</span></span>
+  </label>
+  <label style="margin-left:28px">Warn once an order has waited this many minutes (1 to 60)</label>
+  <input style="margin-left:28px;max-width:120px" name="sa_nodrv_min" type="number" min="1" max="60" value="{{ s['sa_nodrv_min'] or 3 }}">
+  <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0">
+    <input type="checkbox" name="sa_idle" value="1" {{ 'checked' if (s['sa_idle'] or '1') == '1' else '' }} style="width:auto;margin-top:3px">
+    <span><b>No orders, too many drivers</b><br><span class="muted small">A region has had no new orders for a while and several drivers sitting free.</span></span>
+  </label>
+  <label style="margin-left:28px">Minutes with no new orders (10 to 240)</label>
+  <input style="margin-left:28px;max-width:120px" name="sa_idle_min" type="number" min="10" max="240" value="{{ s['sa_idle_min'] or 30 }}">
+  <label style="margin-left:28px">Free drivers that count as overstaffed (1 to 20)</label>
+  <input style="margin-left:28px;max-width:120px" name="sa_idle_drivers" type="number" min="1" max="20" value="{{ s['sa_idle_drivers'] or 2 }}">
   {% endif %}
   <h2>Late accept warnings</h2>
   <label>Flash and chime when a kitchen has not accepted an order after this many minutes (0 for off)</label>

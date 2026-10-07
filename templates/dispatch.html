@@ -83,6 +83,7 @@
 <div id="soundWake" class="soundwake hidden" onclick="try{ffSound.unlock();ffSound.play('ping');}catch(e){}">
   Sound is asleep. Click here once so driver calls and new orders can be heard.</div>
 <div id="callAlerts" class="hidden"></div>
+<div id="staffAlerts" class="hidden"></div>
 <div id="assignBar" class="flashbar hidden"></div>
 <div id="lateBar" class="latebar hidden"></div>
 <div class="row" style="margin:6px 0">
@@ -675,6 +676,28 @@ function drawAlerts(list){
     try { ffNotify.show((list[0].who === 'driver' ? 'Driver' : 'Kitchen') + ' needs dispatch',
           list[0].name + ': ' + (list[0].note || 'wants a call'), 'callalert'); } catch(e){}
   }
+}
+const STAFF_SEEN = {};
+function drawStaff(list){
+  const box = document.getElementById('staffAlerts');
+  if (!box) return;
+  if (!list.length){ box.classList.add('hidden'); box.innerHTML = ''; return; }
+  box.classList.remove('hidden');
+  box.innerHTML = list.map(a =>
+    '<div class="callalert" style="border-left:4px solid ' + (a.kind === 'nodrv' ? '#c0392b' : '#e0a800') + '"><div><strong>' + esc(a.title) + '</strong>' +
+    '<div class="muted small">' + esc(a.body) + '</div></div>' +
+    '<div class="row gap"><button class="btn tiny" onclick="dismissStaff(\'' + a.key + '\')">Got it</button></div></div>').join('');
+  let fresh = null;
+  list.forEach(a => { if (!STAFF_SEEN[a.key]) { STAFF_SEEN[a.key] = 1; fresh = fresh || a; } });
+  Object.keys(STAFF_SEEN).forEach(k => { if (!list.some(a => a.key === k)) delete STAFF_SEEN[k]; });
+  if (fresh){
+    try { ffSound.play('call'); } catch(e){}
+    try { ffNotify.show(fresh.title, fresh.body, 'staff-' + fresh.key); } catch(e){}
+  }
+}
+async function dismissStaff(key){
+  const res = await jpost('/api/dispatch/staff-alert-dismiss', {key: key});
+  if (res && res.ok) drawStaff(res.staff || []);
 }
 async function clearAlert(id){
   const res = await jpost('/api/dispatch/alert-clear', {id: id});
@@ -1757,7 +1780,7 @@ function safeRun(fn){ try { fn(); } catch(e){ console.error('board boot', e); } 
 setInterval(board, 4000); setInterval(loadChat, 4000);
 // open calls refresh on their own so a driver's address keeps moving even while you type
 setInterval(async function(){
-  try { const r = await jget('/api/dispatch/alerts'); if (r && r.ok){ drawAlerts(r.alerts || []); drawAwaiting(r.awaiting || []); } } catch(e){}
+  try { const r = await jget('/api/dispatch/alerts'); if (r && r.ok){ drawAlerts(r.alerts || []); drawAwaiting(r.awaiting || []); drawStaff(r.staff || []); } } catch(e){}
 }, 5000);
 safeRun(soundLabel);
 safeRun(function(){ board(true); });

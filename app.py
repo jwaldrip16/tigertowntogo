@@ -9761,6 +9761,14 @@ def dispatch_settings():
             except ValueError:
                 _e = 15
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('short_staff_every_min',?)", (str(_e),))
+            for _k in ("sa_nodrv", "sa_idle"):
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, "1" if request.form.get(_k) else "0"))
+            for _k, (_lo, _hi) in SA_LIMITS.items():
+                try:
+                    _v = max(_lo, min(_hi, int(request.form.get(_k) or SA_DEFAULTS[_k])))
+                except ValueError:
+                    _v = int(SA_DEFAULTS[_k])
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, str(_v)))
         if "pp_present" in request.form and is_owner(session.get("dispatcher_id")):
             _cur = _pp_settings()
             _new = dict(_cur)
@@ -13333,6 +13341,8 @@ def api_dispatch_business():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     on = bool((request.get_json(silent=True) or {}).get("open"))
+    if on and not business_is_open():
+        db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('business_opened_at',?)", (now(),))
     db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('business_open',?)", ("1" if on else "0",))
     if not on:
         # end of day: drivers start tomorrow with an empty Completed tab. Dispatch keeps the history.
@@ -13575,6 +13585,111 @@ def business_is_open():
     except Exception:
         return False
 
+# ---------------------------------------------------------------- staffing alerts for dispatch
+# Two warnings on the dispatch board, worked out for each region on their own:
+#  * orders waiting there and no free driver who works that region
+#  * no new orders there for a while and more free drivers than needed (overstaffed)
+SA_DEFAULTS = {"sa_nodrv": "1", "sa_nodrv_min": "3", "sa_idle": "1", "sa_idle_min": "30", "sa_idle_drivers": "2"}
+SA_LIMITS = {"sa_nodrv_min": (1, 60), "sa_idle_min": (10, 240), "sa_idle_drivers": (1, 20)}
+
+def sa_get(key):
+    v = setting(key, str)
+    if v in (None, ""):
+        v = SA_DEFAULTS[key]
+    if key in SA_LIMITS:
+        lo, hi = SA_LIMITS[key]
+        try:
+            return max(lo, min(hi, int(float(v))))
+        except (TypeError, ValueError):
+            return int(SA_DEFAULTS[key])
+    return str(v) == "1"
+
+def _sa_snoozed():
+    try:
+        raw = json.loads(setting("sa_snooze", str) or "{}")
+    except Exception:
+        raw = {}
+    stamp = now()
+    return {k: v for k, v in raw.items() if isinstance(v, str) and v > stamp}
+
+def _sa_ago(ts):
+    try:
+        mins = int((dt.datetime.now() - dt.datetime.fromisoformat(str(ts)[:19])).total_seconds() // 60)
+    except Exception:
+        return ""
+    return ("%d min" % mins) if mins < 120 else ("%d hr %d min" % (mins // 60, mins % 60))
+
+def staff_alerts():
+    """Live staffing warnings for the dispatch board, one per region that needs one."""
+    try:
+        if not business_is_open() or not (sa_get("sa_nodrv") or sa_get("sa_idle")):
+            return []
+        con = db()
+        regs = con.execute("SELECT id, name, COALESCE(paused,0) paused FROM regions ORDER BY sort, name").fetchall()
+        areas = [(r["id"], r["name"]) for r in regs if not r["paused"]] if regs else [(0, "All areas")]
+        shift = on_shift_drivers()
+        work = {d["id"]: driver_work_regions(d["id"]) for d in shift}
+        snoozed = _sa_snoozed()
+        out = []
+        nowdt = dt.datetime.now()
+        waiting = con.execute("""SELECT id, code, region_id, created_at FROM orders
+                                 WHERE driver_id IS NULL AND redo_driver_id IS NULL
+                                   AND dispatch_status IN ('queued','held')""").fetchall()
+        opened = setting("business_opened_at", str) or ""
+        for rid, rname in areas:
+            mine = [o for o in waiting if not rid or (o["region_id"] or 0) in (rid, 0)]
+            on = [d for d in shift if covers(work.get(d["id"]), rid)]
+            free = [d for d in on if d["load"] == 0]
+            if sa_get("sa_nodrv"):
+                cut = (nowdt - dt.timedelta(minutes=sa_get("sa_nodrv_min"))).isoformat(timespec="seconds")
+                late = [o for o in mine if (o["created_at"] or "") <= cut]
+                key = "nodrv-%d" % rid
+                if late and not free and key not in snoozed:
+                    n = len(mine)
+                    codes = ", ".join(o["code"] for o in mine[:4]) + (" and more" if n > 4 else "")
+                    why = ("no drivers on shift for " + rname) if not on else \
+                          ("all %d driver%s on shift for %s %s busy" % (len(on), "" if len(on) == 1 else "s", rname,
+                                                                        "is" if len(on) == 1 else "are"))
+                    out.append({"key": key, "kind": "nodrv", "region_id": rid, "region": rname,
+                                "title": "%s: %d order%s waiting, no driver free" % (rname, n, "" if n == 1 else "s"),
+                                "body": codes + " waiting " + _sa_ago(min(o["created_at"] or now() for o in mine)) +
+                                        ", and " + why + ". Call in a driver or hold the orders."})
+            if sa_get("sa_idle") and not mine and len(free) >= sa_get("sa_idle_drivers"):
+                idle_min = sa_get("sa_idle_min")
+                if rid:
+                    last = con.execute("SELECT MAX(created_at) m FROM orders WHERE region_id=?", (rid,)).fetchone()["m"]
+                else:
+                    last = con.execute("SELECT MAX(created_at) m FROM orders").fetchone()["m"]
+                since = max(last or "", opened or "")
+                cut = (nowdt - dt.timedelta(minutes=idle_min)).isoformat(timespec="seconds")
+                key = "idle-%d" % rid
+                if since and since <= cut and key not in snoozed:
+                    names = ", ".join(d["name"] for d in free[:5]) + (" and more" if len(free) > 5 else "")
+                    out.append({"key": key, "kind": "idle", "region_id": rid, "region": rname,
+                                "title": "%s: no orders in %s" % (rname, _sa_ago(since)),
+                                "body": "%d drivers are free (%s). You may have more drivers on than you need right now."
+                                        % (len(free), names)})
+        return out
+    except Exception as e:
+        print("staff alerts skipped:", e)
+        return []
+
+@app.post("/api/dispatch/staff-alert-dismiss")
+def api_staff_alert_dismiss():
+    """Got it: hide one staffing alert for a while (10 min for no drivers, the idle window for idle)."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    key = str((request.get_json(silent=True) or {}).get("key") or "")[:40]
+    if not re.fullmatch(r"(nodrv|idle)-\d+", key):
+        return jsonify({"ok": False, "error": "Unknown alert."}), 400
+    mins = 10 if key.startswith("nodrv") else sa_get("sa_idle_min")
+    snz = _sa_snoozed()
+    snz[key] = (dt.datetime.now() + dt.timedelta(minutes=mins)).isoformat(timespec="seconds")
+    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('sa_snooze',?)", (json.dumps(snz),))
+    db().commit()
+    log("staff_alert", key + " snoozed " + str(mins) + " min by " + (session.get("dispatcher_name") or "dispatch"))
+    return jsonify({"ok": True, "staff": staff_alerts()})
+
 @app.get("/api/dispatch/alerts")
 def api_dispatch_alerts():
     if not dispatcher_required():
@@ -13582,7 +13697,7 @@ def api_dispatch_alerts():
     alerts = open_call_alerts()
     if dispatcher_driver_scope() is not None:
         alerts = [a for a in alerts if a.get("who") != "driver" or driver_in_scope(a.get("driver_id"))]
-    return jsonify({"ok": True, "alerts": alerts, "awaiting": awaiting_accept()})
+    return jsonify({"ok": True, "alerts": alerts, "awaiting": awaiting_accept(), "staff": staff_alerts()})
 
 @app.post("/api/driver/call-dispatch")
 def api_driver_call_dispatch():
