@@ -89,6 +89,8 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
 <div id="ordersDone" class="hidden"></div>
 {% endblock %}
 {% block scripts %}<script>
+// new order sound (the chime file), plays every 5 seconds until the order is accepted
+try { ffSound.setOrderSound('/static/sounds/new-order.mp3'); } catch(e) {}
 ffAwake.init('kitchen', {{ 'true' if awake_default != '0' else 'false' }});
 async function askCall(level){
   const code = document.getElementById('callCode').value.trim();

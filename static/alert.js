@@ -39,6 +39,24 @@
     o.start(ctx.currentTime + start); o.stop(ctx.currentTime + start + len + 0.05);
   }
 
+  // Optional sound file for new orders (driver and kitchen apps). Decoded once, then played
+  // through the same unlocked audio as the tones. Falls back to the tones until it loads.
+  var orderUrl = null, orderBuf = null, orderLoading = false;
+  function loadOrderSound(){
+    if (!orderUrl || orderBuf || orderLoading) return;
+    make(); if (!ctx) return;
+    orderLoading = true;
+    fetch(orderUrl).then(function(r){ return r.arrayBuffer(); }).then(function(ab){
+      ctx.decodeAudioData(ab, function(b){ orderBuf = b; orderLoading = false; },
+                              function(){ orderLoading = false; });
+    }).catch(function(){ orderLoading = false; });
+  }
+  function playOrderFile(){
+    var src = ctx.createBufferSource(), g = ctx.createGain();
+    src.buffer = orderBuf; g.gain.value = 1.0;
+    src.connect(g); g.connect(ctx.destination); src.start(0);
+  }
+
   var loopTimer = null;
 
   window.ffSound = {
@@ -71,6 +89,12 @@
         if (navigator.vibrate) navigator.vibrate([200, 100, 200]);
         return;
       }
+      if (orderBuf){
+        playOrderFile();
+        if (navigator.vibrate) navigator.vibrate([120, 60, 120]);
+        return;
+      }
+      loadOrderSound();
       beep(660, 0.00, 0.16, 0.3);
       beep(880, 0.20, 0.16, 0.3);
       beep(1175, 0.40, 0.30, 0.3);
@@ -84,6 +108,8 @@
       return enabled;
     },
     armed: function(){ return running(); },
+    // use a sound file for the 'order' alert on this page
+    setOrderSound: function(url){ orderUrl = url; orderBuf = null; loadOrderSound(); },
     unlock: unlock
   };
 })();

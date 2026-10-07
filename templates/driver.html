@@ -196,6 +196,8 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
 </div>
 {% endblock %}
 {% block scripts %}<script>
+// new order sound (the chime file), plays every 5 seconds until the order is accepted
+try { ffSound.setOrderSound('/static/sounds/new-order.mp3'); } catch(e) {}
 let LATE_BEEP_AT = 0, LATE_LOUD = false;
 function silenceAlert(){
   if (LATE_LOUD){ alert('This order is late. The chime stops once you accept it.'); return; }
