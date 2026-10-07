@@ -9,6 +9,8 @@
       <input name="code" placeholder="Code (tigertown)">
       <input name="url" placeholder="Web address (tigertowntogo.com)">
     </div>
+    <div style="margin-top:8px"><label class="small" for="coSite">Brand (logo and name shown in the apps)</label>
+      <select name="site_id" id="coSite"><option value="0">Match by web address or name</option>{% for b in sites %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}</select></div>
     <label class="small"><input type="checkbox" name="listed" checked> Show in list</label>
     <label class="small" style="margin-left:12px"><input type="checkbox" name="active" checked> Active</label>
     <div style="margin-top:8px"><button class="btn primary" type="submit" id="saveBtn">Add company</button>
@@ -16,7 +18,7 @@
       <span class="bad" id="coErr"></span></div>
   </form>
   <table class="tbl" style="width:100%">
-    <thead><tr><th>Company</th><th>Code</th><th>Web address</th><th>Status</th><th></th></tr></thead>
+    <thead><tr><th>In the apps</th><th>Company</th><th>Code</th><th>Web address</th><th>Status</th><th></th></tr></thead>
     <tbody id="coRows"></tbody>
   </table>
   <p class="muted small" style="margin-top:14px">App links: <code>{{ request.host_url }}go/driver</code> and <code>{{ request.host_url }}go/kitchen</code></p>
@@ -26,10 +28,10 @@ var COS = {{ companies|tojson }};
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function draw(){
   var tb=document.getElementById('coRows'); tb.innerHTML='';
-  if(!COS.length){tb.innerHTML='<tr><td colspan="5" class="muted">No companies yet.</td></tr>';return;}
+  if(!COS.length){tb.innerHTML='<tr><td colspan="6" class="muted">No companies yet.</td></tr>';return;}
   COS.forEach(function(c){
     var tr=document.createElement('tr');
-    tr.innerHTML='<td>'+esc(c.name)+'</td><td>'+esc(c.code)+'</td><td>'+esc(c.url.replace(/^https?:\/\//,''))+'</td><td>'+
+    tr.innerHTML='<td style="white-space:nowrap"><img src="'+esc(c.logo)+'" alt="" style="width:32px;height:32px;object-fit:contain;vertical-align:middle;margin-right:6px">'+esc(c.brand)+(c.bs?'':' <span class="muted small">(no brand matched)</span>')+'</td><td>'+esc(c.name)+'</td><td>'+esc(c.code)+'</td><td>'+esc(c.url.replace(/^https?:\/\//,''))+'</td><td>'+
       (c.active?'Active':'Off')+(c.listed?'':' (code only)')+'</td><td style="white-space:nowrap"><button class="btn small" data-e="'+c.id+'">Edit</button> <button class="btn small" data-d="'+c.id+'">Delete</button></td>';
     tb.appendChild(tr);
   });
@@ -39,14 +41,14 @@ function reset(){f.reset();f.id.value=0;document.getElementById('saveBtn').textC
 document.getElementById('cancelBtn').onclick=reset;
 document.getElementById('coRows').onclick=async function(e){
   var id=e.target.getAttribute('data-e'), del=e.target.getAttribute('data-d');
-  if(id){var c=COS.find(function(x){return x.id==id;}); f.id.value=c.id; f.name.value=c.name; f.code.value=c.code; f.url.value=c.url;
+  if(id){var c=COS.find(function(x){return x.id==id;}); f.id.value=c.id; f.name.value=c.name; f.code.value=c.code; f.url.value=c.url; f.site_id.value=String(c.site_id||0);
     f.listed.checked=!!c.listed; f.active.checked=!!c.active; document.getElementById('saveBtn').textContent='Save changes';
     document.getElementById('cancelBtn').style.display='inline-block'; window.scrollTo(0,0);}
   if(del){var c2=COS.find(function(x){return x.id==del;}); if(!confirm('Remove '+c2.name+' from the shared apps?'))return;
     var j=await jpost('/api/dispatch/companies',{op:'delete',id:del}); if(j.ok){COS=COS.filter(function(x){return x.id!=del;});draw();reset();}}
 };
 f.onsubmit=async function(e){e.preventDefault();
-  var j=await jpost('/api/dispatch/companies',{op:'save',id:f.id.value,name:f.name.value,code:f.code.value,url:f.url.value,
+  var j=await jpost('/api/dispatch/companies',{op:'save',id:f.id.value,name:f.name.value,code:f.code.value,url:f.url.value,site_id:f.site_id.value,
     listed:f.listed.checked?'1':'0',active:f.active.checked?'1':'0'});
   if(!j.ok){document.getElementById('coErr').textContent=j.error||'Could not save.';return;}
   COS=j.companies; draw(); reset();

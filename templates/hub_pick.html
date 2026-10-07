@@ -20,14 +20,16 @@ input{width:100%;font-size:17px;padding:12px;border:1px solid #d1d5db;border-rad
 .row{display:flex;gap:8px}.row input{flex:1}
 button{font-size:16px;padding:12px 16px;border:0;border-radius:10px;background:{% if which == 'driver' %}#0f172a{% else %}#7c2d12{% endif %};color:#fff;font-weight:600}
 .list{margin-top:10px;max-height:46vh;overflow:auto}
-.co{display:block;width:100%;text-align:left;background:#fff;color:#111827;border:1px solid #e5e7eb;margin-top:8px;font-weight:600}
+.co{display:flex;align-items:center;gap:12px;width:100%;text-align:left;background:#fff;color:#111827;border:1px solid #e5e7eb;margin-top:8px;font-weight:600}
+.co img{width:44px;height:44px;object-fit:contain;flex:none;border-radius:8px;background:#fff}.co span{flex:1;min-width:0}
+#opening img{width:72px;height:72px;object-fit:contain}
 .co small{display:block;font-weight:400;color:#6b7280;font-size:13px;margin-top:2px}
 .err{color:#b91c1c;font-size:14px;margin-top:8px;min-height:1em}.muted{color:#6b7280;font-size:14px;text-align:center}
 #opening{display:none;text-align:center}#opening a{color:#2563eb}
 </style></head><body>
 <div class="wrap">
-  <div class="head"><img src="{{ logo }}" alt=""><h1>{{ title }}</h1><p>Pick the delivery company you work with.</p></div>
-  <div id="opening" class="card"><p>Opening <b id="openName"></b>&hellip;</p><p><a href="#" id="switchNow">Switch company</a></p></div>
+  <div class="head"><img id="headLogo" src="{{ logo }}" alt=""><h1 id="headTitle">{{ title }}</h1><p>Pick the delivery company you work with.</p></div>
+  <div id="opening" class="card"><img id="openLogo" src="{{ logo }}" alt=""><p>Opening <b id="openName"></b>&hellip;</p><p><a href="#" id="switchNow">Switch company</a></p></div>
   <div id="picker">
     <div class="card">
       <label for="code">Company code</label>
@@ -44,13 +46,14 @@ button{font-size:16px;padding:12px 16px;border:0;border-radius:10px;background:{
 <script>
 (function(){
   var WHICH = {{ which|tojson }}, LOGIN = {{ login_path|tojson }}, KEY = 'ff_company_' + WHICH;
+  var KIND = WHICH === 'driver' ? ' Driver' : ' Restaurant';
   var all = [];
   function target(c){
     return c.url.replace(/\/+$/,'') + LOGIN + '?hub=' + encodeURIComponent(location.origin) +
-           '&app=' + WHICH + '&co=' + encodeURIComponent(c.name);
+           '&app=' + WHICH + '&co=' + encodeURIComponent(c.brand || c.name) + (c.bs ? '&bs=' + c.bs : '');
   }
   function open(c){
-    try{ localStorage.setItem(KEY, JSON.stringify({name:c.name, code:c.code, url:c.url})); }catch(e){}
+    try{ localStorage.setItem(KEY, JSON.stringify({name:c.name, brand:c.brand||c.name, logo:c.logo||'', bs:c.bs||0, code:c.code, url:c.url})); }catch(e){}
     location.href = target(c);
   }
   function showPicker(){
@@ -66,7 +69,9 @@ button{font-size:16px;padding:12px 16px;border:0;border-radius:10px;background:{
     if (saved && saved.url) {
       document.getElementById('picker').style.display='none';
       document.getElementById('opening').style.display='block';
-      document.getElementById('openName').textContent = saved.name;
+      document.getElementById('openName').textContent = saved.brand || saved.name;
+      if (saved.logo) { document.getElementById('openLogo').src = saved.logo; document.getElementById('headLogo').src = saved.logo; }
+      document.getElementById('headTitle').textContent = (saved.brand || saved.name) + KIND;
       document.getElementById('switchNow').onclick = function(ev){ ev.preventDefault();
         try{ localStorage.removeItem(KEY); }catch(e){} showPicker(); };
       setTimeout(function(){ location.href = target(saved); }, 400);
@@ -74,12 +79,14 @@ button{font-size:16px;padding:12px 16px;border:0;border-radius:10px;background:{
   }
   function draw(){
     var q = document.getElementById('q').value.trim().toLowerCase(), box = document.getElementById('list');
-    var rows = all.filter(function(c){ return !q || c.name.toLowerCase().indexOf(q) >= 0; });
+    var rows = all.filter(function(c){ return !q || (c.name + ' ' + (c.brand||'')).toLowerCase().indexOf(q) >= 0; });
     box.innerHTML = '';
     if (!rows.length){ box.innerHTML = '<p class="muted">' + (all.length ? 'No match. Try your company code.' : 'Enter your company code above.') + '</p>'; return; }
     rows.forEach(function(c){
       var b = document.createElement('button'); b.className='co';
-      b.textContent = c.name; var s=document.createElement('small'); s.textContent = c.url.replace(/^https?:\/\//,''); b.appendChild(s);
+      var im = document.createElement('img'); im.alt=''; im.src = c.logo || {{ logo|tojson }}; b.appendChild(im);
+      var t = document.createElement('span'); t.textContent = c.brand || c.name;
+      var s=document.createElement('small'); s.textContent = c.url.replace(/^https?:\/\//,''); t.appendChild(s); b.appendChild(t);
       b.onclick = function(){ open(c); }; box.appendChild(b);
     });
   }

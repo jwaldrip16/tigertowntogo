@@ -316,6 +316,7 @@ def init_db():
     con.execute("""CREATE TABLE IF NOT EXISTS companies (
         id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, code TEXT UNIQUE NOT NULL,
         url TEXT NOT NULL, listed INTEGER DEFAULT 1, active INTEGER DEFAULT 1, created_at TEXT)""")
+    ensure_column(con, "companies", "site_id", "INTEGER DEFAULT 0")   # brand shown in the shared apps (0 = match by web address)
     cur = con.execute("SELECT COUNT(*) c FROM restaurants")
     if cur.fetchone()["c"] == 0:
         seed(con)
@@ -12046,9 +12047,108 @@ def clean_site_url(u):
     return pr.scheme + "://" + pr.netloc.lower()
 
 
+def companies_with_look():
+    return [dict(r, **company_look(r)) for r in company_rows(False)]
+
+
 def company_rows(only_active=True):
     q = "SELECT * FROM companies" + (" WHERE COALESCE(active,1)=1" if only_active else "") + " ORDER BY name COLLATE NOCASE"
     return [dict(r) for r in db().execute(q).fetchall()]
+
+
+def company_site(c):
+    """The brand a company in the shared apps shows: the brand picked on Companies, else the
+    brand whose web address matches the company's, else the brand with the same name."""
+    try:
+        s = site_by_id(c.get("site_id") or 0)
+        if s is not None:
+            return s
+        rows = db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall()
+        host = _norm_host(c.get("url"))
+        for row in rows:
+            if host and host in site_domains(row):
+                return row
+        nm = (c.get("name") or "").strip().lower()
+        for row in rows:
+            if nm and (row["name"] or "").strip().lower() == nm:
+                return row
+    except Exception:
+        pass
+    return None
+
+
+def company_look(c):
+    """Brand name, logo and brand id for a company's button in the shared apps."""
+    s = company_site(c)
+    logo = site_logo_url(s) if s is not None else ""
+    if not logo:
+        try:
+            name = (setting("logo_image", str) or "").strip()
+            logo = media_url(name) if name and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(name))) else DEFAULT_LOGO
+        except Exception:
+            logo = DEFAULT_LOGO
+    if logo.startswith("/") and has_request_context():
+        logo = request.host_url.rstrip("/") + logo
+    return {"brand": (s["name"] if s is not None else "") or c.get("name") or "",
+            "logo": logo, "bs": s["id"] if s is not None else 0}
+
+
+def hub_company(c):
+    return dict({"name": c["name"], "code": c["code"], "url": c["url"]}, **company_look(c))
+
+
+def staff_brand_site():
+    """The brand a driver or restaurant page shows: the brand of the web address, else the
+    signed-in restaurant's brand, else the brand picked in the shared app."""
+    if not has_request_context() or not brands_on():
+        return None
+    p = request.path
+    if not (p.startswith("/driver") or p.startswith("/restaurant") or p.startswith("/reset/")):
+        return None
+    if "_staff_site" in g:
+        return g._staff_site
+    s = None
+    try:
+        host = _norm_host(request.host)
+        for row in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
+            if host in site_domains(row):
+                s = row
+                break
+        if s is None and session.get("restaurant_id") and not p.startswith("/driver"):
+            r = db().execute("SELECT region_id FROM restaurants WHERE id=?", (session["restaurant_id"],)).fetchone()
+            if r is not None:
+                s = site_of_region(r["region_id"])
+        if s is None and session.get("staff_brand"):
+            s = site_by_id(session.get("staff_brand"))
+    except Exception:
+        s = None
+    g._staff_site = s
+    return s
+
+
+@app.before_request
+def remember_staff_brand():
+    """The shared apps pass ?bs=<brand id> when a worker picks their company."""
+    try:
+        bs = request.args.get("bs")
+        if bs is not None and (request.path.startswith("/driver") or request.path.startswith("/restaurant")):
+            if bs.isdigit() and int(bs) and site_by_id(int(bs)) is not None:
+                session["staff_brand"] = int(bs)
+            else:
+                session.pop("staff_brand", None)
+    except Exception:
+        pass
+
+
+@app.context_processor
+def inject_staff_brand():
+    try:
+        s = staff_brand_site()
+        if s is None:
+            return {"staff_brand": None}
+        return {"staff_brand": {"name": s["name"], "logo": site_logo_url(s) or DEFAULT_LOGO}}
+    except Exception:
+        return {"staff_brand": None}
 
 
 @app.get("/go/<which>")
@@ -12066,18 +12166,17 @@ def hub_pick(which):
 
 @app.get("/api/hub/companies")
 def api_hub_companies():
-    rows = [{"name": r["name"], "code": r["code"], "url": r["url"]}
-            for r in company_rows() if (r.get("listed") if r.get("listed") is not None else 1)]
+    rows = [hub_company(r) for r in company_rows() if (r.get("listed") if r.get("listed") is not None else 1)]
     return jsonify({"ok": True, "companies": rows})
 
 
 @app.get("/api/hub/find")
 def api_hub_find():
     code = (request.args.get("code") or "").strip().lower()
-    r = db().execute("SELECT name, code, url FROM companies WHERE code=? AND COALESCE(active,1)=1", (code,)).fetchone()
+    r = db().execute("SELECT * FROM companies WHERE code=? AND COALESCE(active,1)=1", (code,)).fetchone()
     if not r:
         return jsonify({"ok": False, "error": "No company with that code. Check with your manager."}), 404
-    return jsonify({"ok": True, "company": dict(r)})
+    return jsonify({"ok": True, "company": hub_company(dict(r))})
 
 
 @app.get("/dispatch/companies")
@@ -12086,7 +12185,9 @@ def dispatch_companies():
         return redirect(url_for("dispatch_login"))
     if not is_dev():
         return redirect("/dispatch")
-    return render_template("dispatch_companies.html", portal="dispatch", companies=company_rows(False))
+    sites = [{"id": r["id"], "name": r["name"], "logo": site_logo_url(r) or DEFAULT_LOGO}
+             for r in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall()]
+    return render_template("dispatch_companies.html", portal="dispatch", companies=companies_with_look(), sites=sites)
 
 
 @app.post("/api/dispatch/companies")
@@ -12106,18 +12207,24 @@ def api_dispatch_companies():
     if not name or not code or not url:
         return jsonify({"ok": False, "error": "Enter a company name, a code (letters and numbers) and their web address."}), 400
     listed = 1 if str(f.get("listed", "1")).lower() in ("1", "true", "on", "yes") else 0
+    try:
+        site_id = int(f.get("site_id") or 0)
+    except (TypeError, ValueError):
+        site_id = 0
+    if site_id and site_by_id(site_id) is None:
+        site_id = 0
     active = 1 if str(f.get("active", "1")).lower() in ("1", "true", "on", "yes") else 0
     dup = db().execute("SELECT id FROM companies WHERE code=? AND id<>?", (code, cid)).fetchone()
     if dup:
         return jsonify({"ok": False, "error": "Another company already uses that code."}), 400
     if cid:
-        db().execute("UPDATE companies SET name=?, code=?, url=?, listed=?, active=? WHERE id=?",
-                     (name, code, url, listed, active, cid))
+        db().execute("UPDATE companies SET name=?, code=?, url=?, listed=?, active=?, site_id=? WHERE id=?",
+                     (name, code, url, listed, active, site_id, cid))
     else:
-        db().execute("INSERT INTO companies(name, code, url, listed, active, created_at) VALUES(?,?,?,?,?,?)",
-                     (name, code, url, listed, active, dt.datetime.now().isoformat(timespec="seconds")))
+        db().execute("INSERT INTO companies(name, code, url, listed, active, site_id, created_at) VALUES(?,?,?,?,?,?,?)",
+                     (name, code, url, listed, active, site_id, dt.datetime.now().isoformat(timespec="seconds")))
     db().commit()
-    return jsonify({"ok": True, "companies": company_rows(False)})
+    return jsonify({"ok": True, "companies": companies_with_look()})
 
 
 def seed_brand_photos():

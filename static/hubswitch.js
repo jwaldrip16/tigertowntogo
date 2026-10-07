@@ -8,7 +8,7 @@
     var p = new URLSearchParams(location.search), hub = p.get('hub');
     if (hub && /^https:\/\/[a-z0-9.-]+(:\d+)?$/i.test(hub) || /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(hub||'')) {
       localStorage.setItem(HUB_KEY, hub);
-      ['hub','app','co'].forEach(function(k){ p.delete(k); });
+      ['hub','app','co','bs'].forEach(function(k){ p.delete(k); });
       var qs = p.toString(); history.replaceState(null, '', location.pathname + (qs ? '?' + qs : ''));
     }
     // No picker remembered (the app or browser opened this site directly): the company
