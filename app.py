@@ -3171,6 +3171,7 @@ def order_dict(o):
         "tip_declined": bool(o["tip_declined"]),
         "cash": is_cash(o),
         "house": (_rv(o, "pay_method") or "") == "house_account",
+        "house_name": house_name_of(o),
         "multi_group": multi_codes(o),
         "credits": order_credits(o), "credit_cents": int(o["credit_cents"] or 0) if "credit_cents" in _okeys(o) else 0,
         "card_on_file": bool(card_info(o["id"])),
@@ -5054,6 +5055,8 @@ def checkout():
         return jsonify({"ok": False, "error": _merr}), 400
     if payload.get("cash") and not house and not cash_allowed():
         return jsonify({"ok": False, "error": "We don't take cash orders. Pay by card, PayPal, Venmo, gift card, or house account."}), 400
+    if house and not str(payload.get("house_account") or "").strip():
+        return jsonify({"ok": False, "error": "Type the business name for the house account."}), 400
     if house:
         payload["cash"] = True   # created like a cash order (no card), then marked paid to the house account
     sched = None
@@ -6599,6 +6602,8 @@ def api_mark_paid():
     last4 = "".join(ch for ch in str(data.get("last4") or "") if ch.isdigit())[-4:]
     if data.get("method") == "house":
         acct = (data.get("account") or "").strip()[:60]
+        if not acct:
+            return jsonify({"ok": False, "error": "Type the business name for the house account."}), 400
         mark_paid(o, method="house_account", ref=("House account " + acct + ((" ref " + ref) if ref else "")).strip()[:80])
         return jsonify({"ok": True})
     if is_cash(o):
@@ -7639,7 +7644,8 @@ def house_name_of(o):
         if (_rv(o, "pay_method") or "") != "house_account":
             return ""
         ref = str(_rv(o, "pay_ref") or "")
-        return ref[len("House account"):].strip() if ref.startswith("House account") else ""
+        n = ref[len("House account"):].strip() if ref.startswith("House account") else ""
+        return n.split(" ref ")[0].strip()
     except Exception:
         return ""
 

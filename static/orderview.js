@@ -36,8 +36,11 @@
       '<button type="button" class="btn primary ovgo" onclick="OrderView.confirm('+Number(o.id)+')">Set timer and confirm order</button></div>';
   }
   function build(o){
-    var num = (o.primary_no || o.code || '');
-    var sub = (o.primary_no && o.code && o.primary_no!==o.code) ? o.code : '';
+    // follow Settings > Order numbers for this screen (dispatch, restaurant or driver app)
+    var num = (typeof window.ordMain === 'function') ? window.ordMain(o) : (o.primary_no || o.code || '');
+    var sub = (typeof window.ordSub === 'function') ? window.ordSub(o)
+              : ((o.primary_no && o.code && o.primary_no!==o.code) ? o.code : '');
+    if (sub === num) sub = '';
     var status = [o.kitchen_status ? 'Kitchen: '+o.kitchen_status : '', o.dispatch_status ? 'Delivery: '+String(o.dispatch_status).replace(/_/g,' ') : '']
                    .filter(Boolean).join(' &middot; ');
     var ph = o.phone ? '<a href="tel:'+digits(o.phone)+'">'+esc(o.phone)+'</a>' : '';
@@ -52,6 +55,7 @@
         '<button type="button" class="btn" onclick="OrderView.close()" aria-label="Close">Close</button></div>'+
       '<div class="ovbody">'+
       row('Brand', o.site_name ? esc(o.site_name) : '')+
+      row('House account', o.house ? '<b>'+esc(o.house_name || 'No business name')+'</b>' : '')+
       row('Scheduled for', o.scheduled_label ? '<b>'+esc(o.scheduled_label)+'</b>' : '')+
       row('Items'+(o.item_count ? ' ('+o.item_count+')' : ''), '<ul class="lines ovitems">'+lines(o)+'</ul>')+
       row('Customer', '<b>'+esc(o.customer||'')+'</b>'+(ph ? '<br>'+ph : ''))+

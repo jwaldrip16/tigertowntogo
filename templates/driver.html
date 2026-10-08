@@ -21,6 +21,7 @@ const ORDSHOW = "{{ ordshow('driver') }}";
 function ordMain(o){ return (ORDSHOW !== 'secondary' && o && o.primary_no) ? o.primary_no : (o ? o.code : ''); }
 function ordSub(o){ return (ORDSHOW === 'both' && o && o.primary_no) ? o.code : ''; }
 function ordBoth(o){ const s = ordSub(o); return ordMain(o) + (s ? ' (' + s + ')' : ''); }
+function hEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];}); }
 
 function brandLine(o){
   if (!o || !o.site_name) return '';
@@ -464,7 +465,7 @@ function callInLine(o){
 function detailBlock(o){
   const lines = OrderLines.lis(o);
   return '<div class="detail">'+
-    '<div class="paybar">Delivery fee <b>'+o.fee+'</b> &middot; Tip <b>'+o.tip+'</b>'+(o.cash?' &middot; cash':'')+'</div>'+
+    '<div class="paybar">Delivery fee <b>'+o.fee+'</b> &middot; Tip <b>'+o.tip+'</b>'+(o.house?' &middot; House account'+(o.house_name?': <b>'+hEsc(o.house_name)+'</b>':''):(o.cash?' &middot; cash':''))+'</div>'+
     callInLine(o)+
     brandLine(o)+
     '<div class="detail-row"><span class="lbl">Pick up</span><span>'+o.restaurant+
@@ -631,7 +632,7 @@ async function stage(id, st, code){
     if (o && !o.cash && !o.tip_cents && !o.tip_declined && !o.tip_sig){
       openTip(o); return;
     }
-    if (!confirm((o && o.cash && !o.paid ? 'Cash order: did you collect '+o.total+'?\n\n' : '')+'Complete '+code+'? It leaves your run and moves to completed orders.')) return;
+    if (!confirm((o && o.cash && !o.paid ? 'Cash order: did you collect '+o.total+'?\n\n' : '')+'Complete '+(o ? ordBoth(o) : code)+'? It leaves your run and moves to completed orders.')) return;
   }
   await jpost('/api/order/status', {order_id:id, dispatch_status:st});
   state();

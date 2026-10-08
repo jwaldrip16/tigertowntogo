@@ -1169,7 +1169,7 @@ function payButtons(o){
     if(!o.cash && o.dispatch_status !== 'cancelled' && o.payment_status !== 'declined')
       h += '<button class="btn tiny" style="color:#c0392b" onclick="payFailed('+o.id+',\''+o.code+'\')">Card failed: cancel</button>';
   }
-  if(o.paid && o.pay_method==='house_account') h += '<span class="pill">House account</span>';
+  if(o.paid && o.pay_method==='house_account') h += '<span class="pill">House account'+(o.house_name?': '+esc(o.house_name):'')+'</span>';
   const ppx = (o.pp && (o.pp.state==='authorized' || o.pp.state==='captured')) ? (o.pp.extra || {}) : null;
   if(ppx){
     // PayPal already holds or charged this order: added items and tip changes never need the card typed again.
@@ -1238,7 +1238,8 @@ async function keyed(id){
   board(true);
 }
 async function houseAcct(id, code, total){
-  const acct = prompt('Charge '+code+' ('+total+') to a house account.\nAccount name (optional):', '');
+  let acct = prompt('Charge '+code+' ('+total+') to a house account.\nBusiness name:', '');
+  while(acct !== null && !acct.trim()) acct = prompt('Type the business name for the house account:', '');
   if(acct === null) return;
   const res = await jpost('/api/order/mark-paid', {order_id:id, method:'house', account:acct});
   if(!res.ok){ alert(res.error || 'That did not save.'); return; }
