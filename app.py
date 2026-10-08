@@ -1047,9 +1047,15 @@ def host_site():
     return s
 
 
+BRAND_LOCK_ON = False   # the Locked switch was removed (Oct 8, 2026): every brand is live
+
+
 def site_locked(sid):
     """A locked brand is not live yet: its restaurants are hidden from customers and online ordering,
-    and its company is left out of the shared driver/restaurant app picker. Unlock it to bring it in."""
+    and its company is left out of the shared driver/restaurant app picker. Unlock it to bring it in.
+    Turned off with BRAND_LOCK_ON, so any lock saved earlier no longer hides a brand."""
+    if not BRAND_LOCK_ON:
+        return False
     try:
         return str(setting("brand_locked_%d" % int(sid), str) or "") == "1"
     except Exception:
@@ -9425,6 +9431,8 @@ def sites_edit(b, con, who):
     if not is_owner():
         return jsonify({"ok": False, "error": "Only an owner can change the brand sites."}), 403
     op = b.get("op")
+    if op == "site_lock" and not BRAND_LOCK_ON:
+        return jsonify({"ok": False, "error": "Brand locking was removed. Every brand is live."}), 400
     if op == "site_lock":
         sid = int(b.get("id") or 0)
         srow = con.execute("SELECT * FROM sites WHERE id=?", (sid,)).fetchone()
