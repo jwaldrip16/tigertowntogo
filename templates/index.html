@@ -46,7 +46,7 @@
 </div>
 <h2 class="secttitle">{{ S.rest_title or 'Restaurants' }}</h2>
 {% if not biz_open %}<div class="panel" style="border-left:4px solid #b44a22">{% if S.closed_msg %}{{ S.closed_msg }}{% else %}<b>We are closed right now.</b> You can still place a future order: pick a restaurant and choose Schedule for later.{% endif %}</div>{% endif %}
-{% if hours_text %}<p class="muted small" style="text-align:center">Delivery hours{% if sel_region_name %} in {{ sel_region_name }}{% endif %}: {{ hours_text }}{% if biz_phone %} &middot; Call <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>{% endif %}</p>{% endif %}
+{% if hours_text %}<p class="muted small" style="text-align:center">Delivery hours{% if hours_region_name %} in {{ hours_region_name }}{% endif %}: {{ hours_text }}{% if biz_phone %} &middot; Call <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>{% endif %}</p>{% endif %}
 {% if closed_text %}<p class="muted small" style="text-align:center">{{ closed_text }}</p>{% endif %}
 {% if regions|length > 1 %}
 <div class="regionpick">

@@ -692,3 +692,5 @@ ul.ordlines{margin:4px 0}
 .menurow.blocked b{color:#b91c1c;text-decoration:line-through}
 .menurow .btn{min-width:96px}
 .modalback.hidden{display:none}
+
+.footclosed{font-weight:700}

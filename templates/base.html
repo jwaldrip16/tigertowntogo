@@ -75,15 +75,24 @@ function money(c){ return '$' + (c/100).toFixed(2); }
 </header>
 <main>{% block body %}{% endblock %}</main>
 {% if not portal and not staff_area %}<footer class="custfoot">
+  {% if foot_brands %}<div class="custfoot-in">
+    {% for b in foot_brands %}<div><h3>{{ b.name }}</h3>
+      {% if b.phone %}<p><b>Phone:</b> <a href="tel:{{ b.tel }}">{{ b.phone }}</a></p>{% endif %}
+      {% if b.regions %}{% for r in b.regions %}<p>{% if b.regions|length > 1 %}<b>{{ r.name }}:</b>{% else %}<b>Hours:</b>{% endif %} {{ r.hours or 'Call for hours' }}{% if r.phone %} &middot; <a href="tel:{{ r.tel }}">{{ r.phone }}</a>{% endif %}</p>{% if r.closed %}<p class="footclosed">{{ r.closed }}</p>{% endif %}{% endfor %}
+      {% else %}<p><b>Hours:</b> {{ b.hours or 'Call for hours' }}</p>{% endif %}
+      {% if b.email %}<p><b>Email:</b> <a href="mailto:{{ b.email }}">{{ b.email }}</a></p>{% endif %}
+      {% if b.address %}<p><b>Address:</b> {{ b.address }}</p>{% endif %}
+    </div>{% endfor %}
+  </div>{% else %}
   <div class="custfoot-in">
-    <div><h3>Hours</h3><p>{{ biz_hours or 'Call us for today\'s hours.' }}</p></div>
+    <div><h3>Hours</h3>{% if foot_regions %}{% for r in foot_regions %}<p>{% if foot_regions|length > 1 %}<b>{{ r.name }}:</b> {% endif %}{{ r.hours or 'Call us for today\'s hours.' }}{% if r.phone %} &middot; <a href="tel:{{ r.tel }}">{{ r.phone }}</a>{% endif %}</p>{% if r.closed %}<p class="footclosed">{{ r.closed }}</p>{% endif %}{% endfor %}{% else %}<p>{{ biz_hours or 'Call us for today\'s hours.' }}</p>{% endif %}</div>
     <div><h3>Contact</h3>
       {% if biz_address %}<p><b>Address:</b> {{ biz_address }}</p>{% endif %}
       {% if biz_phone %}<p><b>Phone:</b> <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a></p>{% endif %}
       {% if biz_email %}<p><b>Email:</b> <a href="mailto:{{ biz_email }}">{{ biz_email }}</a></p>{% endif %}</div>
     {% if biz_address %}<div class="custmap"><iframe title="Map" loading="lazy" referrerpolicy="no-referrer-when-downgrade"
       src="https://maps.google.com/maps?q={{ biz_address|urlencode }}&z=11&output=embed"></iframe></div>{% endif %}
-  </div>
+  </div>{% endif %}
   <div class="custfoot-bottom">
     {% for k, u in socials %}<a class="social" href="{{ u }}" target="_blank" rel="noopener">{{ {'x':'X','facebook':'Facebook','instagram':'Instagram'}[k] }}</a>{% endfor %}
     <p>&copy; {{ year }} {{ biz_name }}. All rights reserved. &middot; <a href="/faq">FAQ's</a> &middot; <a href="/drive">Drive with us</a> &middot; <a href="/partner">Partner with us</a> &middot; <a href="/privacy">Privacy policy</a> &middot; <a href="/delete-account">Delete account</a></p>

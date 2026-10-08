@@ -10,6 +10,8 @@
   {% if b.phone %}<p class="faqbig"><a href="tel:{{ b.tel }}">{{ b.phone }}</a></p>{% endif %}
   {% if b.email %}<p class="faqbig"><a href="mailto:{{ b.email }}">{{ b.email }}</a></p>{% endif %}
   {% if b.address %}<p>{{ b.address }}</p>{% endif %}
+  {% if b.regions %}{% for r in b.regions %}<p class="small">{% if b.regions|length > 1 %}<b>{{ r.name }}:</b>{% else %}<b>Hours:</b>{% endif %} {{ r.hours or 'Call for hours' }}{% if r.phone %} &middot; <a href="tel:{{ r.tel }}">{{ r.phone }}</a>{% endif %}</p>{% if r.closed %}<p class="small footclosed">{{ r.closed }}</p>{% endif %}{% endfor %}
+  {% else %}<p class="small"><b>Hours:</b> {{ b.hours or 'Call for hours' }}</p>{% endif %}
 </div>{% endfor %}
 </div>
 {% else %}

@@ -3284,8 +3284,13 @@ def home():
     sel_name = next((g["name"] for g in regions if g["id"] == sel_id), "")
     if sel_id:
         biz = biz_on and business_in_hours(rid=sel_id)
+    elif regions:
+        # open when any area shown here is open; a region's closed date closes it even if the business hours say open
+        biz = biz_on and any(business_in_hours(rid=g["id"]) for g in regions)
     else:
-        biz = biz_on and (business_in_hours() or any(business_in_hours(rid=g["id"]) for g in regions))
+        biz = biz_on and business_in_hours()
+    _hr = sel_id or (regions[0]["id"] if len(regions) == 1 else 0)
+    _hr_name = sel_name or (regions[0]["name"] if len(regions) == 1 else "")
     if brand_site is not None and not sel_id:
         g._site = brand_site   # show the picked brand's logo, name, phone and design
     far_name = ""
@@ -3294,9 +3299,10 @@ def home():
         far_name = _fr["name"] if _fr else ""
     return render_template("index.html", cards=cards, biz_open=biz, regions=regions, far_name=far_name,
                            brands=brands, sel_brand=brand_site["id"] if brand_site is not None else 0,
-                           sel_region=sel_id, sel_region_name=sel_name,
-                           hours_text=business_hours_label(sel_id or None),
-                           closed_text=closed_dates_label(sel_id) if sel_id else "",
+                           sel_region=sel_id, sel_region_name=sel_name, hours_region_name=_hr_name,
+                           # several areas and none picked: the footer lists every area's hours instead
+                           hours_text=(business_hours_label(_hr) if _hr else ("" if regions else business_hours_label())),
+                           closed_text=closed_dates_label(_hr) if _hr else "",
                            any_on=any_rest_on(), any_open=biz and any_rest_open())
 
 @app.route("/r/<slug>")
@@ -8585,6 +8591,14 @@ def slot_hours_error(dow, start, end, rids=None, day=None):
         rname = (_region(rid)["name"] if rid and _region(rid) else "The business")
         if day is not None and rid and day.isoformat() in set(region_closed_dates(rid)):
             return rname + " is closed all day on " + short_date(day) + ", so no hours can be set that day."
+        _part = region_closed_hours(rid).get(day.isoformat()) if (day is not None and rid) else None
+        if _part:
+            pa, pb = _hm(_part[0]), _hm(_part[1])
+            pb = 1440 if pb == 23 * 60 + 59 else pb
+            if s < pb and pa < e:
+                return (rname + " is closed " + _ampm(_part[0]) + " to " +
+                        ("close" if _part[1] == "23:59" else _ampm(_part[1])) + " on " + short_date(day) +
+                        ". Pick hours outside that.")
         h = business_hours(rid)
         if not h:
             continue
@@ -14787,7 +14801,10 @@ def region_closed_list(rid):
     r = _region(rid)
     if not r:
         return []
-    today = dt.date.today().isoformat()
+    try:
+        today = region_now(rid).date().isoformat()   # the region's own date (Athens GA runs on Eastern)
+    except Exception:
+        today = dt.date.today().isoformat()
     return sorted({d for d in (r["closed_dates"] or "").split(",") if d and d >= today})
 
 
@@ -16722,17 +16739,56 @@ def faq_all_brands():
         return False
 
 
-def faq_brand_contacts():
-    """Every brand's name, phone, email and address, for the All brands FAQ."""
+def brand_region_hours(site_row):
+    """Each of a brand's regions with its hours, closed dates and own phone, for the customer site.
+    These are the same hours and closed dates the driver schedule checks shifts against."""
+    if site_row is None:
+        return []
+    brand_ph = nice_phone((site_row["phone"] or "").strip()) if (site_row["phone"] or "").strip() else ""
     out = []
+    for r in db().execute("SELECT * FROM regions WHERE COALESCE(site_id,0)=? ORDER BY sort, id",
+                          (int(site_row["id"]),)).fetchall():
+        rp = (r["phone"] or "").strip()
+        ph = nice_phone(rp) if rp else ""
+        out.append({"id": r["id"], "name": (r["name"] or "").strip(),
+                    "hours": business_hours_label(r["id"]) or "",
+                    "closed": closed_dates_label(r["id"], 5),
+                    "phone": ph if ph and ph != brand_ph else "",
+                    "tel": "".join(ch for ch in ph if ch.isdigit())})
+    return out
+
+
+def faq_brand_contacts():
+    """Every brand's name, phone, email, address, and each region's hours and closed dates,
+    for the All brands pages."""
+    out = []
+    main_hours = business_hours_label() or ""
     for srow in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
         bc = brand_contact(srow) or {}
         ph = nice_phone((srow["phone"] or "").strip()) or ""
         out.append({"name": (srow["name"] or "").strip(), "phone": ph,
                     "tel": "".join(ch for ch in ph if ch.isdigit()),
                     "email": bc.get("email") or "", "address": bc.get("address") or "",
-                    "logo": brand_logo(srow)})
+                    "logo": brand_logo(srow), "regions": brand_region_hours(srow), "hours": main_hours})
     return [b for b in out if b["name"]]
+
+
+@app.context_processor
+def inject_foot_brands():
+    """Footer hours: every brand on the All brands site, or this brand's own regions on a brand site."""
+    try:
+        if request.path.startswith(_STAFF_PREFIXES) or request.path.startswith(("/go/", "/reset/")) or not brands_on():
+            return {"foot_brands": [], "foot_regions": []}
+        s = current_site()
+        if s is not None:
+            return {"foot_brands": [], "foot_regions": brand_region_hours(s)}
+        n = db().execute("SELECT COUNT(*) c FROM sites").fetchone()["c"]
+        if n > 1:
+            return {"foot_brands": faq_brand_contacts(), "foot_regions": []}
+        one = db().execute("SELECT * FROM sites ORDER BY sort, id LIMIT 1").fetchone()
+        return {"foot_brands": [], "foot_regions": brand_region_hours(one) if one is not None else []}
+    except Exception:
+        return {"foot_brands": [], "foot_regions": []}
 
 
 def faq_items(region_id=None, site=None, all_brands=False):
