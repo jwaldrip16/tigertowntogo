@@ -874,12 +874,14 @@ function stPill(s){
   const c = s==='approved' ? 'green' : s==='denied' ? 'red' : 'amber';
   return '<span class="pill '+c+'">'+s+'</span>';
 }
+let AV_LAST = null;
 function renderAvail(av, off){
+  AV_LAST = [av, off];
   av = av || []; off = off || [];
   document.getElementById('week').innerHTML = DAYS.map((d,i)=>{
     const mine = av.filter(a=>a.dow===i);
     return '<div class="wday"><div class="wname">'+d+'</div>'+
-      (mine.length ? mine.map(a=>'<div class="wslot '+a.status+'">'+a.start+'-'+a.end+(a.region_label?'<br><span class="small">'+rgEsc(a.region_label)+'</span>':'')+'</div>').join('')
+      (mine.length ? mine.map(a=>'<div class="wslot '+a.status+'">'+a.start+'-'+a.end+(a.region_label?'<br><span class="small">'+rgMark(a.region_label)+'</span>':'')+'</div>').join('')
                    : '<div class="wslot none">off</div>')+'</div>';
   }).join('');
   document.getElementById('avail').innerHTML = av.length ? av.map(a=>
@@ -946,7 +948,8 @@ function loadWeek(start){
   });
 }
 loadRegions().then(()=>{ const s = document.getElementById('avRg'); if(s) s.innerHTML = regionBoxes('avR', []);
-  try { if (WEEK && WEEK.days) drawWeek(); } catch(e) {} });
+  try { if (WEEK && WEEK.days) drawWeek(); } catch(e) {}
+  try { if (AV_LAST) renderAvail(AV_LAST[0], AV_LAST[1]); } catch(e) {} });
 function drawWeek(){
   const w = WEEK;
   const due = document.getElementById('weekDue');
@@ -964,9 +967,9 @@ function drawWeek(){
                 : w.label + ' is open now and closes ' + w.due_human + '.')));
   document.getElementById('weekSave').disabled = shut;
   document.getElementById('weekCopy').disabled = shut;
-  document.getElementById('weekState').textContent =
+  document.getElementById('weekState').innerHTML =
     w.hours + ' day' + (w.hours===1?'':'s') + ' picked' +
-    (w.regions_label ? ' · Your regions: ' + w.regions_label : ' · No region assigned yet, ask dispatch');
+    (w.regions_label ? ' · Your regions: ' + rgMark(w.regions_label) : ' · No region assigned yet, ask dispatch');
   document.getElementById('weekCal').innerHTML = w.days.map(d=>
     '<div class="wcell'+(d.off||d.region_closed?' offday':'')+'">'+
       '<div class="wtop"><label><input type="checkbox" data-dow="'+d.dow+'" class="wOn"'+

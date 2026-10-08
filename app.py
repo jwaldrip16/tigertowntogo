@@ -9764,7 +9764,7 @@ def api_regions_list():
     pid = session.get("driver_id") if as_driver else session.get("dispatcher_id")
     allowed = today_slot_regions(kind, pid)
     # locked = its brand is locked (schedules mark it); hidden = kept off the dispatch board
-    _lk = locked_region_ids() if not as_driver else set()
+    _lk = locked_region_ids()
     _hid = board_hidden_regions() if not as_driver else set()
     names = {r["id"]: r["name"] for r in all_regions()}
     return jsonify({"ok": True, "regions": [{"id": r["id"], "name": r["name"], "drive_lead": drive_lead_of(r["id"]),
