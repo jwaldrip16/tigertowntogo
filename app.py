@@ -1179,6 +1179,41 @@ def haversine_miles(a_lat, a_lng, b_lat, b_lng):
 
 ROAD_FACTOR = 1.3   # straight-line -> driving estimate when no routing key is set
 
+# Address lookups go out to Google/OpenStreetMap while the order screen waits. Keep them short,
+# remember misses for a while (so pricing then placing the same bad address doesn't wait twice),
+# and when the lookup service stops answering, stop asking it for a minute instead of making
+# every new order wait for it to time out.
+GEO_TIMEOUT = 4
+_GEO_MISS = {}            # lookup text -> time it failed
+_GEO_MISS_SECS = 600
+_GEO_DOWN_UNTIL = [0.0]   # lookup service timed out / errored: skip it until this time
+_GEO_LOCK = threading.Lock()
+
+
+def _geo_missed(q):
+    with _GEO_LOCK:
+        t = _GEO_MISS.get(q)
+        if t and time.time() - t < _GEO_MISS_SECS:
+            return True
+        _GEO_MISS.pop(q, None)
+        return False
+
+
+def _geo_miss(q):
+    with _GEO_LOCK:
+        if len(_GEO_MISS) > 5000:
+            _GEO_MISS.clear()
+        _GEO_MISS[q] = time.time()
+
+
+def _geo_down():
+    return time.time() < _GEO_DOWN_UNTIL[0]
+
+
+def _geo_trouble():
+    _GEO_DOWN_UNTIL[0] = time.time() + 60
+
+
 def geocode(raw):
     """Validate + normalise a customer address. Returns dict(ok, formatted, lat, lng, source)."""
     q = " ".join(raw.lower().split())
@@ -1189,13 +1224,20 @@ def geocode(raw):
                   "lat": row["lat"], "lng": row["lng"], "source": "cache"}
         if not GOOGLE_KEY or (row["src"] or "") == "google":
             return cached
-        # saved from OpenStreetMap before the Google key was added: ask Google fresh
+        # saved from OpenStreetMap before the Google key was added: ask Google fresh,
+        # unless Google just failed on it or isn't answering right now
+        if cached["ok"] and (_geo_missed(q) or _geo_down()):
+            return cached
+    if not q or _geo_missed(q) or _geo_down():
+        if cached and cached["ok"]:
+            return cached
+        return {"ok": False, "formatted": None, "lat": None, "lng": None, "source": "none"}
     res = None
     try:
         if GOOGLE_KEY:
             url = ("https://maps.googleapis.com/maps/api/geocode/json?address="
                    + urllib.parse.quote(raw) + "&key=" + GOOGLE_KEY)
-            data = json.loads(urllib.request.urlopen(url, timeout=8).read())
+            data = json.loads(urllib.request.urlopen(url, timeout=GEO_TIMEOUT).read())
             if data.get("status") == "OK":
                 top = data["results"][0]
                 loc = top["geometry"]["location"]
@@ -1205,14 +1247,16 @@ def geocode(raw):
             url = ("https://nominatim.openstreetmap.org/search?format=json&limit=1&q="
                    + urllib.parse.quote(raw))
             req = urllib.request.Request(url, headers={"User-Agent": "fleetdelivery/1.0"})
-            data = json.loads(urllib.request.urlopen(req, timeout=8).read())
+            data = json.loads(urllib.request.urlopen(req, timeout=GEO_TIMEOUT).read())
             if data:
                 top = data[0]
                 res = {"ok": True, "formatted": top["display_name"],
                        "lat": float(top["lat"]), "lng": float(top["lon"]), "source": "osm"}
     except Exception:
         res = None
+        _geo_trouble()
     if res is None:
+        _geo_miss(q)
         if cached and cached["ok"]:
             return cached          # Google didn't answer: keep using the saved one
         return {"ok": False, "formatted": None, "lat": None, "lng": None, "source": "none"}
@@ -1231,25 +1275,30 @@ def zip_center(z):
     """Center point of a 5-digit US ZIP code, cached. None when it can't be found."""
     key = "zip:" + z
     row = db().execute("SELECT * FROM geocache WHERE q=? AND ok=1", (key,)).fetchone()
-    if row and (not GOOGLE_KEY or (row["src"] or "") == "google"):
+    if row and (not GOOGLE_KEY or (row["src"] or "") == "google" or _geo_missed(key) or _geo_down()):
         return {"lat": row["lat"], "lng": row["lng"], "formatted": row["formatted"]}
+    if _geo_missed(key) or _geo_down():
+        return None
     res = None
     try:
         if GOOGLE_KEY:
             url = ("https://maps.googleapis.com/maps/api/geocode/json?components=postal_code:"
                    + z + "|country:US&key=" + GOOGLE_KEY)
-            data = json.loads(urllib.request.urlopen(url, timeout=8).read())
+            data = json.loads(urllib.request.urlopen(url, timeout=GEO_TIMEOUT).read())
             if data.get("status") == "OK":
                 loc = data["results"][0]["geometry"]["location"]
                 res = {"lat": loc["lat"], "lng": loc["lng"], "formatted": data["results"][0]["formatted_address"]}
         else:
             url = "https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=us&postalcode=" + z
             req = urllib.request.Request(url, headers={"User-Agent": "fleetdelivery/1.0"})
-            data = json.loads(urllib.request.urlopen(req, timeout=8).read())
+            data = json.loads(urllib.request.urlopen(req, timeout=GEO_TIMEOUT).read())
             if data:
                 res = {"lat": float(data[0]["lat"]), "lng": float(data[0]["lon"]), "formatted": data[0]["display_name"]}
     except Exception:
         res = None
+        _geo_trouble()
+    if not res:
+        _geo_miss(key)
     if res:
         db().execute("INSERT OR REPLACE INTO geocache(q,formatted,lat,lng,ok,src) VALUES(?,?,?,?,1,?)",
                      (key, res["formatted"], res["lat"], res["lng"], "google" if GOOGLE_KEY else "osm"))
@@ -3445,10 +3494,12 @@ def api_address_suggest():
             seen.add(row["formatted"])
             out.append({"formatted": row["formatted"], "lat": row["lat"], "lng": row["lng"]})
     try:
+        if len(out) >= 6 or _geo_down():
+            raise LookupError("enough saved suggestions, or the lookup service isn't answering")
         if GOOGLE_KEY:
             url = ("https://maps.googleapis.com/maps/api/geocode/json?address="
                    + urllib.parse.quote(q) + "&components=country:US&key=" + GOOGLE_KEY)
-            data = json.loads(urllib.request.urlopen(url, timeout=6).read())
+            data = json.loads(urllib.request.urlopen(url, timeout=3).read())
             hits = data.get("results", []) if data.get("status") == "OK" else []
             for h in hits[:6]:
                 loc = h["geometry"]["location"]
@@ -3460,13 +3511,15 @@ def api_address_suggest():
             url = ("https://nominatim.openstreetmap.org/search?format=json&limit=6"
                    "&countrycodes=us&viewbox=-85.75,32.95,-85.05,32.40&q=" + urllib.parse.quote(q))
             req = urllib.request.Request(url, headers={"User-Agent": "fleetdelivery/1.0"})
-            for h in json.loads(urllib.request.urlopen(req, timeout=6).read()):
+            for h in json.loads(urllib.request.urlopen(req, timeout=3).read()):
                 if h["display_name"] not in seen:
                     seen.add(h["display_name"])
                     out.append({"formatted": h["display_name"],
                                 "lat": float(h["lat"]), "lng": float(h["lon"])})
-    except Exception:
+    except LookupError:
         pass
+    except Exception:
+        _geo_trouble()
     for c in out:                      # so picking one is an instant, exact match later
         db().execute("INSERT OR REPLACE INTO geocache(q,formatted,lat,lng,ok,src) VALUES(?,?,?,?,1,?)",
                      (" ".join(c["formatted"].lower().split()), c["formatted"], c["lat"], c["lng"], gsrc))
