@@ -6674,9 +6674,8 @@ def api_unsend_kitchen():
     if db().execute("SELECT kitchen_status FROM orders WHERE id=?", (o["id"],)).fetchone()[0] != "waiting":
         db().rollback()
         return jsonify({"ok": False, "error": "The kitchen just confirmed this order, so it can't be unsent."}), 400
-    # A future order whose time hasn't come yet goes back to Future orders. It comes out again at
-    # its normal release time, or at its due time if that release time already passed (so it
-    # doesn't pop right back out). One that is due now stays on the board waiting for Send to kitchen.
+    # A future order that isn't due yet goes back to Future orders and comes out again at its
+    # normal release time. One that is due now stays on the board waiting for Send to kitchen.
     back_to_future, unassigned = False, ""
     sf = _rv(o, "scheduled_for")
     if sf:
@@ -6684,10 +6683,10 @@ def api_unsend_kitchen():
             due = dt.datetime.fromisoformat(str(sf)[:19])
         except Exception:
             due = None
-        if due and due > dt.datetime.now():
-            rel = due - dt.timedelta(minutes=future_lead())
-            if rel <= dt.datetime.now():
-                rel = due
+        # "Due" follows Dispatch settings > future orders lead time: the order is due once it is
+        # within that many minutes of its scheduled time.
+        rel = (due - dt.timedelta(minutes=future_lead())) if due else None
+        if rel and rel > dt.datetime.now():
             back_to_future = True
             if o["driver_id"] and o["dispatch_status"] in ("assigned", "received", "at_restaurant"):
                 _d = db().execute("SELECT name FROM drivers WHERE id=?", (o["driver_id"],)).fetchone()
