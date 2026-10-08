@@ -965,7 +965,8 @@ function drawWeek(){
   document.getElementById('weekSave').disabled = shut;
   document.getElementById('weekCopy').disabled = shut;
   document.getElementById('weekState').textContent =
-    w.hours + ' day' + (w.hours===1?'':'s') + ' picked';
+    w.hours + ' day' + (w.hours===1?'':'s') + ' picked' +
+    (w.regions_label ? ' · Your regions: ' + w.regions_label : ' · No region assigned yet, ask dispatch');
   document.getElementById('weekCal').innerHTML = w.days.map(d=>
     '<div class="wcell'+(d.off||d.region_closed?' offday':'')+'">'+
       '<div class="wtop"><label><input type="checkbox" data-dow="'+d.dow+'" class="wOn"'+

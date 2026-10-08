@@ -160,6 +160,7 @@ async function load(){
       ' <span class="pill '+(d.roster==='unavailable'?'red':'green')+'">'+d.roster+'</span>'+
       (d.off_today?' <span class="pill amber">off today</span>':'')+'</h2>'+
       '<span class="muted small">'+d.phone+'</span></div>'+
+      '<div class="small muted">Regions: '+(d.regions_label ? '<strong>'+d.regions_label+'</strong>' : '<span style="color:#b42318">none assigned yet</span>')+'</div>'+
       '<div class="week">'+week+'</div>'+ rows + off +
       '<div class="row"><input id="nd'+d.id+'" type="date" value="'+new Date().toLocaleDateString('en-CA')+'">'+
       '<input id="ns'+d.id+'" type="time" value="16:00"><input id="ne'+d.id+'" type="time" value="22:00">'+
@@ -291,7 +292,7 @@ async function loadWeek(start){
   document.getElementById('wkBoard').innerHTML =
     '<table class="weekgrid"><tr><th>Driver</th>' +
     DAYS.map((d,i)=>'<th>'+d+' '+(r.dates?r.dates[i]:'')+'</th>').join('') + '<th>Sent</th></tr>' +
-    r.drivers.map(d=>'<tr><td><strong>'+d.driver+'</strong></td>' +
+    r.drivers.map(d=>'<tr><td><strong>'+d.driver+'</strong><br><span class="small muted">'+(d.regions_label || 'no region')+'</span></td>' +
       d.days.map(x=> x.region_closed
         ? '<td class="daycell" title="Region closed this day"><span class="pill red">'+x.region_closed+'</span></td>'
         : '<td class="daycell'+(!d.submitted && x.off?' noshow':'')+'" title="Click to set hours" '+

@@ -8207,7 +8207,9 @@ def week_block(driver_id, week_start):
         })
     due = week_due(week_start)
     opens = week_opens(week_start)
+    _rg = driver_region_ids(driver_id)
     return {"week_start": ws, "label": week_label(week_start),
+            "regions_label": region_names(_rg) if _rg else "",
             "opens_at": opens.isoformat(timespec="minutes"),
             "opens_human": pretty_day(week_opens(week_start).date()),
             "window_open": dt.datetime.now() >= opens and dt.datetime.now() <= due,
@@ -8543,6 +8545,7 @@ def api_dispatch_schedule():
         pending += len([a for a in av if a["status"] == "pending"])
         pending += len([o for o in off if o["status"] == "pending"])
         out.append({"id": d["id"], "name": d["name"], "phone": d["phone"],
+                    "regions_label": region_names(driver_region_ids(d["id"])) if driver_region_ids(d["id"]) else "",
                     "roster": driver_group(d), "status": d["status"],
                     "off_today": off_today(d["id"], today),
                     "availability": av, "time_off": off})
