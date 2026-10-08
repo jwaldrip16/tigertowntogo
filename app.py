@@ -4105,6 +4105,8 @@ def payout_brand_name(o):
 def pay_rail_name(wallet):
     return "Branch" if (wallet or "").upper() == "BRANCH" else "PayPal"
 
+_pp_retry = threading.local()
+
 def pp_api(method, path, body=None, request_id=None):
     """Returns (http status, json). Never raises."""
     try:
@@ -4120,21 +4122,44 @@ def pp_api(method, path, body=None, request_id=None):
         return resp.status, (json.loads(raw) if raw else {})
     except urllib.error.HTTPError as e:
         try:
-            return e.code, json.loads(e.read() or b"{}")
+            raw = e.read() or b"{}"
+            j = json.loads(raw)
         except Exception:
-            return e.code, {}
+            j = {"message": "PayPal answered with error %s." % e.code}
+        if e.code == 401 and not getattr(_pp_retry, "on", False):
+            # a stale or revoked sign-in token: get a fresh one and try once more
+            with _pp_lock:
+                _pp_toks.clear()
+            _pp_retry.on = True
+            try:
+                return pp_api(method, path, body, request_id)
+            finally:
+                _pp_retry.on = False
+        print("PayPal %s %s -> %s %s" % (method, path, e.code, json.dumps(j)[:600]))
+        return e.code, j
     except Exception as e:
-        return 0, {"message": str(e)}
+        print("PayPal %s %s failed: %s" % (method, path, e))
+        return 0, {"message": "Could not reach PayPal: " + str(e)[:200]}
 
 def pp_money(cents):
     return {"currency_code": "USD", "value": "%.2f" % (int(cents) / 100.0)}
 
 def pp_err(j, fallback="PayPal did not accept that."):
-    d = (j.get("details") or [{}])[0] if isinstance(j, dict) else {}
-    issue = d.get("issue") or (j.get("name") if isinstance(j, dict) else "") or ""
+    j = j if isinstance(j, dict) else {}
+    d = (j.get("details") or [{}])[0] or {}
+    issue = d.get("issue") or j.get("name") or j.get("error") or ""
     if issue == "INSTRUMENT_DECLINED":
         return "That card or account was declined. Try another way to pay."
-    return (d.get("description") or (j.get("message") if isinstance(j, dict) else "") or fallback)
+    if j.get("error") == "invalid_client" or issue in ("AUTHENTICATION_FAILURE", "invalid_token"):
+        return "PayPal turned down the API keys (" + (j.get("error_description") or issue) + "). Check Sandbox/Live in Settings matches the keys."
+    if issue == "NOT_AUTHORIZED" or issue == "PERMISSION_DENIED":
+        return "PayPal says this account isn't allowed to do that yet (" + (d.get("description") or j.get("message") or issue) + ")."
+    msg = d.get("description") or j.get("message") or j.get("error_description") or ""
+    if msg and issue and issue not in msg:
+        msg += " (" + issue + ")"
+    if not msg:
+        return fallback + (" PayPal said: " + issue if issue else "")
+    return msg
 
 PP_DECLINES = {
     "5120": "Declined: not enough money on the card.", "5400": "Declined: the card is expired.",
@@ -4430,7 +4455,10 @@ def _pp_create(o, b, kind, acct):
             "): " + pp_err(j, "no reason given") + " Took it without saving.")
         st, j = pp_api("POST", "/v2/checkout/orders", plain)
     if st not in (200, 201) or not j.get("id"):
-        return jsonify({"ok": False, "error": pp_err(j, "PayPal could not start the payment.")}), 400
+        msg = pp_err(j, "PayPal could not start the payment.")
+        log("payment", o["code"] + " PayPal could not start the payment: " + msg +
+            " [status %s, %s keys, debug %s]" % (st, pp_conf()["mode"], (j or {}).get("debug_id", "")))
+        return jsonify({"ok": False, "error": msg + (" (PayPal ref " + j["debug_id"] + ")" if (j or {}).get("debug_id") else "")}), 400
     if kind == "order":
         db().execute("UPDATE orders SET pp_order_id=?, pp_acct=? WHERE id=?", (j["id"], acct, o["id"]))
         db().commit()
