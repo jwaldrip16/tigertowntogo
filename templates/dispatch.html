@@ -1277,6 +1277,7 @@ function srcPill0(o){
   return '<span class="pill grey">'+esc(o.source_label||'Call-in')+'</span>';
 }
 function kitchenGo(o){
+  if(o.can_unsend_kitchen) return '<button class="btn tiny" title="Take it back off the kitchen until you send it again" onclick="unsendKitchen('+o.id+','+(o.kitchen_status==='preparing'?1:0)+','+(o.uses_app?1:0)+')">'+(o.uses_app?'Unsend from kitchen':'Unrelease order')+'</button>';
   if(!o.can_send_kitchen) return '';
   if(!o.uses_app) return '<span class="pill amber">Not released yet</span>'+
     '<button class="btn tiny primary" onclick="sendKitchen('+o.id+')">Release order</button>';
@@ -1287,6 +1288,16 @@ async function confirmCall(id){
   const r = await jpost('/api/dispatch/confirm-call', {order_id:id});
   if(!r.ok){ alert(r.error||'Could not mark it.'); return; }
   if(confirm('Marked confirmed. Send it to the kitchen now?')) sendKitchen(id); else if(typeof refresh==='function') refresh();
+}
+async function unsendKitchen(id, started, app){
+  const msg = app ? (started ? 'The kitchen already started this order. Pull it back anyway? They get a message to stop making it.'
+                             : 'Pull this order back from the kitchen? It comes off their screen and they get a message not to start it.')
+                  : 'Unrelease this order? It goes back to waiting until you release it again.';
+  if(!confirm(msg)) return;
+  const res = await jpost('/api/order/unsend-kitchen', {order_id:id});
+  if(!res.ok){ alert(res.error || 'Could not pull it back.'); return; }
+  ffToast(app ? 'Pulled back from the kitchen. Tap Send to kitchen when it is ready to go.' : 'Unreleased. Tap Release order when it is ready.');
+  board(true);
 }
 async function sendKitchen(id){
   const res = await jpost('/api/order/send-kitchen', {order_id:id});
