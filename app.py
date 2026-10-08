@@ -13544,6 +13544,13 @@ def inject_staff_brand():
         return {"staff_brand": None}
 
 
+@app.get("/kitchen")
+@app.get("/driver-app")
+def hub_short_alias():
+    # Short addresses people type by hand land on the shared app picker instead of a Not Found page.
+    return redirect("/go/kitchen" if request.path == "/kitchen" else "/go/driver")
+
+
 @app.get("/go/<which>")
 def hub_pick(which):
     if which not in HUB_APPS:
