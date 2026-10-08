@@ -4242,6 +4242,14 @@ def _pp_void(o, why="cancelled"):
     st, j = pp_api("POST", "/v2/payments/authorizations/" + o["pp_auth_id"] + "/void")
     issue = str((((j or {}).get("details") or [{}])[0] or {}).get("issue") or "").upper() if isinstance(j, dict) else ""
     gone = issue in ("PREVIOUSLY_VOIDED", "AUTHORIZATION_VOIDED", "AUTHORIZATION_EXPIRED", "AUTHORIZATION_ALREADY_VOIDED")
+    if st not in (200, 204) and not gone:
+        # Ask PayPal what the hold looks like now: if it is already voided, expired or denied, nothing is held.
+        try:
+            s2, a2 = pp_api("GET", "/v2/payments/authorizations/" + o["pp_auth_id"])
+            if s2 == 200 and str((a2 or {}).get("status") or "").upper() in ("VOIDED", "EXPIRED", "DENIED"):
+                gone = True
+        except Exception:
+            pass
     if gone:
         # PayPal already let go of this hold (released earlier or it expired): just catch our records up.
         why = why + ", PayPal had already released it"
