@@ -102,7 +102,14 @@
     <span class="small muted" id="rp{{ d.r['id'] }}"></span></div>
   <button class="btn primary">Save {{ d.r['name'] }}</button>
   <p><a class="btn small" href="/dispatch/menu/{{ d.r['id'] }}">Menu items</a>
-     <a class="btn small" href="/dispatch/account">Store code and PIN</a></p>
+     <button type="button" class="btn small" onclick="document.getElementById('rl{{ d.r['id'] }}').classList.toggle('hidden')">Store code and PIN</button></p>
+  <div id="rl{{ d.r['id'] }}" class="hidden" style="border:1px solid #e5e7eb;border-radius:10px;padding:10px;margin:6px 0">
+    <div class="small muted">This is what {{ d.r['name'] }} types to sign in to the restaurant app.</div>
+    <div class="row"><label>Store code</label><input id="rlc{{ d.r['id'] }}" value="{{ d.r['slug'] }}" autocomplete="off"></div>
+    <div class="row"><label>New PIN</label><input id="rlp{{ d.r['id'] }}" placeholder="leave blank to keep the current one" autocomplete="off"></div>
+    <button type="button" class="btn small primary" onclick="saveRestLogin({{ d.r['id'] }})">Save restaurant app login</button>
+    <span class="small muted" id="rlm{{ d.r['id'] }}"></span>
+  </div>
 </form>
 <form method="post" action="/dispatch/restaurants/delete"
       onsubmit="return confirm('Remove {{ d.r['name'] }} and its menu? This cannot be undone.');">
@@ -114,6 +121,18 @@
 <p class="muted" id="rgNone" style="display:none">No restaurants in the regions you picked. Tick another region or press Show all.</p>
 {% endblock %}
 {% block scripts %}<script>
+async function saveRestLogin(id){
+  const code = document.getElementById('rlc'+id).value.trim();
+  const pin = document.getElementById('rlp'+id).value.trim();
+  const msg = document.getElementById('rlm'+id);
+  if(!code){ msg.textContent = 'Enter a store code.'; return; }
+  const body = {op:'update', restaurant_id:id, slug:code};
+  if(pin) body.pin = pin;
+  const res = await jpost('/api/dispatch/restaurant', body);
+  if(!res.ok){ msg.textContent = res.error || 'Could not save that login.'; return; }
+  document.getElementById('rlp'+id).value = '';
+  msg.textContent = 'Saved. Store code: ' + code.toLowerCase().replace(/[^a-z0-9]/g,'') + (pin ? ', new PIN set.' : ', PIN unchanged.');
+}
 async function restPhoto(id, inp){
   const fd = new FormData(); fd.append('kind','restaurant'); fd.append('id', id);
   if (inp){ if (!inp.files.length) return; fd.append('photo', inp.files[0]); document.getElementById('rp'+id).textContent = 'Uploading...'; }
