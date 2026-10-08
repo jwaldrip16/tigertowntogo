@@ -38,10 +38,10 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
 <div id="gate" class="panel hidden" style="text-align:center;padding:28px 16px">
   <h2 id="gateMsg"></h2>
   <p class="muted" id="gateSub"></p>
-  <a class="btn primary calldisp" href="tel:{{ biz_tel }}" onclick="tellDispatch()">Call dispatch</a>
-  <div class="muted small callnote"></div>
+  <div id="gateCall"><a class="btn primary calldisp" href="tel:{{ biz_tel }}" onclick="tellDispatch()">Call dispatch</a>
+  <div class="muted small callnote"></div></div>
 </div>
-<div class="row"><a class="btn" href="tel:911" onclick="call911()" style="background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700;width:100%;text-align:center">Call 911</a></div>
+<div class="row" id="sosRow"><a class="btn" href="tel:911" onclick="call911()" style="background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700;width:100%;text-align:center">Call 911</a></div>
 <div class="panel" id="status"></div>
 <div class="row"><span class="muted small" id="locNote">Checking your location...</span></div>
 <div class="row"><span class="muted small" id="soundNote"></span>
@@ -329,21 +329,24 @@ function gateCheck(res, d){
   const show = function(id, on){ const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !on); };
   const tabbar = document.querySelector('.tabbar');
   if (!mode){
-    if (GATED){ GATED = ''; show('gate', false); show('status', true); if (tabbar) tabbar.classList.remove('hidden'); dtab('run'); }
+    if (GATED){ GATED = ''; show('gate', false); show('status', true); show('sosRow', true); if (tabbar) tabbar.classList.remove('hidden'); dtab('run'); }
     return false;
   }
   document.getElementById('gateMsg').textContent = mode === 'closed'
     ? name + ' is closed.'
     : name + ' does not have you scheduled.';
   document.getElementById('gateSub').textContent = mode === 'closed'
-    ? 'The app will open by itself when dispatch opens the business. You can still message dispatch below.'
+    ? 'The app will open by itself when dispatch opens the business.'
     : 'Call dispatch or message them below to be put online.';
   show('gate', true); show('status', false);
   if (tabbar) tabbar.classList.add('hidden');
   ['paneRun','paneSched','paneDone'].forEach(function(id){ show(id, false); });
-  // the dispatch chat stays under the notice, closed or unscheduled, so they can always reach dispatch
-  show('paneChat', true);
-  if (GATED !== mode){ DTAB = 'chat'; chat(); }
+  // closed: the notice only (no Call 911, Call dispatch or chat). Unscheduled: notice, call and chat.
+  const closed = mode === 'closed';
+  show('gateCall', !closed);
+  show('sosRow', !closed);
+  show('paneChat', !closed);
+  if (GATED !== mode && !closed){ DTAB = 'chat'; chat(); }
   GATED = mode;
   try { MY_STATUS = d.status; } catch(e){}
   return true;
