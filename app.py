@@ -3073,7 +3073,7 @@ def make_order_code():
 
 STATUS_WORDS = {
     ("order", "placed"): "Order placed",
-    ("kitchen", "waiting"): "Waiting on payment",
+    ("kitchen", "waiting"): "Not sent to kitchen yet",
     ("kitchen", "scheduled"): "Scheduled",
     ("dispatch", "scheduled"): "Future order",
     ("kitchen", "pending"): "Sent to kitchen",
@@ -3222,9 +3222,17 @@ def token_from_source(src):
             "website": "Online"}.get(src, "")
 
 
-def clean_ref(v):
-    """Their number: whatever the call-in slip calls this order."""
-    return (v or "").strip()[:32]
+def clean_ref(v, phone=None):
+    """Their number: whatever the call-in slip calls this order. The browser's autofill
+    sometimes drops the customer's phone (or its last 4 digits) in here, so a value that
+    is just the customer's phone number, or the end of it, is thrown away."""
+    v = (v or "").strip().lstrip("#").strip()[:32]
+    d = "".join(ch for ch in v if ch.isdigit())
+    pd = "".join(ch for ch in str(phone or "") if ch.isdigit())
+    if d and len(d) == len(v.replace("-", "").replace(" ", "").replace("(", "").replace(")", "").replace("+", "")) \
+            and len(pd) >= 7 and len(d) >= 4 and (pd.endswith(d) or d.endswith(pd[-10:])):
+        return ""
+    return v
 
 
 def ref_in_use(ref, skip_id=None):
@@ -5412,7 +5420,7 @@ def checkout():
          payload.get("note", ""), payload.get("dispatch_note", ""), lat, lng,
          json.dumps(items), subtotal, fee, ifee, tax, tip, total, miles,
          issue_label, issue_note, from_code, address_ok, src,
-         clean_ref(payload.get("ref")) if dispatcher_required() else None,
+         (clean_ref(payload.get("ref"), payload.get("customer_phone")) or None) if dispatcher_required() else None,
          (clean_token(payload.get("token")) or token_from_source(src)),
          kitchen_status, dstat, hold_reason, placed_by, now(),
          pu_name or None, pu_addr if pu_name else None, pu_phone if pu_name else None,
@@ -7208,7 +7216,8 @@ def api_order_edit():
     if lk:
         return lk
     if "ref" in data:
-        db().execute("UPDATE orders SET ref_code=? WHERE id=?", (clean_ref(data.get("ref")), o["id"]))
+        db().execute("UPDATE orders SET ref_code=? WHERE id=?",
+                     (clean_ref(data.get("ref"), data.get("customer_phone") or o["customer_phone"]) or None, o["id"]))
     if "token" in data:
         db().execute("UPDATE orders SET token=? WHERE id=?", (clean_token(data.get("token")), o["id"]))
     # Customer details: name, phone, address can be fixed after the order is placed.
@@ -7290,7 +7299,7 @@ def api_order_edit():
                       (" The order is now: " + _lines + "." if "items" in _rch else "") + " Open the order to see the details.")
     except Exception as e:
         print("edit rest msg skipped", e)
-    dupe = ref_in_use(clean_ref(data.get("ref")), o["id"]) if "ref" in data else None
+    dupe = ref_in_use(clean_ref(data.get("ref"), data.get("customer_phone") or o["customer_phone"]), o["id"]) if "ref" in data else None
     house_sync(o)
     rest = pp_collect_rest(o, "changed by " + who) if (o["pp_state"] or "") == "captured" else {}
     return jsonify({"ok": True, "dupe": dupe, "changed": changed, "address_msg": addr_msg, "rest": rest, "subtotal": money(subtotal), "fee": money(fee),

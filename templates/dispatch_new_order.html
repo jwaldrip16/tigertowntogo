@@ -77,7 +77,7 @@
       <input id="custSearch" type="search" autocomplete="off" placeholder="&#128269; Find an existing customer: name, phone or address" oninput="custSearchType()" onkeydown="custSearchKey(event)">
       <div id="custResults" class="custres hidden"></div>
     </div>
-    <input id="ref" placeholder="Their order number (optional)">
+    <input id="ref" name="their_slip_no" autocomplete="off" data-lpignore="true" inputmode="text" placeholder="Their order number (optional)">
     <input id="name" placeholder="Customer name">
     <input id="phone" placeholder="Phone" onchange="rewardsLookup()">
     <div id="rwBox" class="small muted"></div>

@@ -395,7 +395,7 @@ async function editOrder(oid){
       '<button type="button" class="btn tiny" onclick="edTipPct(0)">No tip</button>'+
       '<button type="button" class="btn tiny" onclick="var t=document.getElementById(\'edTip\');t.focus();t.select()">Custom</button>'+
       '<span class="small muted" id="edTipLbl"></span></div>'+
-    '<label class="small">Their order number <input id="edRef" maxlength="40" value="'+edEsc(res.ref)+'"></label>'+
+    '<label class="small">Their order number <input id="edRef" maxlength="40" autocomplete="off" name="their_slip_no" value="'+edEsc(res.ref)+'"></label>'+
     '<div class="small muted" id="edSub"></div>'+
     '<div class="addbag"><button type="button" class="btn" onclick="edClose()">Cancel</button>'+
       '<button type="button" class="btn primary" id="edSave" onclick="edSave()">Save changes</button></div>'+
@@ -1438,7 +1438,9 @@ function orderCard(o, opts, drivers){
     'ondragend="dragEnd()"><div class="order-head"><span class="grip">&#8942;&#8942;</span><strong>'+ordMain(o)+'</strong>'+(ordSub(o) ? ' <span class="muted small">'+ordSub(o)+'</span>' : '')+' '+
     refPill(o)+tokenPill(o)+
     ((o.dispatch_status==='awaiting_payment' || o.kitchen_status==='waiting')
-      ? '<span class="pill amber">'+(o.uses_app?'not sent to kitchen':'not released yet')+'</span> <span class="pill blue">waiting on payment</span> '
+      ? '<span class="pill amber">'+(o.uses_app?'not sent to kitchen':'not released yet')+'</span> '+
+        (o.dispatch_status==='awaiting_payment' ? '<span class="pill blue">waiting on payment</span> '
+          : (o.house ? '<span class="pill green">house account</span> ' : (o.paid ? '<span class="pill green">paid</span> ' : '')))
       : '<span class="pill '+(o.kitchen_status==='ready'?'green':o.kitchen_status==='preparing'?'amber':'grey')+'">'
         +(o.kitchen_status==='pending'?(o.uses_app?'sent to kitchen':(o.manual_state==='ordering'?'ordering in process':'needs ordering')+(o.order_method==='online'?' online':' by phone')):o.kitchen_status)+'</span> <span class="pill blue">'+o.dispatch_status+'</span> ')+timer+' '+q+' '+hold+
     ' '+srcPill(o)+
