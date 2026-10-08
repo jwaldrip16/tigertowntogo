@@ -3161,7 +3161,7 @@ def order_dict(o):
                              and o["dispatch_status"] not in ("awaiting_payment", "scheduled", "cancelled", "delivered")
                              and bool(o["address_ok"])),
         "can_unsend_kitchen": (int(o["kitchen_go"] if "kitchen_go" in o.keys() and o["kitchen_go"] is not None else 1) == 1
-                               and o["kitchen_status"] in ("pending", "preparing")
+                               and o["kitchen_status"] == "pending"
                                and o["dispatch_status"] not in ("enroute", "delivered", "cancelled", "awaiting_payment", "scheduled")),
         "paid": (o["payment_status"] or "unpaid") in ("paid", "part_refunded", "refunded"),
         "pay_link": o["pay_link"] or "",
@@ -6646,8 +6646,8 @@ def api_send_kitchen():
 
 @app.post("/api/order/unsend-kitchen")
 def api_unsend_kitchen():
-    """Dispatch pulls an order back from the kitchen (or back from call-in). It waits
-    on the board for Send to kitchen again. Not once the driver is on the way."""
+    """Dispatch pulls an order back from the kitchen (or back from call-in) before the kitchen
+    confirms it. It waits on the board for Send to kitchen again. Once the kitchen confirms, it stays."""
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     data = request.get_json(force=True)
@@ -6661,22 +6661,22 @@ def api_unsend_kitchen():
         return jsonify({"ok": False, "error": "This order is closed."}), 400
     if o["dispatch_status"] == "enroute":
         return jsonify({"ok": False, "error": "The driver is already on the way with this order."}), 400
-    if o["kitchen_status"] not in ("pending", "preparing"):
-        return jsonify({"ok": False, "error": "The kitchen has already marked this order ready."
-                        if o["kitchen_status"] == "ready" else "This order is not at the kitchen."}), 400
+    if o["kitchen_status"] in ("preparing", "ready"):
+        return jsonify({"ok": False, "error": "The kitchen already confirmed this order, so it can't be unsent."}), 400
+    if o["kitchen_status"] != "pending":
+        return jsonify({"ok": False, "error": "This order is not at the kitchen."}), 400
     who = session.get("dispatcher_name") or "dispatch"
-    started = o["kitchen_status"] == "preparing"
+    started = False
     db().execute("""UPDATE orders SET kitchen_go=0, kitchen_status='waiting', kitchen_sent_at=NULL,
                     auto_kitchen_at=COALESCE(auto_kitchen_at, ?),
                     hold_reason=CASE WHEN dispatch_status IN ('held','queued') THEN 'tap Send to kitchen' ELSE hold_reason END
-                    WHERE id=?""", (now(), o["id"]))
-    for col in ("prep_started", "prep_minutes"):
-        if col in o.keys():
-            db().execute("UPDATE orders SET " + col + "=NULL WHERE id=?", (o["id"],))
+                    WHERE id=? AND kitchen_status='pending'""", (now(), o["id"]))
+    if db().execute("SELECT kitchen_status FROM orders WHERE id=?", (o["id"],)).fetchone()[0] != "waiting":
+        db().rollback()
+        return jsonify({"ok": False, "error": "The kitchen just confirmed this order, so it can't be unsent."}), 400
     db().commit()
     if order_uses_app(o):
-        rest_auto(o["restaurant_id"], "Order " + rest_ord_no(o) + " was pulled back by dispatch" +
-                  (". Please stop making it." if started else ". Don't start it yet.") +
+        rest_auto(o["restaurant_id"], "Order " + rest_ord_no(o) + " was pulled back by dispatch. Don't start it yet." +
                   " We'll send it again when it's ready to go.")
     log("order", o["code"] + (" pulled back from the kitchen by " if order_uses_app(o) else " pulled back from call-in by ") +
         who + (" (kitchen had already started it)" if started else ""))
