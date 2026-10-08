@@ -4341,9 +4341,16 @@ def _pp_create(o, b, kind, acct):
     if kind == "order":
         # Every order payment is saved with PayPal so fees and tips added later can go on it.
         body["payment_source"] = (pp_vault_source(o) or pp_vault_any("card")) if b.get("card") else pp_vault_any("paypal", o)
+    plain = {k: v for k, v in body.items() if k != "payment_source"}
     if "paypal" in (body.get("payment_source") or {}):
         body.pop("application_context", None)     # PayPal wants its settings inside payment_source then
     st, j = pp_api("POST", "/v2/checkout/orders", body)
+    if "payment_source" in body and (st not in (200, 201) or not j.get("id")):
+        # These keys can't save payments (saving not turned on, or a customer ID from other keys):
+        # take the payment the normal way so the customer is never stuck.
+        log("payment", o["code"] + " PayPal would not save this payment (" + ("account %s" % acct if acct else "main keys") +
+            "): " + pp_err(j, "no reason given") + " Took it without saving.")
+        st, j = pp_api("POST", "/v2/checkout/orders", plain)
     if st not in (200, 201) or not j.get("id"):
         return jsonify({"ok": False, "error": pp_err(j, "PayPal could not start the payment.")}), 400
     if kind == "order":
