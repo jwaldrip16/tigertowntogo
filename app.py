@@ -2,7 +2,7 @@
 import urllib.error
 import base64, contextlib, contextvars, difflib, hashlib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
 import dbx
-from flask import Flask, g, has_request_context, request, session, redirect, url_for, render_template, render_template_string, jsonify, send_from_directory, flash, get_flashed_messages
+from flask import Flask, g, has_request_context, request, session, redirect, url_for, render_template, render_template_string, jsonify, send_from_directory, flash, get_flashed_messages, Response
 import presets
 
 # ---------------------------------------------------------------- local time
@@ -3447,6 +3447,35 @@ def order_dict(o):
 
 # ---------------------------------------------------------------- customer site
 
+LOCKED_SITE_HTML = """<!doctype html><html><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Coming soon</title>
+<style>body{font-family:-apple-system,Segoe UI,Roboto,sans-serif;background:#f6f7f9;color:#1d2330;margin:0;
+display:flex;min-height:100vh;align-items:center;justify-content:center;text-align:center}
+.box{background:#fff;border-radius:16px;padding:40px 28px;max-width:420px;box-shadow:0 2px 12px rgba(0,0,0,.06)}
+h1{margin:0 0 10px;font-size:28px}p{color:#5b6475;line-height:1.5;margin:8px 0}.small{font-size:13px;margin-top:22px}</style>
+</head><body><div class="box"><h1>Coming soon</h1>
+<p>This website isn't open for online orders yet. Please check back soon.</p>
+<p class="small">Powered by Fleet Foot Delivery</p></div></body></html>"""
+
+
+def _locked_site_page(site):
+    """The customer website of a locked brand (on its own address or the Railway address)
+    shows a Coming soon page. The developer All brands test view and a dispatcher's
+    Preview of that brand still show the real site."""
+    try:
+        if not brands_on() or dev_all_brands_mode():
+            return None
+        s = site if site is not None else home_brand_site()
+        if s is None or not site_locked(s["id"]):
+            return None
+        if session.get("site_preview") and session.get("dispatcher_id") and \
+                str(session.get("site_preview")) == str(s["id"]):
+            return None
+        return Response(LOCKED_SITE_HTML, status=200, mimetype="text/html")
+    except Exception:
+        return None
+
+
 @app.route("/")
 def home():
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
@@ -3455,6 +3484,8 @@ def home():
         rs = [r for r in rs if not (r["region_id"] and r["region_id"] in _lk)]   # locked brands are not live yet
     rs_all = rs
     _site = host_site()
+    if _locked_site_page(_site):
+        return _locked_site_page(_site)
     # is this web address itself a brand's own address (not just a Preview in this browser)?
     _own_addr = _site is not None and _norm_host(request.host) in site_domains(_site)
     if _site is not None:
@@ -13450,10 +13481,10 @@ def company_site(c):
         for row in rows:
             if host and host in site_domains(row):
                 return row
-        nm = (c.get("name") or "").strip().lower()
+        nm = re.sub(r"[^a-z0-9]+", "", (c.get("name") or "").lower())
         for row in rows:
-            if nm and (row["name"] or "").strip().lower() == nm:
-                return row
+            if nm and re.sub(r"[^a-z0-9]+", "", (row["name"] or "").lower()) == nm:
+                return row   # "Tiger Town To Go" matches "TigerTownToGo"
     except Exception:
         pass
     return None
