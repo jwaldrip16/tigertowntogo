@@ -2732,6 +2732,59 @@ def menu_payload(rid):
     return out
 
 
+def menus_payload(rids):
+    """menu_payload for many restaurants at once: three queries in total instead of
+    several per menu item, so the Create order screen opens fast with big menus."""
+    rids = [int(x) for x in rids if x is not None]
+    out = {rid: [] for rid in rids}
+    if not rids:
+        return out
+    marks = ",".join("?" * len(rids))
+    items = db().execute("SELECT * FROM menu_items WHERE active=1 AND restaurant_id IN (" + marks + ")"
+                         " ORDER BY restaurant_id, sort, id", rids).fetchall()
+    groups_of, opts_of = {}, {}
+    if items:
+        for g in db().execute("""SELECT g.* FROM option_groups g JOIN menu_items i ON i.id=g.item_id
+                                 WHERE i.active=1 AND i.restaurant_id IN (""" + marks + """)
+                                 ORDER BY g.sort, g.id""", rids).fetchall():
+            groups_of.setdefault(g["item_id"], []).append(g)
+        for o in db().execute("""SELECT o.* FROM options o JOIN option_groups g ON g.id=o.group_id
+                                 JOIN menu_items i ON i.id=g.item_id
+                                 WHERE i.active=1 AND i.restaurant_id IN (""" + marks + """)
+                                 ORDER BY o.sort, o.id""", rids).fetchall():
+            opts_of.setdefault(o["group_id"], []).append(o)
+    try:
+        have = set(os.listdir(UPLOAD_DIR))
+    except OSError:
+        have = set()
+
+    def pic(it):
+        img = (it["image"] or "").strip()
+        if img and (img.startswith("http") or os.path.basename(img) in have):
+            return media_url(img)
+        try:
+            src = (it["image_src"] or "").strip()
+        except (IndexError, KeyError):
+            src = ""
+        return src if src.startswith("http") else ""
+
+    for it in items:
+        groups = [{"id": g["id"], "name": g["name"], "min": g["min_select"],
+                   "max": g["max_select"], "each": max(1, int(g["max_each"] or 1)),
+                   "options": [{"id": o["id"], "name": o["name"],
+                                "delta_cents": o["price_delta_cents"],
+                                "delta": money(o["price_delta_cents"])} for o in opts_of.get(g["id"], [])]}
+                  for g in groups_of.get(it["id"], [])]
+        out.setdefault(it["restaurant_id"], []).append(
+            {"id": it["id"], "name": it["name"], "description": it["description"],
+             "price_cents": it["price_cents"], "price": money(it["price_cents"]),
+             "section": (it["section"] or "").strip(),
+             "tab": (it["menu_tab"] or "").strip(),
+             "image": pic(it),
+             "groups": groups, **avail_fields(it)})
+    return out
+
+
 def menu_sections(rid):
     """Section names already in use at this restaurant, in menu order."""
     rows = db().execute("""SELECT section, MIN(sort) s, MIN(id) i FROM menu_items
@@ -7315,9 +7368,6 @@ def dispatch_new_order():
     if not dispatcher_required():
         return redirect(url_for("dispatch_login"))
     rests = db().execute("SELECT * FROM restaurants ORDER BY name").fetchall()
-    menus = {}
-    for r in rests:
-        menus[r["id"]] = menu_payload(r["id"])
     src = None
     fid = request.args.get("from")
     if fid:
@@ -7361,10 +7411,25 @@ def dispatch_new_order():
                    for rid in sorted(groups, key=lambda k: (k == 0, order_of.get(k, 9999)))]
     locked_out = order_lock_on() and not is_owner() and len(shown) < len([r for r in rests if r["slug"] != "oneoff"])
     rest_region = {str(r["id"]): int(_rv(r, "region_id") or 0) for r in shown}
+    # The page opens right away: menus load one restaurant at a time when it is picked
+    # (/api/dispatch/menu/<id>). Only the restaurant of an order being copied comes along.
+    has_menu = {}
+    for row in db().execute("SELECT restaurant_id, COUNT(*) AS n FROM menu_items WHERE active=1"
+                            " GROUP BY restaurant_id").fetchall():
+        has_menu[str(row["restaurant_id"])] = int(row["n"] or 0)
+    menus = menus_payload([src["restaurant_id"]]) if src else {}
     return render_template("dispatch_new_order.html", rest_groups=rest_groups, locked_out=locked_out, rest_region=rest_region,
                            restaurants=[dict(r) for r in shown],
-                           menus=menus, src=src, multi_src=multi_src, multi_policy=MULTI_POLICY, oneoff=oneoff, tokens=token_list(),
+                           menus=menus, has_menu=has_menu, src=src, multi_src=multi_src, multi_policy=MULTI_POLICY, oneoff=oneoff, tokens=token_list(),
                            reasons=[{"key": k, "label": v} for k, v in REDO_REASONS.items()])
+
+
+@app.get("/api/dispatch/menu/<int:rid>")
+def api_dispatch_menu(rid):
+    """One restaurant's menu for the Create order screen, fetched when it is picked."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 401
+    return jsonify({"ok": True, "items": menus_payload([rid]).get(rid, [])})
 
 
 # ---------------------------------------------------------------- roster / groups

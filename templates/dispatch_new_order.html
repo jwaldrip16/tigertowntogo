@@ -138,6 +138,17 @@ document.addEventListener('DOMContentLoaded', function(){
 <script src="/static/maptiles.js"></script>
 <script>
 const MENUS = {{ menus | tojson }};
+const HAS_MENU = {{ has_menu | tojson }};
+const MENU_WAIT = {};
+// menus come from the server one restaurant at a time, the first time it is picked
+function loadMenu(rid){
+  if (MENUS[rid] !== undefined) return Promise.resolve(MENUS[rid]);
+  if (!(HAS_MENU[rid] > 0)) { MENUS[rid] = []; return Promise.resolve(MENUS[rid]); }
+  if (!MENU_WAIT[rid]) MENU_WAIT[rid] = fetch('/api/dispatch/menu/' + encodeURIComponent(rid), {credentials: 'same-origin'})
+    .then(r => r.json()).then(j => { MENUS[rid] = (j && j.items) || []; return MENUS[rid]; })
+    .catch(() => { delete MENU_WAIT[rid]; return null; });
+  return MENU_WAIT[rid];
+}
 let cart = [], geo = null, feeCents = 0, miles = 0;
 const SRC = {{ src|tojson if src else 'null' }};
 const MULTI_SRC = {{ multi_src|tojson if multi_src else 'null' }};
@@ -170,7 +181,7 @@ document.addEventListener('DOMContentLoaded', function(){
     const id = parseInt(op.value,10);
     if(!op.value || id === MULTI_SRC.restaurant_id || op.value === ONEOFF_ID) continue;
     const same = (REST_REGION[op.value]||0) === (MULTI_SRC.region_id||0);
-    const hasMenu = (MENUS[op.value]||[]).length > 0;
+    const hasMenu = (HAS_MENU[op.value]||0) > 0;
     if(any === null) any = op.value;
     if(hasMenu && anyMenu === null) anyMenu = op.value;
     if(same && hasMenu && best === null) best = op.value;
@@ -197,7 +208,7 @@ function placeHint(msg){
   const rid = document.getElementById('rest').value;
   const sel = document.getElementById('rest'); const nm = sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : 'this restaurant';
   el.style.color = '#667085';
-  el.textContent = (!typedPickup() && !(MENUS[rid]||[]).length)
+  el.textContent = (!typedPickup() && !(MENUS[rid] !== undefined ? MENUS[rid].length : (HAS_MENU[rid]||0)))
     ? nm + ' has no menu loaded yet. Pick another restaurant above, or add a custom item, to create the order.'
     : 'Add at least one item to create the order.';
 }
@@ -207,6 +218,16 @@ function drawMenu(){
   document.getElementById('pickup').classList.toggle('hidden', !one);
   document.getElementById('menu').classList.toggle('hidden', one);
   cart = [];
+  if (!one && rid && MENUS[rid] === undefined) {
+    document.getElementById('menu').innerHTML = '<p class="muted">Loading menu…</p>';
+    draw();
+    loadMenu(rid).then(items => {
+      if (document.getElementById('rest').value !== rid) return;
+      if (items === null) { document.getElementById('menu').innerHTML = '<p class="muted">The menu did not load. <a href="#" onclick="drawMenu();return false">Try again</a></p>'; return; }
+      rebind(rid); draw();
+    });
+    return;
+  }
   document.getElementById('menu').innerHTML = (MENUS[rid]||[]).map(i=>
     '<div class="row"><div><strong>'+i.name+'</strong></div><div class="right">'+
     '<span>'+money(i.price_cents)+'</span> <button class="btn small" onclick="addItem('+i.id+
