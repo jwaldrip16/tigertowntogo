@@ -4859,6 +4859,27 @@ def rest_chat_allowed(rid):
     r = db().execute("SELECT uses_app, slug FROM restaurants WHERE id=?", (rid,)).fetchone()
     return bool(r) and bool(r["uses_app"]) and (r["slug"] or "") != "oneoff"
 
+
+def rest_ord_no(o):
+    """The order number the kitchen sees on its cards."""
+    try:
+        return (o["primary_no"] or o["code"]) if "primary_no" in o.keys() else o["code"]
+    except Exception:
+        return o["code"]
+
+
+def rest_auto(rid, body):
+    """Automatic chat message from dispatch to a kitchen. Restaurants that don't use the
+    app have no chat, so they get nothing. Dispatch doesn't see it as unread."""
+    try:
+        if not rid or not rest_chat_allowed(rid):
+            return
+        db().execute("""INSERT INTO rest_messages(restaurant_id,sender,who,body,created_at,seen_by_rest,seen_by_dispatch)
+                        VALUES(?,?,?,?,?,0,1)""", (rid, "dispatch", "Automatic message", "Automatic message: " + body, now()))
+        db().commit()
+    except Exception as e:
+        print("rest_auto skipped", rid, e)
+
 def rest_chat_unread_for_dispatch():
     n = db().execute("""SELECT COUNT(*) c FROM rest_messages m JOIN restaurants r ON r.id=m.restaurant_id
                         WHERE m.sender='restaurant' AND m.seen_by_dispatch=0 AND """ + REST_CHAT_OK_SQL).fetchone()["c"]
@@ -6401,6 +6422,8 @@ def api_pause_restaurant():
     db().execute("UPDATE restaurants SET closed_override=? WHERE id=?",
                  (0 if r["closed_override"] else 1, rid))
     db().commit()
+    rest_auto(rid, "Dispatch paused your restaurant. Customers can't order from you until dispatch resumes it."
+              if not r["closed_override"] else "Dispatch resumed your restaurant. You are taking orders again.")
     return jsonify({"ok": True, "paused": not r["closed_override"]})
 
 
@@ -6508,6 +6531,20 @@ def api_order_status():
                              (o["driver_id"], "system",
                               "Order " + o["code"] + " marked " + d + ".", now()))
     db().commit()
+    if not session.get("restaurant_id") or dispatcher_required():
+        _no = rest_ord_no(o)
+        _kw = {"pending": "is back to waiting for you to confirm", "preparing": "was marked preparing",
+               "ready": "was marked ready"}
+        _dw = {"at_restaurant": "Your driver is at the restaurant for order " + _no + ".",
+               "enroute": "Order " + _no + " was picked up and is on the way to the customer.",
+               "delivered": "Order " + _no + " was delivered.",
+               "cancelled": "Order " + _no + " was cancelled. Please don't make it.",
+               "held": "Order " + _no + " is on hold."}
+        _was_k = o["kitchen_status"]
+        if k in _kw and k != _was_k and dispatcher_required():
+            rest_auto(o["restaurant_id"], "Order " + _no + " " + _kw[k] + " by dispatch.")
+        if d in _dw and d != o["dispatch_status"]:
+            rest_auto(o["restaurant_id"], _dw[d])
     if d and o["driver_id"]:
         who = "Driver marked" if (session.get("driver_id") == o["driver_id"] and not dispatcher_required()) else "Dispatch marked"
         log_driver(o["driver_id"], who + " " + o["code"] + " " + STATUS_WORDS.get(("dispatch", d), d))
@@ -7002,6 +7039,17 @@ def api_order_edit():
     db().commit()
     who = (db().execute("SELECT name FROM dispatchers WHERE id=?", (session.get("dispatcher_id"),)).fetchone() or {"name": "dispatch"})["name"]
     log("edit", o["code"] + " edited by " + who + (" (changed customer " + ", ".join(changed) + ")" if changed else ""))
+    try:
+        _rch = []
+        if json.dumps(clean_items(json.loads(o["items"])), sort_keys=True) != json.dumps(items, sort_keys=True):
+            _rch.append("items")
+        _rch += ["customer " + c for c in changed]
+        if _rch:
+            _lines = "; ".join("%sx %s" % (i["qty"], i["name"]) for i in items)
+            rest_auto(o["restaurant_id"], "Dispatch changed order " + rest_ord_no(o) + " (" + ", ".join(_rch) + ")." +
+                      (" The order is now: " + _lines + "." if "items" in _rch else "") + " Open the order to see the details.")
+    except Exception as e:
+        print("edit rest msg skipped", e)
     dupe = ref_in_use(clean_ref(data.get("ref")), o["id"]) if "ref" in data else None
     house_sync(o)
     rest = pp_collect_rest(o, "changed by " + who) if (o["pp_state"] or "") == "captured" else {}
@@ -7156,10 +7204,12 @@ def api_order_note():
     data = request.get_json(force=True)
     oid = data["order_id"]
     note = (data.get("note") or "").strip()
-    o = db().execute("SELECT code FROM orders WHERE id=?", (oid,)).fetchone()
+    o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
     if not o:
         return jsonify({"ok": False}), 404
     db().execute("UPDATE orders SET dispatch_note=? WHERE id=?", (note or None, oid))
+    if note and note != (o["dispatch_note"] or "") and not (session.get("restaurant_id") and not dispatcher_required()):
+        rest_auto(o["restaurant_id"], "Note added to order " + rest_ord_no(o) + ": " + note)
     did = db().execute("SELECT driver_id FROM orders WHERE id=?", (oid,)).fetchone()["driver_id"]
     if did and note:
         db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
@@ -10071,6 +10121,7 @@ def dispatch_restaurants():
     saved = False
     if request.method == "POST":
         rid = request.form["restaurant_id"]
+        _before = db().execute("SELECT hours, closed_override, open_24, prep_default FROM restaurants WHERE id=?", (rid,)).fetchone()
         hours = {}
         for i in range(7):
             o = request.form.get("open_" + str(i), "")
@@ -10081,6 +10132,22 @@ def dispatch_restaurants():
                      (json.dumps(hours), 1 if request.form.get("closed_override") else 0,
                       1 if request.form.get("open_24") else 0,
                       int(request.form.get("prep_default") or 15), request.form.get("phone", ""), rid))
+        if _before:
+            _ch = []
+            if bool(_before["closed_override"]) != bool(request.form.get("closed_override")):
+                _ch.append("paused your restaurant" if request.form.get("closed_override") else "resumed your restaurant")
+            if bool(_before["open_24"]) != bool(request.form.get("open_24")):
+                _ch.append("set you to open 24 hours" if request.form.get("open_24") else "turned off 24 hours")
+            try:
+                _oldh = json.loads(_before["hours"] or "{}")
+            except Exception:
+                _oldh = {}
+            if {str(x): list(_oldh.get(str(x)) or ["", ""]) for x in range(7)} != hours:
+                _ch.append("updated your hours")
+            if int(_before["prep_default"] or 15) != int(request.form.get("prep_default") or 15):
+                _ch.append("changed your usual prep time to %d minutes" % int(request.form.get("prep_default") or 15))
+            if _ch:
+                rest_auto(rid, "Dispatch " + ", ".join(_ch[:-1]) + (" and " if len(_ch) > 1 else "") + _ch[-1] + ".")
         meth = request.form.get("order_method")
         if meth in ("app", "online", "phone"):
             db().execute("UPDATE restaurants SET uses_app=?, call_method=? WHERE id=?",
@@ -11536,6 +11603,9 @@ def api_rest_open24():
     flip = 0 if r["open_24"] else 1
     db().execute("UPDATE restaurants SET open_24=?, closed_override=0 WHERE id=?", (flip, rid))
     db().commit()
+    if not session.get("restaurant_id") or dispatcher_required():
+        rest_auto(rid, "Dispatch set your restaurant to open 24 hours." if flip
+                  else "Dispatch turned off 24 hours. Your regular hours are back.")
     return jsonify({"ok": True, "open_24": bool(flip)})
 
 
