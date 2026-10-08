@@ -449,6 +449,7 @@ def init_db():
     ensure_column(con, "restaurants", "logo", "TEXT")
     ensure_column(con, "drivers", "short_alert_at", "TEXT")
     ensure_column(con, "restaurants", "zup_id", "TEXT")
+    ensure_column(con, "restaurants", "phone_checked", "INTEGER DEFAULT 0")
     ensure_column(con, "restaurants", "eta_min", "INTEGER")
     ensure_column(con, "menu_items", "zup_id", "TEXT")
     ensure_column(con, "option_groups", "max_each", "INTEGER NOT NULL DEFAULT 1")
@@ -13246,7 +13247,9 @@ def zup_convert(rest, menus, details):
     addr = ", ".join(x for x in parts + [cs] if x)
     svc = next((s for s in rest.get("services") or [] if s.get("id") == "DELIVERY"), None) or \
           ((rest.get("services") or [None])[0] or {})
-    phone = ((svc.get("contact") or {}).get("phone")) or ""
+    # Zuppler's service contact phone is the delivery company's own number (the same on every
+    # restaurant), never the restaurant's. The real number is looked up afterwards (fix_rest_phones).
+    phone = ""
     st = rest.get("settings") or {}
     act_menus = [m for m in (menus or []) if m.get("active", True)]
     multi = len(act_menus) > 1
@@ -14216,6 +14219,104 @@ def dispatch_import_zuppler():
                            remote_pics=remote_picture_count(),
                            pulled=(data or {}).get("pulled", ""), source=(data or {}).get("source", ""),
                            site=(data or {}).get("site", ""), zup=ZUP_STATE)
+
+def brand_phone_digits():
+    """Phone numbers that belong to the delivery brands, never to a restaurant."""
+    out = {"3342092844"}
+    try:
+        for r in db().execute("SELECT phone FROM sites").fetchall():
+            d = digits(r["phone"])[-10:]
+            if len(d) == 10:
+                out.add(d)
+    except Exception:
+        pass
+    for k in ("phone", "support_phone", "dispatch_phone", "business_phone"):
+        try:
+            row = db().execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
+            d = digits(row["value"] if row else "")[-10:]
+            if len(d) == 10:
+                out.add(d)
+        except Exception:
+            pass
+    # one number on five or more restaurants is a delivery company's, not each restaurant's
+    seen = {}
+    for r in db().execute("SELECT phone FROM restaurants WHERE slug!='oneoff'").fetchall():
+        d = digits(r["phone"])[-10:]
+        if len(d) == 10:
+            seen[d] = seen.get(d, 0) + 1
+    out.update(d for d, n in seen.items() if n >= 5)
+    return out
+
+
+def places_phone(name, address, lat=None, lng=None):
+    """The restaurant's own phone number from Google Places, or '' when not found."""
+    if not GOOGLE_KEY or not (name or "").strip():
+        return ""
+    body = {"textQuery": ", ".join(x for x in [name, address] if x), "maxResultCount": 3}
+    if lat and lng:
+        body["locationBias"] = {"circle": {"center": {"latitude": float(lat), "longitude": float(lng)},
+                                           "radius": 2000.0}}
+    req = urllib.request.Request("https://places.googleapis.com/v1/places:searchText",
+                                 data=json.dumps(body).encode(), method="POST",
+                                 headers={"Content-Type": "application/json", "X-Goog-Api-Key": GOOGLE_KEY,
+                                          "X-Goog-FieldMask": "places.nationalPhoneNumber,places.location,places.displayName"})
+    try:
+        res = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
+    except Exception as e:
+        print("places phone lookup failed:", name, e)
+        return ""
+    for p in res.get("places") or []:
+        ph = p.get("nationalPhoneNumber") or ""
+        if not ph:
+            continue
+        loc = p.get("location") or {}
+        if lat and lng and loc.get("latitude") is not None:
+            try:
+                if haversine_miles(float(lat), float(lng), loc["latitude"], loc["longitude"]) > 1.5:
+                    continue
+            except Exception:
+                pass
+        return nice_phone(ph)
+    return ""
+
+
+def fix_rest_phones(only_ids=None):
+    """Takes the delivery company's number off restaurants and fills in each restaurant's own number."""
+    brand = brand_phone_digits()
+    rows = db().execute("SELECT id,name,address,phone,lat,lng,COALESCE(phone_checked,0) AS pc FROM restaurants "
+                        "WHERE slug!='oneoff'").fetchall()
+    fixed = found = 0
+    for r in rows:
+        if only_ids is not None and r["id"] not in only_ids:
+            continue
+        d = digits(r["phone"])[-10:]
+        wrong = d in brand
+        if wrong:
+            db().execute("UPDATE restaurants SET phone='' WHERE id=?", (r["id"],))
+            fixed += 1
+        if (wrong or len(d) != 10) and (not r["pc"] or only_ids is not None):
+            ph = places_phone(r["name"], r["address"], r["lat"], r["lng"])
+            if ph and digits(ph)[-10:] not in brand:
+                db().execute("UPDATE restaurants SET phone=? WHERE id=?", (ph, r["id"]))
+                found += 1
+            db().execute("UPDATE restaurants SET phone_checked=1 WHERE id=?", (r["id"],))
+        db().commit()
+    print("restaurant phones: removed %d delivery-company numbers, found %d real numbers" % (fixed, found))
+    return {"removed": fixed, "found": found}
+
+
+def _startup_phone_repair():
+    time.sleep(15)   # let the database finish its start-up changes first
+    try:
+        with app.app_context():
+            ensure_column(db(), "restaurants", "phone_checked", "INTEGER DEFAULT 0")
+            fix_rest_phones()
+    except Exception as e:
+        print("phone repair skipped:", e)
+
+
+threading.Thread(target=_startup_phone_repair, daemon=True).start()
+
 
 def _startup_picture_repair():
     """Once at start-up: put back item pictures that went blank or missing, then copy them here."""
