@@ -54,7 +54,7 @@ function money(c){ return '$' + (c/100).toFixed(2); }
       <a href="/dispatch/settings">Settings</a>
       <a href="/dispatch/account">Account</a>
       {% if owner_user %}<a href="/dispatch/invoices">Invoices</a>{% endif %}
-      {% if dev_user %}<a href="/dispatch/companies">Companies</a>{% endif %}
+      {% if dev_user %}<a href="/dispatch/companies">Companies</a><a href="/dispatch/export/all.zip" title="Download every table as CSV files in one zip">Export data</a>{% endif %}
       <a href="/dispatch/logout">Sign out</a>
     {% elif portal == 'driver' %}
       <a href="/driver">My run</a>

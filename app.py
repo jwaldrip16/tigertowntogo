@@ -11784,6 +11784,74 @@ def export_orders():
     name = (setting("business_name", str) or "orders").replace(" ", "-")
     return _xlsx_response(wb, "%s-orders-%s%s.xlsx" % (name, f, "" if f == t else "-to-" + t))
 
+# Full data export for the developer login. The service agreement promises the client an
+# export of its data (customers, orders, drivers, restaurants, rewards, gift cards...) on
+# request, so a developer can download every table as a CSV file inside one zip. Passwords,
+# PINs, reset codes, saved-card vault ids and API keys/secrets are never included.
+_EXPORT_SKIP_TABLES = {"geocache", "sqlite_sequence", "ff_meta"}
+_EXPORT_SECRET_COL = re.compile(r"(password|passwd|pw_hash|pin|pin_hash|code_hash|secret|vault_id|vault_src|api_key|access_token|refresh_token)$", re.I)
+_EXPORT_SECRET_SETTING = re.compile(r"(secret|password|passwd|api_key|apikey|client_id|token|_key$|^key_|pin$)", re.I)
+
+
+def _export_tables():
+    con = db()
+    if dbx.PG:
+        rows = con.raw("""SELECT table_name FROM information_schema.tables
+                          WHERE table_schema=current_schema() AND table_type='BASE TABLE' ORDER BY table_name""")
+        names = [r[0] for r in rows]
+    else:
+        names = [r["name"] for r in con.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name").fetchall()]
+    return [n for n in names if n.lower() not in _EXPORT_SKIP_TABLES]
+
+
+@app.get("/dispatch/export/all.zip")
+def export_all_data():
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    if not is_dev():
+        return "Only a developer account can export all data.", 403
+    import csv, io, zipfile
+    from flask import send_file
+    buf = io.BytesIO()
+    summary = []
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        for table in _export_tables():
+            try:
+                cols = dbx.columns(db(), table)
+                keep = [c for c in cols if not _EXPORT_SECRET_COL.search(c)]
+                if not keep:
+                    continue
+                rows = db().execute("SELECT %s FROM %s" % (",".join(keep), table)).fetchall()
+            except Exception as e:
+                summary.append("%s: skipped (%s)" % (table, str(e)[:120]))
+                continue
+            s = io.StringIO()
+            w = csv.writer(s)
+            w.writerow(keep)
+            n = 0
+            for r in rows:
+                vals = list(r)
+                if table == "settings" and keep[:1] == ["key"] and _EXPORT_SECRET_SETTING.search(str(vals[0] or "")):
+                    continue
+                w.writerow(["" if v is None else (v.decode("utf-8", "replace") if isinstance(v, (bytes, bytearray, memoryview)) and not isinstance(v, memoryview) else (bytes(v).decode("utf-8", "replace") if isinstance(v, memoryview) else v)) for v in vals])
+                n += 1
+            z.writestr(table + ".csv", "\ufeff" + s.getvalue())
+            hidden = [c for c in cols if c not in keep]
+            summary.append("%s.csv: %d rows%s" % (table, n, (" (left out: " + ", ".join(hidden) + ")") if hidden else ""))
+        stamp = dt.datetime.now().strftime("%Y-%m-%d %H:%M")
+        z.writestr("README.txt",
+                   "Data export from %s\nMade %s by %s\n\n"
+                   "Every table is one CSV file (opens in Excel or Google Sheets).\n"
+                   "Passwords, PINs, reset codes, saved-card vault ids and API keys/secrets are not included.\n\n%s\n"
+                   % (setting("business_name", str) or "Fleet Foot Delivery", stamp,
+                      session.get("dispatcher_name") or "developer", "\n".join(summary)))
+    log("export", "%s exported all data (%d tables)" % (session.get("dispatcher_name") or "developer", len(summary)))
+    buf.seek(0)
+    name = (setting("business_name", str) or "data").replace(" ", "-")
+    return send_file(buf, as_attachment=True, mimetype="application/zip",
+                     download_name="%s-data-export-%s.zip" % (name, dt.date.today().isoformat()))
+
 def _gps_rows(driver_id, f, t):
     sql = """SELECT l.*, d.name FROM driver_log l JOIN drivers d ON d.id=l.driver_id
              WHERE substr(l.created_at,1,10) BETWEEN ? AND ?"""
