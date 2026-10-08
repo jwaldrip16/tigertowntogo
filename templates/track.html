@@ -95,7 +95,7 @@ function drawPay(p, o){
          (o.discount ? '<div class="row"><span>Discount</span><span>-'+o.discount+'</span></div>' : '')+'<div class="row total"><span>Total</span><span>'+o.total+'</span></div>'+
          '<div id="tipMsg" class="small"></div>';
     if(p.owed_cents > 0)
-      h += '<p>'+p.owed+' of your tip goes past what your hold covers. <a class="btn primary small" href="'+p.pay_url+'?kind=balance">Pay '+p.owed+'</a></p>';
+      h += '<p>'+p.owed+' more is owed on this order (added fees or a tip added later). <a class="btn primary small" href="'+p.pay_url+'?kind=balance">Pay '+p.owed+'</a></p>';
   }
   box.innerHTML = h; box.style.display = '';
 }

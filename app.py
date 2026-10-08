@@ -3153,6 +3153,7 @@ def order_dict(o):
         "tip_signed_at": o["tip_signed_at"] or "",
         "tip_declined": bool(o["tip_declined"]),
         "cash": is_cash(o),
+        "house": (_rv(o, "pay_method") or "") == "house_account",
         "multi_group": multi_codes(o),
         "credits": order_credits(o), "credit_cents": int(o["credit_cents"] or 0) if "credit_cents" in _okeys(o) else 0,
         "card_on_file": bool(card_info(o["id"])),
@@ -4401,7 +4402,7 @@ def _pp_approve(o, b, ppid, acct):
 def _pp_refund(o, cents, note=""):
     """Refund money PayPal already charged, newest-first over the main charge and any
     Pay the rest charges. Returns (ok, refund ids, error)."""
-    extras = [x for x in json.loads(o["extra_charges"] or "[]") if str(x.get("label", "")).startswith("Rest of tip")]
+    extras = [x for x in json.loads(o["extra_charges"] or "[]") if str(x.get("label", "")).startswith(("Rest of tip", "Rest of order"))]
     extra_total = sum(int(x["cents"]) for x in extras)
     main = int(o["pp_captured_cents"] or 0) - extra_total
     caps = [(o["pay_ref"], main)] + [(x.get("ref"), int(x["cents"])) for x in extras]
@@ -4435,7 +4436,78 @@ def _pp_refund(o, cents, note=""):
 
 def pp_settle(o, why="after delivery"):
     with pp_for(pp_order_acct(o)):
-        return _pp_settle(o, why)
+        res = _pp_settle(o, why)
+    if res.get("ok") and not res.get("voided"):
+        rest = pp_collect_rest(o, why)
+        if rest.get("charged") or rest.get("error"):
+            res["rest"] = rest
+    return res
+
+def is_house(o):
+    return (_rv(o, "pay_method") or "") == "house_account"
+
+def house_sync(o):
+    """House account orders are billed to the account later, so whatever the order now
+    comes to goes on the account: nothing is ever left owing on a card."""
+    o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
+    if not is_house(o) or (o["payment_status"] or "") not in ("paid", "part_refunded"):
+        return
+    bal = balance_cents(o)
+    if bal:
+        db().execute("UPDATE orders SET paid_cents=paid_cents+? WHERE id=?", (bal, o["id"]))
+        db().commit()
+
+def pp_collect_rest(o, why="extra charges"):
+    """The order was already charged and now comes to more (fees dispatch added, a tip added later).
+    Charge the difference through PayPal to the card the customer paid with and kept on file.
+    Without a card on file the customer gets a Pay the rest link (tracking page, and a text if texting is set up)."""
+    try:
+        o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
+        if is_house(o) or (o["pp_state"] or "") != "captured":
+            return {"ok": False, "skipped": True}
+        owed = balance_cents(o)
+        if owed <= 0:
+            return {"ok": True, "nothing": True}
+        acct = pp_order_acct(o)
+        sc = None
+        if (o["pp_source"] or "") == "card" and o["customer_id"]:
+            sc = db().execute("""SELECT * FROM saved_cards WHERE customer_id=? AND COALESCE(pp_acct,0)=?
+                                 ORDER BY id DESC LIMIT 1""", (o["customer_id"], int(acct or 0))).fetchone()
+        link = "/pay/" + o["code"] + "?kind=balance"
+        if not sc:
+            texted = False
+            try:
+                texted = send_text(o["customer_phone"], "%s: %s more is owed on order %s. Pay here: %s%s" % (
+                    payout_brand_name(o), money(owed), o["code"], request.host_url.rstrip("/"), link))
+            except Exception:
+                texted = False
+            log("payment", o["code"] + " " + money(owed) + " still owed (" + why + "), no card on file: customer pays from the link")
+            return {"ok": False, "owed": money(owed), "pay_url": link, "texted": bool(texted),
+                    "error": "No card on file for this customer, so " + money(owed) + " shows as Pay the rest on their tracking page" +
+                             (" and was texted to them." if texted else ".")}
+        with pp_for(int(sc["pp_acct"] or 0)):
+            st, j = pp_api("POST", "/v2/checkout/orders", {
+                "intent": "CAPTURE",
+                "purchase_units": [{"reference_id": o["code"], "custom_id": o["code"],
+                                    "description": "Rest of order " + o["code"], "amount": pp_money(owed)}],
+                "payment_source": {"card": {"vault_id": sc["vault_id"]}}},
+                request_id="rest-" + o["code"] + "-" + str(int(o["paid_cents"] or 0)) + "-" + str(owed))
+        cap = (((j.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or [{}])[0]
+        if st not in (200, 201) or cap.get("status") not in ("COMPLETED", "PENDING"):
+            msg = pp_err(j, "the card on file was declined.")
+            log("payment", o["code"] + " could not charge the rest (" + money(owed) + "): " + msg)
+            return {"ok": False, "owed": money(owed), "pay_url": link,
+                    "error": "Card on file didn't take " + money(owed) + ": " + msg + " It shows as Pay the rest on their tracking page."}
+        cents = int(round(float(cap["amount"]["value"]) * 100))
+        card = (sc["brand"] or "card").title() + " ending " + (sc["last4"] or "")
+        add_extra_charge(o, cents, "Rest of order (" + card + ")", cap.get("id", ""))
+        db().execute("UPDATE orders SET pp_captured_cents=COALESCE(pp_captured_cents,0)+? WHERE id=?", (cents, o["id"]))
+        db().commit()
+        log("payment", o["code"] + " charged the rest, " + money(cents) + " on " + card + " (" + why + ")")
+        return {"ok": True, "charged": money(cents), "card": card}
+    except Exception as e:
+        print("collect rest failed:", e)
+        return {"ok": False, "error": "Could not charge the rest: " + str(e)[:120]}
 
 def pp_void(o, why="cancelled"):
     with pp_for(pp_order_acct(o)):
@@ -4487,6 +4559,8 @@ def api_track_tip(code):
     out = {"ok": True, "tip": money(cents), "total": money(o["total_cents"])}
     if o["pp_state"] == "authorized" and o["dispatch_status"] == "delivered":
         out["charge"] = pp_settle(o, "tip added after delivery")
+    elif o["pp_state"] == "captured" and diff > 0:
+        out["charge"] = pp_collect_rest(o, "tip added after delivery")
     out["pay"] = pp_info(db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone())
     return jsonify(out)
 
@@ -6773,7 +6847,9 @@ def api_order_edit():
     who = (db().execute("SELECT name FROM dispatchers WHERE id=?", (session.get("dispatcher_id"),)).fetchone() or {"name": "dispatch"})["name"]
     log("edit", o["code"] + " edited by " + who + (" (changed customer " + ", ".join(changed) + ")" if changed else ""))
     dupe = ref_in_use(clean_ref(data.get("ref")), o["id"]) if "ref" in data else None
-    return jsonify({"ok": True, "dupe": dupe, "changed": changed, "address_msg": addr_msg, "subtotal": money(subtotal), "fee": money(fee),
+    house_sync(o)
+    rest = pp_collect_rest(o, "changed by " + who) if (o["pp_state"] or "") == "captured" else {}
+    return jsonify({"ok": True, "dupe": dupe, "changed": changed, "address_msg": addr_msg, "rest": rest, "subtotal": money(subtotal), "fee": money(fee),
                     "item_fee": money(ifee), "tax": money(tax),
                     "service": money(service), "tip": money(tip), "total": money(total)})
 

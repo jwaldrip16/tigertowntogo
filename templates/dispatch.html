@@ -461,6 +461,8 @@ async function edSave(){
   if(r2 && r2.ok){
     if(r2.dupe) alert('Heads up: '+ref+' is already on order '+r2.dupe+' today.');
     if(r2.address_msg) alert(r2.address_msg);
+    if(r2.rest && r2.rest.charged) alert('Charged the extra '+r2.rest.charged+' to the customer\'s '+r2.rest.card+' through PayPal.');
+    else if(r2.rest && r2.rest.error) alert(r2.rest.error);
     edClose(); refreshAll();
   } else document.getElementById('edErr').textContent = (r2 && r2.error) || 'Edit failed.';
 }
@@ -1107,7 +1109,8 @@ function payPill(o){
   else if(o.cash) s = '<span class="pill amber">cash: collect '+o.total+'</span>';
   else if(o.card_on_file) s = '<span class="pill amber">card on file, run it</span>';
   else s = '<span class="pill red">card not run</span>';
-  if(o.balance_cents > 0) s += ' <span class="pill red">balance due '+o.balance+'</span>';
+  if(o.balance_cents > 0 && o.house) s += ' <span class="pill grey">'+o.balance+' more on house account</span>';
+  else if(o.balance_cents > 0) s += ' <span class="pill red">balance due '+o.balance+'</span>';
   else if(o.balance_cents < 0) s += ' <span class="pill amber">overcharged '+o.balance+'</span>';
   if(o.tip_sig) s += ' <span class="pill green">tip signed</span>';
   if(o.pp && o.pp.state === 'authorized') s += ' <span class="pill amber">'+o.pp.held+' held on '+(o.pp.source||'PayPal')+', charges after delivery</span>';
@@ -1160,7 +1163,7 @@ function payButtons(o){
       h += '<button class="btn tiny" style="color:#c0392b" onclick="payFailed('+o.id+',\''+o.code+'\')">Card failed: cancel</button>';
   }
   if(o.paid && o.pay_method==='house_account') h += '<span class="pill">House account</span>';
-  if(o.paid && o.balance_cents > 0 && !o.cash){
+  if(o.paid && o.balance_cents > 0 && !o.cash && !o.house){
     h += '<button class="btn tiny primary" onclick="cardFor('+o.id+',\''+o.code+'\',\''+o.balance+'\')">Card for '+o.balance+'</button>';
     h += '<button class="btn tiny" onclick="keyed('+o.id+')">Record '+o.balance+' paid</button>';
   }

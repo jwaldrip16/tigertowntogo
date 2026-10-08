@@ -87,6 +87,7 @@
       <label><input type="radio" name="payMode" value="pp" checked onchange="payMode()"> PayPal or card (pay now)</label>
       {% if not pp_on %}<label><input type="radio" name="payMode" value="card" onchange="payMode()"> Card, dispatch runs it</label>{% endif %}
     </div>
+    <p class="small muted">Your payment is held now and charged after delivery. If fees are added to your order or you add a tip later, the difference goes on your saved card, or you'll get a link to pay it.</p>
     {% endif %}
     <h3 id="cardHead">Card</h3>
     <form id="custCard" autocomplete="off" onsubmit="return false">
