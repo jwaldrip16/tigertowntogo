@@ -691,3 +691,4 @@ ul.ordlines{margin:4px 0}
 .menurow{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 0;border-bottom:1px solid var(--line)}
 .menurow.blocked b{color:#b91c1c;text-decoration:line-through}
 .menurow .btn{min-width:96px}
+.modalback.hidden{display:none}

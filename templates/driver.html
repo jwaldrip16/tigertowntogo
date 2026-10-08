@@ -42,7 +42,7 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
   <div class="muted small callnote"></div></div>
 </div>
 <div class="row" id="sosRow"><button type="button" class="btn" onclick="open911()" style="background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700;width:100%;text-align:center">Call 911</button></div>
-<div id="sosBack" class="modalback hidden" onclick="if(event.target===this) close911()">
+<div id="sosBack" class="modalback" style="display:none" onclick="if(event.target===this) close911()">
   <div class="panel modal" role="dialog" aria-labelledby="sosTitle">
     <h3 id="sosTitle" style="margin:0;color:#c0392b">Call 911?</h3>
     <div>Only use this in a real emergency. When you tap OK, your phone calls 911, dispatch gets an urgent alert with your location, and you go on break. An order you already picked up stays with you; orders not picked up go to another driver.</div>
@@ -256,9 +256,9 @@ function setDispatchTel(tel){
 }
 function open911(){
   const r = document.getElementById('sosReason'); if (r) r.value = '';
-  document.getElementById('sosBack').classList.remove('hidden');
+  document.getElementById('sosBack').style.display = 'flex';
 }
-function close911(){ document.getElementById('sosBack').classList.add('hidden'); }
+function close911(){ document.getElementById('sosBack').style.display = 'none'; }
 function confirm911(){
   const r = document.getElementById('sosReason');
   const reason = r ? r.value.trim().slice(0, 200) : '';
