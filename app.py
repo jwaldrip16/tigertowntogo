@@ -3795,13 +3795,8 @@ def pp_brand_ready(sid, mode=None):
     return bool(b.get(mode + "_client") and b.get(mode + "_secret"))
 
 def _pp_page_acct():
-    """On a brand's website, that brand; on staff pages and background jobs, the main keys."""
-    try:
-        if has_request_context():
-            s = current_site()
-            return int(s["id"]) if s else 0
-    except Exception:
-        pass
+    """Every page uses the main PayPal keys, brand websites included (one PayPal account for all brands).
+    Older orders held under a brand's own keys still finish on those keys through pp_order_acct."""
     return 0
 
 def pp_conf(acct=None):
@@ -3847,7 +3842,7 @@ def pp_region_acct(rid):
         s = site_of_region(rid)
     except Exception:
         s = None
-    return int(s["id"]) if (s and pp_brand_ready(s["id"])) else 0
+    return 0   # one set of PayPal keys (the main ones) for every brand
 
 def pp_new_acct(o):
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
