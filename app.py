@@ -11208,6 +11208,36 @@ def rest_home():
                            dispatch_phone=nice_phone(_ph), dispatch_tel=tel_digits(_ph),
                            region_phone=nice_phone(_ph) if r["region_id"] and _ph != dispatch_phone() else "")
 
+@app.get("/api/restaurant/menu")
+def api_restaurant_menu():
+    """The kitchen app's own menu, so the restaurant can block items it has run out of."""
+    rid = session.get("restaurant_id")
+    if not rid:
+        return jsonify({"ok": False, "error": "Sign in again."}), 401
+    rows = db().execute("""SELECT id, name, section, price_cents, active, menu_tab FROM menu_items
+                           WHERE restaurant_id=? ORDER BY menu_tab, sort, id""", (rid,)).fetchall()
+    return jsonify({"ok": True, "items": [{"id": r["id"], "name": r["name"], "section": r["section"] or "",
+                                           "tab": r["menu_tab"] or "", "price": money(r["price_cents"] or 0),
+                                           "active": int(r["active"] or 0)} for r in rows]})
+
+
+@app.post("/api/restaurant/menu-block")
+def api_restaurant_menu_block():
+    rid = session.get("restaurant_id")
+    if not rid:
+        return jsonify({"ok": False, "error": "Sign in again."}), 401
+    b = request.get_json(force=True) or {}
+    it = db().execute("SELECT id, name FROM menu_items WHERE id=? AND restaurant_id=?",
+                      (b.get("item_id"), rid)).fetchone()
+    if not it:
+        return jsonify({"ok": False, "error": "That item is not on your menu."}), 404
+    on = 0 if b.get("block") else 1
+    db().execute("UPDATE menu_items SET active=? WHERE id=?", (on, it["id"]))
+    db().commit()
+    log("menu", (session.get("restaurant_name") or "Restaurant") + (" unblocked " if on else " blocked ") + it["name"])
+    return jsonify({"ok": True, "active": on})
+
+
 @app.get("/api/restaurant/orders")
 def api_rest_orders():
     backfill_primary()

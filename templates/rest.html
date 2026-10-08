@@ -76,6 +76,12 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
   <button class="tab on" id="tabActive" onclick="showTab('active')">Active <span id="cntActive"></span></button>
   <button class="tab" id="tabDone" onclick="showTab('done')">Completed <span id="cntDone"></span></button>
   <button class="tab" id="tabChat" onclick="showTab('chat')">Chat with dispatch <span class="pill red hidden" id="chatBadge"></span></button>
+  <button class="tab" id="tabMenu" onclick="showTab('menu')">Menu <span class="pill red hidden" id="menuBlocked"></span></button>
+</div>
+<div id="paneMenu" class="hidden panel">
+  <p class="muted small">Out of something? Tap Block and customers can't order it until you tap Unblock.</p>
+  <input id="menuFind" placeholder="Find an item" oninput="renderMenu()">
+  <div id="menuList"><p class="muted">Loading...</p></div>
 </div>
 <div id="paneChat" class="hidden panel">
   <div id="rchat" class="chat tall"></div>
@@ -222,7 +228,38 @@ function showTab(which){
   document.getElementById('tabDone').classList.toggle('on', which === 'done');
   document.getElementById('paneChat').classList.toggle('hidden', which !== 'chat');
   document.getElementById('tabChat').classList.toggle('on', which === 'chat');
+  document.getElementById('paneMenu').classList.toggle('hidden', which !== 'menu');
+  document.getElementById('tabMenu').classList.toggle('on', which === 'menu');
   if (which === 'chat') loadChat(true);
+  if (which === 'menu') loadMenu();
+}
+let MENU = [];
+async function loadMenu(){
+  const res = await jget('/api/restaurant/menu');
+  if (!res.ok){ document.getElementById('menuList').innerHTML = '<p class="muted">'+esc(res.error||'Could not load your menu.')+'</p>'; return; }
+  MENU = res.items; renderMenu();
+}
+function renderMenu(){
+  const q = (document.getElementById('menuFind').value||'').trim().toLowerCase();
+  const off = MENU.filter(i=>!i.active).length;
+  const b = document.getElementById('menuBlocked'); b.textContent = off ? off+' blocked' : ''; b.classList.toggle('hidden', !off);
+  const list = MENU.filter(i=>!q || i.name.toLowerCase().indexOf(q)>=0 || i.section.toLowerCase().indexOf(q)>=0);
+  if (!list.length){ document.getElementById('menuList').innerHTML = '<p class="muted">No items match.</p>'; return; }
+  let sec = null, html = '';
+  list.forEach(function(i){
+    const s = (i.tab ? i.tab+' - ' : '') + (i.section || 'Other');
+    if (s !== sec){ html += '<h4 class="menusec">'+esc(s)+'</h4>'; sec = s; }
+    html += '<div class="menurow'+(i.active?'':' blocked')+'"><span><b>'+esc(i.name)+'</b> <span class="muted small">'+esc(i.price)+'</span>'+
+      (i.active ? '' : ' <span class="pill red">blocked</span>')+'</span>'+
+      '<button class="btn '+(i.active?'danger':'primary')+'" onclick="menuBlock('+i.id+','+(i.active?1:0)+')">'+(i.active?'Block':'Unblock')+'</button></div>';
+  });
+  document.getElementById('menuList').innerHTML = html;
+}
+async function menuBlock(id, block){
+  const res = await jpost('/api/restaurant/menu-block', {item_id:id, block:!!block});
+  if (!res.ok){ alert(res.error || 'Could not change that item.'); return; }
+  const it = MENU.find(x=>x.id===id); if (it) it.active = res.active;
+  renderMenu();
 }
 let CHAT_LAST = null;
 function esc(s){ return String(s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
