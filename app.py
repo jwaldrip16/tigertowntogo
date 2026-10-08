@@ -9167,8 +9167,14 @@ def api_delete_orders():
             continue
         cols = o.keys()
         if "pp_state" in cols and (o["pp_state"] or "") == "authorized":
-            v = pp_void(o, "order deleted")
-            if not v.get("ok"):
+            try:
+                v = pp_void(o, "order deleted")
+            except Exception as e:
+                v = {"ok": False, "error": str(e)[:200]}
+            if not v.get("ok") and not live:
+                # Sandbox holds are test money: never let a stuck test hold block deleting the order.
+                log("payment", o["code"] + " sandbox hold not released before delete: " + v.get("error", ""))
+            elif not v.get("ok"):
                 skipped.append({"code": o["code"], "why": "PayPal hold could not be released: " + v.get("error", "")})
                 continue
         if live and "pp_captured_cents" in cols and int(o["pp_captured_cents"] or 0) > 0:
