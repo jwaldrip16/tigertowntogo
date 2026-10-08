@@ -1162,7 +1162,16 @@ function payButtons(o){
       h += '<button class="btn tiny" style="color:#c0392b" onclick="payFailed('+o.id+',\''+o.code+'\')">Card failed: cancel</button>';
   }
   if(o.paid && o.pay_method==='house_account') h += '<span class="pill">House account</span>';
-  if(o.paid && o.balance_cents > 0 && !o.cash && !o.house){
+  const ppx = (o.pp && (o.pp.state==='authorized' || o.pp.state==='captured')) ? (o.pp.extra || {}) : null;
+  if(ppx){
+    // PayPal already holds or charged this order: added items and tip changes never need the card typed again.
+    if(ppx.note) h += '<span class="pill" title="Charged automatically, no card needed">'+esc(ppx.note)+'</span>';
+    if(o.pp.state==='captured' && ppx.owed_cents > 0){
+      if(ppx.saved) h += '<button class="btn tiny primary" onclick="chargeRest('+o.id+',\''+ppx.more+'\')">Charge '+ppx.more+' to saved payment</button>';
+      else h += '<span class="pill amber" title="Shows as Pay the rest on their tracking page">'+ppx.more+' on customer\'s Pay the rest link</span>';
+      h += '<button class="btn tiny" onclick="keyed('+o.id+')">Record '+ppx.more+' paid</button>';
+    }
+  } else if(o.paid && o.balance_cents > 0 && !o.cash && !o.house){
     h += '<button class="btn tiny primary" onclick="cardFor('+o.id+',\''+o.code+'\',\''+o.balance+'\')">Card for '+o.balance+'</button>';
     h += '<button class="btn tiny" onclick="keyed('+o.id+')">Record '+o.balance+' paid</button>';
   }
@@ -1203,6 +1212,12 @@ async function replaceCard(id, code, amount){
   const r = await jpost('/api/paypal/replace-card', {order_id: id});
   if(!r || !r.ok){ alert((r && r.error) || 'Could not change the card.'); refreshAll(); return; }
   typeCard(id, code, amount);
+}
+async function chargeRest(id, amount){
+  if(!confirm('Charge '+amount+' to the payment the customer already used?')) return;
+  const r = await jpost('/api/paypal/collect-rest', {order_id:id});
+  alert(r && r.ok ? (r.charged ? 'Charged '+r.charged+' to '+r.card+'.' : 'Nothing is owed.') : ((r && r.error) || 'PayPal did not accept that.'));
+  board(true);
 }
 function cardFor(id, code, amount){
   ffCard.open({id:id, code:code, amount:amount, onClose:function(){ board(true); }});

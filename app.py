@@ -4291,7 +4291,49 @@ def pp_info(o):
             "held": money(o["pp_auth_cents"] or 0) if st else "",
             "charged": money(o["pp_captured_cents"] or 0) if st == "captured" else "",
             "error": (o["pp_error"] or "") if "pp_error" in o.keys() else "",
-            "tip_window_min": pp_tip_window_min()}
+            "tip_window_min": pp_tip_window_min(),
+            "extra": pp_extra(o, st)}
+
+def pp_extra(o, st):
+    """When dispatch adds items or changes the tip on an order PayPal already holds or charged:
+    how the extra gets paid without anyone typing the card again."""
+    try:
+        if st not in ("authorized", "captured") or is_house(o):
+            return {}
+        due = int(o["total_cents"] or 0) - credits_cents(o) - int(o["refunded_cents"] or 0)
+        saved = bool(_rv(o, "pp_vault_id"))
+        if not saved and (o["pp_source"] or "") == "card" and o["customer_id"]:
+            saved = bool(db().execute("SELECT 1 FROM saved_cards WHERE customer_id=? AND COALESCE(pp_acct,0)=? LIMIT 1",
+                                      (o["customer_id"], int(pp_order_acct(o) or 0))).fetchone())
+        if st == "authorized":
+            held = int(o["pp_auth_cents"] or 0)
+            more = due - held
+            if more <= 0:
+                return {}
+            over = max(0, due - pp_cap_cents(held))
+            return {"more": money(more), "over": money(over), "over_cents": over, "saved": saved,
+                    "note": (money(more) + " more comes off the held payment at delivery") if not over else
+                            (money(due - over - held) + " more comes off the held payment at delivery, " + money(over) +
+                             (" goes on the saved payment" if saved else " is left for the customer's Pay the rest link"))}
+        owed = balance_cents(o)
+        if owed <= 0:
+            return {}
+        return {"more": money(owed), "saved": saved, "owed_cents": owed}
+    except Exception as e:
+        print("pp_extra failed:", e)
+        return {}
+
+@app.post("/api/paypal/collect-rest")
+def api_pp_collect_rest():
+    """Dispatch charges what's still owed after delivery to the payment the customer already used."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    res = pp_collect_rest(o, "charged by dispatch")
+    return jsonify(res), (200 if res.get("ok") else 400)
 
 @app.route("/pay/<code>")
 def pay_page(code):
