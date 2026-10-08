@@ -2456,8 +2456,12 @@ AUTO_MSGS = [
     ("drv_roster", "Moved to Scheduled or Unavailable", "Tells a driver when dispatch moves them between Scheduled and Unavailable.", 1),
     ("drv_schedule", "Schedule and time off decisions", "Tells a driver when their hours or time off are approved, denied, added, changed or removed, including when a closed date added for their region changes hours they already sent in.", 1),
     ("drv_request_ack", "Status request received", "Confirms to a driver that their online or offline request reached dispatch.", 1),
+    ("rest_order", "Kitchen app: order changes", "Tells a restaurant in its kitchen app chat when dispatch changes, pulls back, cancels or adds a note to one of its orders.", 1),
+    ("rest_status", "Kitchen app: restaurant status changes", "Tells a restaurant in its kitchen app chat when dispatch pauses or resumes it, sets it to open 24 hours, or changes its hours or prep time.", 1),
 ]
 AUTO_MSG_KEYS = {k: d for k, _l, _h, d in AUTO_MSGS}
+# Only a developer can switch these on or off; owners don't see them.
+DEV_AUTO_MSGS = {"rest_order", "rest_status"}
 
 def auto_msg_on(key):
     try:
@@ -5120,11 +5124,15 @@ def rest_ord_no(o):
         return o["code"]
 
 
-def rest_auto(rid, body):
+def rest_auto_status(rid, body):
+    rest_auto(rid, body, key="rest_status")
+
+def rest_auto(rid, body, key="rest_order"):
     """Automatic chat message from dispatch to a kitchen. Restaurants that don't use the
-    app have no chat, so they get nothing. Dispatch doesn't see it as unread."""
+    app have no chat, so they get nothing. Dispatch doesn't see it as unread.
+    Owners switch order-change and status-change messages off in Settings."""
     try:
-        if not rid or not rest_chat_allowed(rid):
+        if not rid or not auto_msg_on(key) or not rest_chat_allowed(rid):
             return
         db().execute("""INSERT INTO rest_messages(restaurant_id,sender,who,body,created_at,seen_by_rest,seen_by_dispatch)
                         VALUES(?,?,?,?,?,0,1)""", (rid, "dispatch", "Automatic message", "Automatic message: " + body, now()))
@@ -6683,7 +6691,7 @@ def api_pause_restaurant():
     db().execute("UPDATE restaurants SET closed_override=? WHERE id=?",
                  (0 if r["closed_override"] else 1, rid))
     db().commit()
-    rest_auto(rid, "Dispatch paused your restaurant. Customers can't order from you until dispatch resumes it."
+    rest_auto_status(rid, "Dispatch paused your restaurant. Customers can't order from you until dispatch resumes it."
               if not r["closed_override"] else "Dispatch resumed your restaurant. You are taking orders again.")
     return jsonify({"ok": True, "paused": not r["closed_override"]})
 
@@ -10627,7 +10635,7 @@ def dispatch_restaurants():
             if int(_before["prep_default"] or 15) != int(request.form.get("prep_default") or 15):
                 _ch.append("changed your usual prep time to %d minutes" % int(request.form.get("prep_default") or 15))
             if _ch:
-                rest_auto(rid, "Dispatch " + ", ".join(_ch[:-1]) + (" and " if len(_ch) > 1 else "") + _ch[-1] + ".")
+                rest_auto_status(rid, "Dispatch " + ", ".join(_ch[:-1]) + (" and " if len(_ch) > 1 else "") + _ch[-1] + ".")
         meth = request.form.get("order_method")
         if meth in ("app", "online", "phone"):
             db().execute("UPDATE restaurants SET uses_app=?, call_method=? WHERE id=?",
@@ -10785,8 +10793,12 @@ def dispatch_settings():
     pp_msgs = []
     br_msgs = []
     if request.method == "POST":
-        if "automsg_present" in request.form and is_owner(session.get("dispatcher_id")):
+        _am_owner = is_owner(session.get("dispatcher_id"))
+        _am_dev = is_dev()
+        if "automsg_present" in request.form and (_am_owner or _am_dev):
             for _k, _l, _h, _d in AUTO_MSGS:
+                if (_k in DEV_AUTO_MSGS and not _am_dev) or (_k not in DEV_AUTO_MSGS and not _am_owner):
+                    continue
                 db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
                              ("am_" + _k, "1" if request.form.get("am_" + _k) else "0"))
             try:
@@ -11187,7 +11199,7 @@ def dispatch_settings():
         if errs:
             db().commit()
             rows = db().execute("SELECT * FROM settings").fetchall()
-            return render_template("dispatch_settings.html", pp=pp_settings_view(), pp_msgs=pp_msgs, br=br_settings_view(), br_msgs=br_msgs, br_sites=[dict(id=x["id"], name=x["name"]) for x in db().execute("SELECT id, name FROM sites ORDER BY name").fetchall()] if brands_on() else [], auto_msgs=AUTO_MSGS, am_on=auto_msg_on, owner_view=is_owner(session.get("dispatcher_id")), site=site_text(raw=True), s={r["key"]: r["value"] for r in rows},
+            return render_template("dispatch_settings.html", pp=pp_settings_view(), pp_msgs=pp_msgs, br=br_settings_view(), br_msgs=br_msgs, br_sites=[dict(id=x["id"], name=x["name"]) for x in db().execute("SELECT id, name FROM sites ORDER BY name").fetchall()] if brands_on() else [], auto_msgs=AUTO_MSGS, am_on=auto_msg_on, dev_am=DEV_AUTO_MSGS, dev_view=is_dev(), owner_view=is_owner(session.get("dispatcher_id")), site=site_text(raw=True), s={r["key"]: r["value"] for r in rows},
                                    saved=False, errors=errs, bh=business_hours_rows(),
                                    bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
         if "order_tokens" in request.form:
@@ -11196,7 +11208,7 @@ def dispatch_settings():
         db().commit()
         saved = True
     rows = db().execute("SELECT * FROM settings").fetchall()
-    return render_template("dispatch_settings.html", pp=pp_settings_view(), pp_msgs=pp_msgs, br=br_settings_view(), br_msgs=br_msgs, br_sites=[dict(id=x["id"], name=x["name"]) for x in db().execute("SELECT id, name FROM sites ORDER BY name").fetchall()] if brands_on() else [], auto_msgs=AUTO_MSGS, am_on=auto_msg_on, owner_view=is_owner(session.get("dispatcher_id")), site=site_text(raw=True), s={r["key"]: r["value"] for r in rows}, saved=saved,
+    return render_template("dispatch_settings.html", pp=pp_settings_view(), pp_msgs=pp_msgs, br=br_settings_view(), br_msgs=br_msgs, br_sites=[dict(id=x["id"], name=x["name"]) for x in db().execute("SELECT id, name FROM sites ORDER BY name").fetchall()] if brands_on() else [], auto_msgs=AUTO_MSGS, am_on=auto_msg_on, dev_am=DEV_AUTO_MSGS, dev_view=is_dev(), owner_view=is_owner(session.get("dispatcher_id")), site=site_text(raw=True), s={r["key"]: r["value"] for r in rows}, saved=saved,
                            bh=business_hours_rows(), bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
 
 # ---------------------------------------------------------------- chat
@@ -12152,7 +12164,7 @@ def api_rest_open24():
     db().execute("UPDATE restaurants SET open_24=?, closed_override=0 WHERE id=?", (flip, rid))
     db().commit()
     if not session.get("restaurant_id") or dispatcher_required():
-        rest_auto(rid, "Dispatch set your restaurant to open 24 hours." if flip
+        rest_auto_status(rid, "Dispatch set your restaurant to open 24 hours." if flip
                   else "Dispatch turned off 24 hours. Your regular hours are back.")
     return jsonify({"ok": True, "open_24": bool(flip)})
 
