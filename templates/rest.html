@@ -268,7 +268,7 @@ async function loadChat(seen){
   if (!res.ok) return;
   const c = document.getElementById('rchat');
   c.innerHTML = res.messages.map(m=>'<div class="msg '+(m.sender==='restaurant'?'driver':'dispatch')+'"><span class="muted small">'+
-    m.at+' '+(m.sender==='restaurant' ? 'you' : 'dispatch'+(m.who?' ('+esc(m.who)+')':''))+'</span><div>'+esc(m.body)+'</div></div>').join('')
+    m.at+' '+(m.sender==='restaurant' ? 'you' : (m.who && /\(Developer\)$/.test(m.who) ? esc(m.who) : 'dispatch'+(m.who?' ('+esc(m.who)+')':'')))+'</span><div>'+esc(m.body)+'</div></div>').join('')
     || '<p class="muted">No messages yet.</p>';
   c.scrollTop = c.scrollHeight;
   if (seen) chatBadge(0);

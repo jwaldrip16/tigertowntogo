@@ -1660,7 +1660,7 @@ async function loadChat(){
   }
   const res = await jget('/api/chat/'+id);
   document.getElementById('chat').innerHTML = res.messages.map(m=>
-    '<div class="msg '+m.sender+'"><span class="muted small">'+m.at+' '+m.sender+'</span><div>'+m.body+'</div></div>'
+    '<div class="msg '+m.sender+'"><span class="muted small">'+m.at+' '+(m.sender==='dispatch' && m.who ? escR(m.who) : m.sender)+'</span><div>'+m.body+'</div></div>'
   ).join('');
   const c = document.getElementById('chat'); c.scrollTop = c.scrollHeight;
 }
@@ -1693,7 +1693,7 @@ async function loadRestChat(){
   if (!res.ok) return;
   const c = document.getElementById('rchat');
   c.innerHTML = res.messages.map(m=>'<div class="msg '+(m.sender==='dispatch'?'dispatch':'driver')+'"><span class="muted small">'+
-    m.at+' '+(m.sender==='dispatch' ? 'dispatch'+(m.who?' ('+escR(m.who)+')':'') : 'restaurant')+'</span><div>'+escR(m.body)+'</div></div>').join('')
+    m.at+' '+(m.sender==='dispatch' ? (m.who && /\(Developer\)$/.test(m.who) ? escR(m.who) : 'dispatch'+(m.who?' ('+escR(m.who)+')':'')) : 'restaurant')+'</span><div>'+escR(m.body)+'</div></div>').join('')
     || '<p class="muted">No messages with this restaurant yet.</p>';
   c.scrollTop = c.scrollHeight;
 }
