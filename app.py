@@ -451,6 +451,7 @@ def init_db():
     ensure_column(con, "restaurants", "zup_id", "TEXT")
     ensure_column(con, "restaurants", "phone_checked", "INTEGER DEFAULT 0")
     ensure_column(con, "restaurants", "places_checked", "INTEGER DEFAULT 0")
+    ensure_column(con, "geocache", "src", "TEXT")   # google / osm: OpenStreetMap results are re-asked once Google is on
     ensure_column(con, "restaurants", "eta_min", "INTEGER")
     ensure_column(con, "menu_items", "zup_id", "TEXT")
     ensure_column(con, "option_groups", "max_each", "INTEGER NOT NULL DEFAULT 1")
@@ -1174,9 +1175,13 @@ def geocode(raw):
     """Validate + normalise a customer address. Returns dict(ok, formatted, lat, lng, source)."""
     q = " ".join(raw.lower().split())
     row = db().execute("SELECT * FROM geocache WHERE q=?", (q,)).fetchone()
+    cached = None
     if row:
-        return {"ok": bool(row["ok"]), "formatted": row["formatted"],
-                "lat": row["lat"], "lng": row["lng"], "source": "cache"}
+        cached = {"ok": bool(row["ok"]), "formatted": row["formatted"],
+                  "lat": row["lat"], "lng": row["lng"], "source": "cache"}
+        if not GOOGLE_KEY or (row["src"] or "") == "google":
+            return cached
+        # saved from OpenStreetMap before the Google key was added: ask Google fresh
     res = None
     try:
         if GOOGLE_KEY:
@@ -1200,9 +1205,11 @@ def geocode(raw):
     except Exception:
         res = None
     if res is None:
+        if cached and cached["ok"]:
+            return cached          # Google didn't answer: keep using the saved one
         return {"ok": False, "formatted": None, "lat": None, "lng": None, "source": "none"}
-    db().execute("INSERT OR REPLACE INTO geocache(q,formatted,lat,lng,ok) VALUES(?,?,?,?,1)",
-                 (q, res["formatted"], res["lat"], res["lng"]))
+    db().execute("INSERT OR REPLACE INTO geocache(q,formatted,lat,lng,ok,src) VALUES(?,?,?,?,1,?)",
+                 (q, res["formatted"], res["lat"], res["lng"], res["source"]))
     db().commit()
     return res
 
@@ -1216,7 +1223,7 @@ def zip_center(z):
     """Center point of a 5-digit US ZIP code, cached. None when it can't be found."""
     key = "zip:" + z
     row = db().execute("SELECT * FROM geocache WHERE q=? AND ok=1", (key,)).fetchone()
-    if row:
+    if row and (not GOOGLE_KEY or (row["src"] or "") == "google"):
         return {"lat": row["lat"], "lng": row["lng"], "formatted": row["formatted"]}
     res = None
     try:
@@ -1236,9 +1243,11 @@ def zip_center(z):
     except Exception:
         res = None
     if res:
-        db().execute("INSERT OR REPLACE INTO geocache(q,formatted,lat,lng,ok) VALUES(?,?,?,?,1)",
-                     (key, res["formatted"], res["lat"], res["lng"]))
+        db().execute("INSERT OR REPLACE INTO geocache(q,formatted,lat,lng,ok,src) VALUES(?,?,?,?,1,?)",
+                     (key, res["formatted"], res["lat"], res["lng"], "google" if GOOGLE_KEY else "osm"))
         db().commit()
+    elif row:
+        return {"lat": row["lat"], "lng": row["lng"], "formatted": row["formatted"]}
     return res
 
 def zip_check(r, typed):
@@ -3396,8 +3405,10 @@ def api_address_suggest():
     if len(q) < 4:
         return jsonify({"ok": True, "suggestions": []})
     out, seen = [], set()
+    gsrc = "google" if GOOGLE_KEY else "osm"
     for row in db().execute("""SELECT formatted, lat, lng FROM geocache WHERE ok=1
-                               AND (q LIKE ? OR lower(formatted) LIKE ?) LIMIT 6""",
+                               AND (q LIKE ? OR lower(formatted) LIKE ?)""" +
+                            (" AND src='google'" if GOOGLE_KEY else "") + " LIMIT 6",
                             ("%" + q + "%", "%" + q + "%")).fetchall():
         if row["formatted"] and row["formatted"] not in seen:
             seen.add(row["formatted"])
@@ -3426,8 +3437,8 @@ def api_address_suggest():
     except Exception:
         pass
     for c in out:                      # so picking one is an instant, exact match later
-        db().execute("INSERT OR REPLACE INTO geocache(q,formatted,lat,lng,ok) VALUES(?,?,?,?,1)",
-                     (" ".join(c["formatted"].lower().split()), c["formatted"], c["lat"], c["lng"]))
+        db().execute("INSERT OR REPLACE INTO geocache(q,formatted,lat,lng,ok,src) VALUES(?,?,?,?,1,?)",
+                     (" ".join(c["formatted"].lower().split()), c["formatted"], c["lat"], c["lng"], gsrc))
     db().commit()
     return jsonify({"ok": True, "suggestions": out[:6]})
 
