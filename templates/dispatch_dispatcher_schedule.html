@@ -113,7 +113,7 @@ function daDraw(res){
     const byDay = DAYS.map((n,i)=>{
       const s = d.slots.filter(x=>x.dow===i);
       return '<tr><td class="daday">'+n+'</td><td>'+(s.length ? s.map(x=>
-        '<span class="pill '+daPill(x)+' daslot">'+x.label+(x.region_label?' &middot; '+daEsc(x.region_label):'')+(x.note?' &middot; '+daEsc(x.note):'')+
+        '<span class="pill '+daPill(x)+' daslot">'+x.label+(x.region_label?' &middot; '+rgMark(x.region_label):'')+(x.note?' &middot; '+daEsc(x.note):'')+
         (x.status!=='approved' ? ' &middot; '+x.status : '')+
         ((DA_OWNER || d.me) ? ' <button class="linkx" title="Remove" onclick="daDel('+x.id+')">&times;</button>' : '')+'</span>'+
         (DA_OWNER && x.status!=='approved' ? ' <button class="btn tiny primary" onclick="daDecide('+x.id+',\'approve\')">Approve</button>' : '')+
@@ -133,6 +133,7 @@ loadRegions().then(()=>{ const s = document.getElementById('daRg'); if(s) s.inne
 async function daLoad(){
   const a = document.activeElement;
   if (a && a.id && a.id.startsWith('daPh')) return;
+  await loadRegions();
   daDraw(await jget('/api/dispatch/dispatcher-avail'));
 }
 async function daAdd(){

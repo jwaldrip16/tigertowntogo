@@ -9763,13 +9763,14 @@ def api_regions_list():
     kind = "driver" if as_driver else "dispatcher"
     pid = session.get("driver_id") if as_driver else session.get("dispatcher_id")
     allowed = today_slot_regions(kind, pid)
-    if not as_driver:
-        _hid = board_hidden_regions()
-        regs = [r for r in regs if r["id"] not in _hid]
-        allowed = [x for x in allowed if x not in _hid]
+    # locked = its brand is locked (schedules mark it); hidden = kept off the dispatch board
+    _lk = locked_region_ids() if not as_driver else set()
+    _hid = board_hidden_regions() if not as_driver else set()
     names = {r["id"]: r["name"] for r in all_regions()}
-    return jsonify({"ok": True, "regions": [{"id": r["id"], "name": r["name"], "drive_lead": drive_lead_of(r["id"])} for r in regs],
-                    "today_allowed": [{"id": x, "name": names[x], "drive_lead": drive_lead_of(x)} for x in sorted(allowed, key=lambda i: names[i].lower())],
+    return jsonify({"ok": True, "regions": [{"id": r["id"], "name": r["name"], "drive_lead": drive_lead_of(r["id"]),
+                                             "locked": r["id"] in _lk, "hidden": r["id"] in _hid} for r in regs],
+                    "today_allowed": [{"id": x, "name": names[x], "drive_lead": drive_lead_of(x),
+                                       "locked": x in _lk, "hidden": x in _hid} for x in sorted(allowed, key=lambda i: names[i].lower())],
                     "today_pick": sorted(day_pick(kind, pid)),
                     "mine": sorted(mine), "driver": as_driver, "none_assigned": as_driver and not mine,
                     "owner": is_owner() if session.get("dispatcher_id") else False})

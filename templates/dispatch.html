@@ -953,6 +953,8 @@ async function drawMyRegions(){
   const box = document.getElementById('myRg'); if(!box || MYRG_BUSY) return;
   if (!MYRG){ try { MYRG = await jget('/api/regions-list'); } catch(e){ return; } }
   if (!MYRG || !MYRG.ok){ box.innerHTML = ''; return; }
+  MYRG.regions = (MYRG.regions||[]).filter(r=>!r.hidden);
+  MYRG.today_allowed = (MYRG.today_allowed||[]).filter(r=>!r.hidden);
   const del = r => MYRG.owner ? '<button class="rgx" title="Delete this region" onclick="delMyRegion('+r.id+')">&times;</button>' : '';
   if (MYRG.today_allowed && MYRG.today_allowed.length){
     // They have availability with regions today: they pick one, some, or all of those.

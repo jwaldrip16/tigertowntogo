@@ -20,7 +20,8 @@ function regionBoxes(cls, selected, extra){
   });
   return '<span class="rgpick"><span class="muted small">Region:</span>' + groups.map(gp=>
     '<label class="rgchip"><input type="checkbox" class="'+cls+'" value="'+gp.map(r=>r.id).join(',')+'"'+(extra||'')+
-    (gp.some(r=>selected.includes(r.id))?' checked':'')+'> '+rgEsc(gp.map(r=>r.name).join(' + '))+'</label>').join('') + '</span>';
+    (gp.some(r=>selected.includes(r.id))?' checked':'')+'> '+rgEsc(gp.map(r=>r.name).join(' + '))+
+    (gp.some(r=>r.locked)?' <span class="rglocked">Locked</span>':'')+'</label>').join('') + '</span>';
 }
 function regionVals(cls, root){
   const out = [];
@@ -28,4 +29,25 @@ function regionVals(cls, root){
     String(b.value).split(',').forEach(v=>{ if (v) out.push(+v); }));
   return out;
 }
-function regionTag(label){ return label ? ' <span class="pill blue rgtag">'+rgEsc(label)+'</span>' : ''; }
+// Names of regions whose brand is locked (Settings > Regions > Brand sites).
+function rgLockedNames(){ return new Set(((REGIONS&&REGIONS.regions)||[]).filter(r=>r.locked).map(r=>r.name)); }
+// A region label ("Auburn + Downtown Auburn, Athens") as HTML with each locked region marked.
+function rgMark(label){
+  if (!label) return '';
+  const lk = rgLockedNames();
+  return String(label).split(', ').map(part=>{
+    const names = part.split(' + ');
+    const hit = names.some(n=>lk.has(n.trim()));
+    return rgEsc(part) + (hit ? ' <span class="rglocked">Locked</span>' : '');
+  }).join(', ');
+}
+function regionTag(label){
+  if (!label) return '';
+  const lk = rgLockedNames();
+  const hit = String(label).split(/, | \+ /).some(n=>lk.has(n.trim()));
+  return ' <span class="pill '+(hit?'red':'blue')+' rgtag">'+rgEsc(label)+(hit?' (locked)':'')+'</span>';
+}
+(function(){ if (document.getElementById('rglockedcss')) return;
+  const s = document.createElement('style'); s.id = 'rglockedcss';
+  s.textContent = '.rglocked{display:inline-block;margin-left:4px;padding:1px 7px;border-radius:999px;background:#fde2e1;color:#b42318;font-size:12px;font-weight:600;vertical-align:middle}';
+  (document.head||document.documentElement).appendChild(s); })();
