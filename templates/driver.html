@@ -336,13 +336,14 @@ function gateCheck(res, d){
     ? name + ' is closed.'
     : name + ' does not have you scheduled.';
   document.getElementById('gateSub').textContent = mode === 'closed'
-    ? 'The app will open by itself when dispatch opens the business.'
+    ? 'The app will open by itself when dispatch opens the business. You can still message dispatch below.'
     : 'Call dispatch or message them below to be put online.';
   show('gate', true); show('status', false);
   if (tabbar) tabbar.classList.add('hidden');
   ['paneRun','paneSched','paneDone'].forEach(function(id){ show(id, false); });
-  show('paneChat', mode === 'unscheduled');
-  if (GATED !== mode && mode === 'unscheduled'){ DTAB = 'chat'; chat(); }
+  // the dispatch chat stays under the notice, closed or unscheduled, so they can always reach dispatch
+  show('paneChat', true);
+  if (GATED !== mode){ DTAB = 'chat'; chat(); }
   GATED = mode;
   try { MY_STATUS = d.status; } catch(e){}
   return true;

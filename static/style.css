@@ -229,6 +229,7 @@ ul.trail .ts{display:inline-block;min-width:72px;color:#666;font-variant-numeric
 
 /* page level tabs (driver app + dispatch comms) */
 .tabbar{display:flex;gap:6px;flex-wrap:wrap;margin:10px 0}
+.tabbar.hidden{display:none}
 .tabbar .tab{padding:9px 14px;font-size:15px}
 .tab.alerting{background:#fee2e2;border-color:#ef4444;color:#991b1b;
   animation:chatpulse 1.4s ease-in-out infinite}
