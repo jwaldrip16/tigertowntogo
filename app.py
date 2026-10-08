@@ -6324,6 +6324,8 @@ def api_driver_status():
     if bad:
         return bad
     _dv = db().execute("SELECT name, active FROM drivers WHERE id=?", (did,)).fetchone()
+    if status != "offline" and not business_is_open():
+        return jsonify({"ok": False, "error": "The business is closed. Open the business first, then put drivers online."}), 400
     if _dv and status != "offline" and not (_dv["active"] if _dv["active"] is not None else 1):
         return jsonify({"ok": False, "error": _dv["name"] + " is inactive. Make them active on the Drivers page first."}), 400
     msg = "Dispatch set you " + status + "."
