@@ -1065,6 +1065,17 @@ def locked_region_ids():
         return set()
 
 
+def board_hidden_regions():
+    """Regions of a locked brand come off the dispatch board (queues, pause buttons,
+    I'm working chips, Your regions). The developer All brands test view still shows them."""
+    try:
+        if dev_all_brands_mode():
+            return set()
+    except Exception:
+        pass
+    return locked_region_ids()
+
+
 def restaurant_locked(r):
     """True when this restaurant's region belongs to a locked brand (developers in the test view still see it)."""
     try:
@@ -2141,7 +2152,8 @@ def region_conflict(did, order_region, exclude_id=None):
 
 def region_queues(region_ids=None, detail=True):
     """Waiting orders per region. region_ids empty/None = every region."""
-    regs = [r for r in all_regions() if not region_ids or r["id"] in region_ids]
+    _hid = board_hidden_regions()
+    regs = [r for r in all_regions() if (not region_ids or r["id"] in region_ids) and r["id"] not in _hid]
     pinfo = {r["id"]: r for r in db().execute("SELECT id, paused, paused_by, paused_at FROM regions").fetchall()}
     rows = db().execute("""SELECT o.*, r.name rname FROM orders o LEFT JOIN restaurants r ON r.id=o.restaurant_id
                            WHERE o.dispatch_status IN ('queued','held')
@@ -6551,7 +6563,7 @@ def api_board():
                    ORDER BY m.id DESC LIMIT 200""").fetchall() if m["driver_id"] in vis), None)
     return jsonify({
         "ok": True,
-        "regions_label": region_names(my_regions),
+        "regions_label": region_names(my_regions - board_hidden_regions()) if my_regions else region_names(my_regions),
         "region_filtered": bool(my_regions),
         "showing_all": show_all,
         "is_owner": owner_view,
@@ -9720,6 +9732,10 @@ def api_regions_list():
     kind = "driver" if as_driver else "dispatcher"
     pid = session.get("driver_id") if as_driver else session.get("dispatcher_id")
     allowed = today_slot_regions(kind, pid)
+    if not as_driver:
+        _hid = board_hidden_regions()
+        regs = [r for r in regs if r["id"] not in _hid]
+        allowed = [x for x in allowed if x not in _hid]
     names = {r["id"]: r["name"] for r in all_regions()}
     return jsonify({"ok": True, "regions": [{"id": r["id"], "name": r["name"], "drive_lead": drive_lead_of(r["id"])} for r in regs],
                     "today_allowed": [{"id": x, "name": names[x], "drive_lead": drive_lead_of(x)} for x in sorted(allowed, key=lambda i: names[i].lower())],
