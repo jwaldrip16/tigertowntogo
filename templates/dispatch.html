@@ -664,10 +664,15 @@ function drawAlerts(list){
   if (!list.length){ box.classList.add('hidden'); box.innerHTML = ''; return; }
   box.classList.remove('hidden');
   box.innerHTML = list.map(a =>
-    '<div class="callalert"><div><strong>' +
-    (a.who === 'driver' ? 'Driver ' : 'Kitchen ') + a.name + '</strong> ' + a.at +
-    (a.order ? ' about ' + a.order : '') +
-    '<div class="muted small">' + (a.note || 'wants dispatch') + '</div>' +
+    (a.kind === '911'
+      ? '<div class="callalert" style="border:2px solid #c0392b;background:#fdecea"><div><strong style="color:#c0392b">911: Driver ' + esc(a.name) + ' is calling 911</strong> ' + a.at +
+        '<div class="small"><strong>' + esc(a.note || '') + '</strong></div>' +
+        (a.trip ? '<div class="small">Order <strong>' + esc(a.trip.primary_no || a.trip.code) + '</strong>' + (a.trip.primary_no ? ' (' + esc(a.trip.code) + ')' : '') +
+          ': ' + esc(a.trip.restaurant) + ' to ' + esc(a.trip.customer) + ', ' + esc(a.trip.address) + '</div>' : '')
+      : '<div class="callalert"><div><strong>' +
+        (a.who === 'driver' ? 'Driver ' : 'Kitchen ') + a.name + '</strong> ' + a.at +
+        (a.order ? ' about ' + a.order : '') +
+        '<div class="muted small">' + (a.note || 'wants dispatch') + '</div>') +
     (a.who === 'driver' ? (a.location
       ? '<div class="small"><strong>Near: ' + (a.location.address || 'looking up the address...') + '</strong>' +
         ' <span class="muted">updated ' + (a.location.at || '') + '</span> · ' +
@@ -681,6 +686,9 @@ function drawAlerts(list){
   if (top > ALERT_SEEN){
     ALERT_SEEN = top;
     try { ffSound.play('call'); } catch(e){}
+    if (list[0].kind === '911'){
+      try { ffNotify.show('911: Driver ' + list[0].name + ' is calling 911', 'Follow up with the driver.' + (list[0].trip ? ' Order ' + (list[0].trip.primary_no || list[0].trip.code) + ' went back in the queue.' : ''), 'callalert'); } catch(e){}
+    } else
     try { ffNotify.show((list[0].who === 'driver' ? 'Driver' : 'Kitchen') + ' needs dispatch',
           list[0].name + ': ' + (list[0].note || 'wants a call'), 'callalert'); } catch(e){}
   }

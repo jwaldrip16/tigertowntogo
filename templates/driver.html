@@ -41,6 +41,7 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
   <a class="btn primary calldisp" href="tel:{{ biz_tel }}" onclick="tellDispatch()">Call dispatch</a>
   <div class="muted small callnote"></div>
 </div>
+<div class="row"><a class="btn" href="tel:911" onclick="call911()" style="background:#c0392b;color:#fff;border-color:#c0392b;font-weight:700;width:100%;text-align:center">Call 911</a></div>
 <div class="panel" id="status"></div>
 <div class="row"><span class="muted small" id="locNote">Checking your location...</span></div>
 <div class="row"><span class="muted small" id="soundNote"></span>
@@ -239,6 +240,32 @@ function setDispatchTel(tel){
     b.setAttribute('href', DISP_TEL ? 'tel:' + DISP_TEL : '#');
     b.classList.toggle('disabled', !DISP_TEL);
   });
+}
+function call911(){
+  // the phone dials 911; dispatch gets an urgent alert with the order and where the driver is,
+  // the driver goes on break and their order goes to another driver
+  let sent = false;
+  const send = function(lat, lng){
+    if (sent) return; sent = true;
+    const body = {};
+    if (lat != null){ body.lat = lat; body.lng = lng; }
+    const blob = new Blob([JSON.stringify(body)], {type: 'application/json'});
+    if (!(navigator.sendBeacon && navigator.sendBeacon('/api/driver/call-911', blob))){
+      try { fetch('/api/driver/call-911', {method:'POST', keepalive:true,
+        headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)}); } catch(e){}
+    }
+  };
+  try { ffSound.play('sent'); } catch(e){}   // automatic message went to dispatch
+  const fix = (typeof LAST_FIX !== 'undefined' && LAST_FIX) ? LAST_FIX : null;
+  if (fix){ send(fix.latitude, fix.longitude); }
+  else {
+    try {
+      navigator.geolocation.getCurrentPosition(function(p){ send(p.coords.latitude, p.coords.longitude); },
+        function(){ send(null, null); }, {enableHighAccuracy:true, timeout:4000, maximumAge:60000});
+    } catch(e){ send(null, null); }
+    setTimeout(function(){ send(null, null); }, 4500);
+  }
+  return true;   // let the phone open the dialer
 }
 function tellDispatch(){
   if (!DISP_TEL){

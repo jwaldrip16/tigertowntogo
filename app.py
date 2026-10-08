@@ -288,6 +288,9 @@ def init_db():
     con = dbx.connect(DB_PATH)
     con.executescript(SCHEMA)
     ensure_column(con, "drivers", "payout_wallet", "TEXT DEFAULT 'paypal'")
+    ensure_column(con, "call_alerts", "kind", "TEXT")       # '911' when a driver hit Call 911
+    ensure_column(con, "call_alerts", "lat", "REAL")        # where the driver was when they hit it
+    ensure_column(con, "call_alerts", "lng", "REAL")
     ensure_column(con, "drivers", "payout_branch_id", "TEXT")      # the driver's Branch worker ID
     ensure_column(con, "drivers", "payout_branch_ids", "TEXT")     # JSON {Branch account id: worker ID} when it differs per account
     ensure_column(con, "drivers", "auto_pay", "INTEGER DEFAULT 1")   # 0 = never auto pay this driver
@@ -14355,13 +14358,30 @@ def open_call_alerts():
                 "phone": a["phone"] or "", "tel": tel_digits(a["phone"]),
                 "note": a["note"] or "", "order": a["code"] or "",
                 "at": clock(a["created_at"]), "when": a["created_at"], "location": None}
+        _ak = a.keys()
+        item["kind"] = (a["kind"] if "kind" in _ak else None) or ""
+        item["trip"] = None
+        if item["kind"] == "911" and a["order_id"]:
+            try:
+                _o = db().execute("SELECT * FROM orders WHERE id=?", (a["order_id"],)).fetchone()
+                if _o:
+                    _r = db().execute("SELECT name FROM restaurants WHERE id=?", (_o["restaurant_id"],)).fetchone()
+                    item["trip"] = {"code": _o["code"], "primary_no": (_rv(_o, "primary_no") or ""),
+                                    "restaurant": (_r["name"] if _r else ""), "customer": _o["customer_name"] or "",
+                                    "address": _o["address"] or ""}
+            except Exception:
+                pass
         if a["who"] == "driver" and a["driver_id"]:
             d = db().execute("SELECT * FROM drivers WHERE id=?", (a["driver_id"],)).fetchone()
             if d:
                 loc = loc_block(d)
+                if not loc and item["kind"] == "911" and "lat" in _ak and a["lat"] is not None and a["lng"] is not None:
+                    _ll = str(round(a["lat"], 6)) + "," + str(round(a["lng"], 6))
+                    loc = {"lat": a["lat"], "lng": a["lng"], "address": None, "at": clock(a["created_at"]),
+                           "map_url": "https://www.google.com/maps/search/?api=1&query=" + _ll}
                 if loc and not loc.get("address"):
                     loc["address"] = update_driver_addr(d["id"], d["last_lat"], d["last_lng"])
-                if loc:
+                if loc and not loc.get("at"):
                     loc["at"] = clock(d["last_loc_at"])
                 item["location"] = loc
         out.append(item)
@@ -14827,6 +14847,69 @@ def api_driver_call_dispatch():
         _o = db().execute("SELECT region_id FROM orders WHERE id=? AND driver_id=?", (data.get("order_id"), did)).fetchone()
         oreg = _o["region_id"] if _o else None
     return jsonify({"ok": True, "phone": dispatch_phone(oreg or driver_phone_region(did))})
+
+@app.post("/api/driver/call-911")
+def api_driver_call_911():
+    """The driver hit Call 911. Their phone dials 911 itself; this puts an urgent alert on the
+    dispatch board with the order they are on right now and where they are."""
+    did = session.get("driver_id")
+    if not did:
+        return jsonify({"ok": False}), 403
+    d = db().execute("SELECT * FROM drivers WHERE id=?", (did,)).fetchone()
+    data = request.get_json(silent=True) or {}
+    try:
+        lat, lng = float(data["lat"]), float(data["lng"])
+    except (KeyError, TypeError, ValueError):
+        lat = lng = None
+    if lat is not None:
+        db().execute("UPDATE drivers SET last_lat=?,last_lng=?,last_loc_at=? WHERE id=?", (lat, lng, now(), did))
+        db().commit()
+        try:
+            update_driver_addr(did, lat, lng, force=True)
+        except Exception:
+            pass
+    # the order they are on right now: furthest along first (en route, at restaurant, accepted, waiting)
+    oid = None
+    rank = {"enroute": 0, "at_restaurant": 1, "received": 2, "assigned": 3}
+    live = db().execute("""SELECT id, dispatch_status FROM orders WHERE driver_id=?
+                           AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""", (did,)).fetchall()
+    if live:
+        oid = sorted(live, key=lambda r: (rank.get(r["dispatch_status"], 9), r["id"]))[0]["id"]
+    stage_words = {"enroute": "on the way to the customer (food already picked up)", "at_restaurant": "at the restaurant",
+                   "received": "heading to the restaurant", "assigned": "not accepted yet"}
+    note = "URGENT: 911 is being called right now. Follow up with the driver."
+    if live:
+        top = [r for r in live if r["id"] == oid][0]
+        note += " They were " + stage_words.get(top["dispatch_status"], top["dispatch_status"]) + "."
+        note += " They are on break now and %s back in the queue for another driver." % (
+            "the order went" if len(live) == 1 else "all %d of their orders went" % len(live))
+    else:
+        note += " They were not on an order. They are on break now."
+    db().execute("""INSERT INTO call_alerts(who,driver_id,order_id,name,phone,note,created_at,kind,lat,lng)
+                    VALUES('driver',?,?,?,?,?,?,'911',?,?)""",
+                 (did, oid, d["name"], d["phone"], note, now(), lat, lng))
+    db().commit()
+    log("call_alert", "driver " + (d["name"] or "") + ": CALLING 911" + (" (order id %s)" % oid if oid else ""))
+    # automatic message from the driver in their dispatch chat
+    _code = None
+    if oid:
+        _c = db().execute("SELECT code, primary_no FROM orders WHERE id=?", (oid,)).fetchone()
+        _code = (_rv(_c, "primary_no") or _c["code"]) if _c else None
+    db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                 (did, "driver", "Automatic message: I am calling 911 right now. Please follow up with me." +
+                  (" I was on order " + _code + "." if _code else ""), now()))
+    db().commit()
+    # hand every live order back to the queue so another driver gets it
+    if live:
+        db().execute("""UPDATE orders SET driver_id=NULL, stack_seq=NULL, dispatch_status='queued'
+                        WHERE driver_id=? AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""", (did,))
+        db().commit()
+        for r in live:
+            log("order", "order id %s taken off %s (driver called 911) and put back in the queue" % (r["id"], d["name"] or "driver"))
+    # on break so nothing new comes to them; set_driver_status also reassigns the queue
+    set_driver_status(did, "break", "You hit Call 911, so you are on break" +
+                      (" and your order went to another driver" if live else "") + ". Dispatch will check on you.")
+    return jsonify({"ok": True})
 
 @app.post("/api/restaurant/call-dispatch")
 def api_rest_call_dispatch():
