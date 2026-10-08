@@ -43,9 +43,7 @@
     const msg = box.querySelector('#ppcfMsg'), go = box.querySelector('#ppcfGo');
     function say(t, bad){ msg.textContent = t; msg.style.color = bad ? '#c0392b' : ''; }
     let fields = [];
-    // First try saves the card with PayPal for added fees and tips. If PayPal turns that down
-    // (for example the name or ZIP doesn't match what the bank has), run it once more without saving.
-    let plain = false, lastArgs, approving = false, done = false;
+    let approving = false, done = false;
     function close(){
       // shut PayPal's card boxes down properly so the next card form starts clean
       fields.forEach(function(f){ try { f.close(); } catch(e){} });
@@ -61,7 +59,7 @@
       }
       const cf = pp.CardFields({
         createOrder: async function(){
-          const r = await jpost('/api/paypal/create', {code: o.code, card: true, no_save: plain});
+          const r = await jpost('/api/paypal/create', {code: o.code, card: true});
           if (!r || !r.ok){ say((r && r.error) || 'Could not start the payment.', true); throw new Error('create'); }
           return r.id;
         },
@@ -71,10 +69,7 @@
           const r = await jpost('/api/paypal/approve', {code: o.code, id: data.orderID});
           approving = false;
           if (r && (r.ok || r.already_paid)) done = true;
-          if (!r || !r.ok){
-            if (!plain && !done && !r.declined){ plain = true; say('Trying the card again without saving it...'); cf.submit(lastArgs).catch(function(){ if (!done && !approving) failed(r); }); return; }
-            failed(r); return;
-          }
+          if (!r || !r.ok){ failed(r); return; }
           done = true;
           say('Card accepted. ' + r.held + ' held on the card.');
           go.textContent = 'Done';
@@ -83,7 +78,6 @@
         },
         onError: function(err){
           if (done || approving) return;      // the card already went through: never run it twice
-          if (!plain){ plain = true; say('Trying the card again without saving it...'); cf.submit(lastArgs).catch(function(){ if (!done && !approving) failed(); }); return; }
           failed();
         }
       });
@@ -105,9 +99,7 @@
         const zip = box.querySelector('#ppcfZip').value.trim();
         if (zip && !/^\d{5}(-?\d{4})?$/.test(zip)){ say('The billing ZIP is 5 digits.', true); return; }
         go.disabled = true; go.textContent = 'Running...'; say('');
-        plain = false;
         const args = zip ? {billingAddress: {postalCode: zip, countryCode: 'US'}} : undefined;
-        lastArgs = args;
         cf.submit(args).catch(function(){
           // PayPal can report an error after the card was already accepted; only complain if it really failed.
           setTimeout(function(){
