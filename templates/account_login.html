@@ -9,8 +9,9 @@
   <form method="post">
     <input type="hidden" name="mode" value="{{ mode }}"><input type="hidden" name="next" value="{{ nxt }}">
     {% if mode == 'signup' %}<label>Name</label><input name="name" autocomplete="name" required>{% endif %}
-    <label>Mobile number</label><input name="phone" type="tel" autocomplete="tel" required>
-    {% if mode == 'signup' %}<label>Email (optional, for receipts)</label><input name="email" type="email" autocomplete="email">{% endif %}
+    {% if mode == 'signup' %}<label>Mobile number</label><input name="phone" type="tel" autocomplete="tel" required>
+    <label>Email (so you can sign in with it and reset your password)</label><input name="email" type="email" autocomplete="email">
+    {% else %}<label>Mobile number or email</label><input name="who" autocomplete="username" autocapitalize="none" spellcheck="false" required>{% endif %}
     <label>Password</label><input name="password" type="password" autocomplete="{{ 'new-password' if mode == 'signup' else 'current-password' }}" required minlength="6">
     <button class="btn primary" style="width:100%;margin-top:10px">{{ 'Create account' if mode == 'signup' else 'Sign in' }}</button>
   </form>

@@ -6,7 +6,7 @@
   {% if step == 'verify' %}
   <form method="post">
     <input type="hidden" name="step" value="verify">
-    <label>Mobile number</label><input name="phone" type="tel" value="{{ phone }}" required>
+    <label>Mobile number or email on your account</label><input name="who" value="{{ who }}" autocapitalize="none" spellcheck="false" required>
     <label>6 digit code</label><input name="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" required>
     <label>New password</label><input name="password" type="password" minlength="6" autocomplete="new-password" required>
     <label>New password again</label><input name="password2" type="password" minlength="6" autocomplete="new-password" required>
@@ -14,11 +14,11 @@
   </form>
   <p class="small"><a href="/account/reset">Get a new code</a></p>
   {% else %}
-  <p class="muted">{% if texting %}Enter the phone number on your account and we'll text you a code.{% else %}Enter the phone number on your account. Then call dispatch{% if biz_phone %} at {{ biz_phone }}{% endif %} for your reset code.{% endif %}</p>
+  <p class="muted">{% if emailing or texting %}Enter the {% if emailing %}email{% endif %}{% if emailing and texting %} or {% endif %}{% if texting %}phone number{% endif %} on your account and we'll send you a 6 digit code.{% else %}Enter the phone number or email on your account. Then call dispatch{% if biz_phone %} at {{ biz_phone }}{% endif %} for your reset code.{% endif %}</p>
   <form method="post">
     <input type="hidden" name="step" value="send">
-    <label>Mobile number</label><input name="phone" type="tel" value="{{ phone }}" autocomplete="tel" required>
-    <button class="btn primary" style="width:100%;margin-top:10px">{{ 'Text me a code' if texting else 'Continue' }}</button>
+    <label>Mobile number or email</label><input name="who" value="{{ who }}" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+    <button class="btn primary" style="width:100%;margin-top:10px">{{ 'Send me a code' if (texting or emailing) else 'Continue' }}</button>
   </form>
   <p class="small"><a href="/account/reset?step=verify">I already have a code</a></p>
   {% endif %}

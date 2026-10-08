@@ -15643,20 +15643,36 @@ def account_login():
         nxt = "/account"
     if request.method == "POST":
         mode = request.form.get("mode", "login")
-        ph = phone_digits(request.form.get("phone"))
+        who = (request.form.get("who") or request.form.get("phone") or "").strip()
+        ph = phone_digits(request.form.get("phone") if mode == "signup" else who)
         pw = request.form.get("password") or ""
         fails = session.get("cust_fails", 0)
         if fails >= 8:
             err = "Too many tries. Close the page and try again in a few minutes."
+        elif mode != "signup" and "@" in who:
+            c = find_customer(who, need_pw=True)
+            if c and check_password_hash(c["pw_hash"], pw):
+                session["customer_id"] = c["id"]
+                session.pop("cust_fails", None)
+                db().execute("UPDATE customers SET last_login_at=? WHERE id=?", (now(), c["id"]))
+                db().commit()
+                return redirect(nxt)
+            session["cust_fails"] = fails + 1
+            err = "That email and password don't match."
         elif len(ph) != 10:
-            err = "Enter your 10 digit phone number."
+            err = "Enter your 10 digit phone number or your email."
         elif mode == "signup":
             name = (request.form.get("name") or "").strip()[:80]
-            email = (request.form.get("email") or "").strip()[:120]
+            raw_email = (request.form.get("email") or "").strip()
+            email = clean_email(raw_email)
             if len(pw) < 6:
                 err = "Pick a password with at least 6 characters."
             elif not name:
                 err = "Enter your name."
+            elif raw_email and not email:
+                err = "That email doesn't look right."
+            elif email and email_taken(email, (find_customer(ph) or {"id": 0})["id"]):
+                err = "That email is already on another account. Sign in with it, or use a different email."
             elif db().execute("SELECT 1 FROM customers WHERE phone=? AND pw_hash IS NOT NULL", (ph,)).fetchone():
                 err = "That phone number already has an account. Sign in instead."
                 mode = "login"
@@ -16176,7 +16192,12 @@ def api_account_update():
         return jsonify({"ok": False, "error": "Sign in first."}), 403
     b = request.get_json(force=True) or {}
     name = (b.get("name") or c["name"] or "").strip()[:80]
-    email = (b.get("email") or "").strip()[:120]
+    raw_email = (b.get("email") or "").strip()
+    email = clean_email(raw_email)
+    if raw_email and not email:
+        return jsonify({"ok": False, "error": "That email doesn't look right."}), 400
+    if email_taken(email, c["id"]):
+        return jsonify({"ok": False, "error": "That email is already on another account."}), 400
     if b.get("new_password"):
         if not check_password_hash(c["pw_hash"], b.get("password") or ""):
             return jsonify({"ok": False, "error": "Your current password is wrong."}), 400
@@ -16986,6 +17007,78 @@ def api_dispatch_application_delete():
 def texting_on():
     return bool(os.environ.get("TWILIO_SID") and os.environ.get("TWILIO_TOKEN") and os.environ.get("TWILIO_FROM"))
 
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]{2,}$")
+
+def clean_email(v):
+    v = (v or "").strip().lower()[:120]
+    return v if EMAIL_RE.match(v) else ""
+
+def email_on():
+    """Email goes out through Resend (RESEND_API_KEY + EMAIL_FROM), which works on every Railway
+    plan, or plain SMTP (SMTP_HOST/SMTP_USER/SMTP_PASS + EMAIL_FROM), which Railway only allows
+    on the Pro plan."""
+    return bool(os.environ.get("EMAIL_FROM") and (os.environ.get("RESEND_API_KEY") or os.environ.get("SMTP_HOST")))
+
+def send_email(to, subject, text):
+    frm = os.environ.get("EMAIL_FROM", "")
+    biz = (setting("business_name", str) or "Fleet Foot Delivery").strip()
+    if frm and "<" not in frm:
+        frm = biz + " <" + frm + ">"
+    if not (frm and to):
+        return False
+    try:
+        if os.environ.get("RESEND_API_KEY"):
+            body = json.dumps({"from": frm, "to": [to], "subject": subject, "text": text}).encode()
+            req = urllib.request.Request("https://api.resend.com/emails", data=body, method="POST")
+            req.add_header("Authorization", "Bearer " + os.environ["RESEND_API_KEY"])
+            req.add_header("Content-Type", "application/json")
+            req.add_header("User-Agent", "fleetfoot/1.0")
+            urllib.request.urlopen(req, timeout=10).read()
+            return True
+        if os.environ.get("SMTP_HOST"):
+            import smtplib
+            from email.message import EmailMessage
+            m = EmailMessage()
+            m["From"], m["To"], m["Subject"] = frm, to, subject
+            m.set_content(text)
+            port = int(os.environ.get("SMTP_PORT") or 587)
+            if port == 465:
+                s = smtplib.SMTP_SSL(os.environ["SMTP_HOST"], port, timeout=10)
+            else:
+                s = smtplib.SMTP(os.environ["SMTP_HOST"], port, timeout=10)
+                s.starttls()
+            if os.environ.get("SMTP_USER"):
+                s.login(os.environ["SMTP_USER"], os.environ.get("SMTP_PASS", ""))
+            s.send_message(m)
+            s.quit()
+            return True
+    except Exception as exc:
+        try:
+            err = exc.read().decode()[:200]
+        except Exception:
+            err = str(exc)[:200]
+        log("email_error", err)
+    return False
+
+def find_customer(who, need_pw=False):
+    """A customer by 10 digit phone or by email. With an email shared by more than one
+    record, the online account (has a password) and the newest sign-in win."""
+    who = (who or "").strip()
+    extra = " AND pw_hash IS NOT NULL" if need_pw else ""
+    if "@" in who:
+        em = who.lower()
+        return db().execute("SELECT * FROM customers WHERE lower(trim(email))=?" + extra +
+                            " ORDER BY (pw_hash IS NULL), COALESCE(last_login_at,'') DESC, id DESC LIMIT 1",
+                            (em,)).fetchone()
+    ph = phone_digits(who)
+    if len(ph) != 10:
+        return None
+    return db().execute("SELECT * FROM customers WHERE phone=?" + extra, (ph,)).fetchone()
+
+def email_taken(em, not_id=0):
+    return bool(em) and bool(db().execute("SELECT 1 FROM customers WHERE lower(trim(email))=? AND pw_hash IS NOT NULL AND id<>?",
+                                          (em, not_id)).fetchone())
+
 def make_reset_code(c, minutes=15):
     code = str(secrets.randbelow(900000) + 100000)
     exp = (dt.datetime.now() + dt.timedelta(minutes=minutes)).isoformat(timespec="seconds")
@@ -16996,31 +17089,53 @@ def make_reset_code(c, minutes=15):
 
 @app.route("/account/reset", methods=["GET", "POST"])
 def account_reset():
+    """Forgot password: a 6 digit code goes to the customer's email (when email is set up) or
+    texted to their phone (when texting is set up); otherwise dispatch reads them one."""
     step, msg, err = request.form.get("step") or request.args.get("step") or "send", "", ""
-    ph = phone_digits(request.form.get("phone") or request.args.get("phone"))
+    who = (request.form.get("who") or request.form.get("phone") or request.args.get("who")
+           or request.args.get("phone") or "").strip()[:120]
+    by_email = "@" in who
     biz = (setting("business_name", str) or "Fleet Foot Delivery").strip()
     if request.method == "POST" and step == "send":
-        sends = [t for t in session.get("reset_sends", []) if time.time() - t < 3600]
-        if len(ph) != 10:
-            err = "Enter your 10 digit phone number."
+        sends = [x for x in session.get("reset_sends", []) if time.time() - x < 3600]
+        if by_email and not clean_email(who):
+            err = "That email doesn't look right."
+        elif not by_email and len(phone_digits(who)) != 10:
+            err = "Enter your 10 digit phone number or your email."
         elif len(sends) >= 3:
             err = "Too many codes asked for. Try again in an hour, or call dispatch."
         else:
             sends.append(time.time())
             session["reset_sends"] = sends
-            c = db().execute("SELECT * FROM customers WHERE phone=?", (ph,)).fetchone()
-            if texting_on():
+            c = find_customer(who)
+            call = ("Call dispatch at " + (nice_phone(dispatch_phone()) or "our number") +
+                    " and they'll give you a reset code, then enter it below.")
+            if by_email and email_on():
                 if c:
-                    send_text("+1" + ph, biz + " password reset code: " + make_reset_code(c) + ". It works for 15 minutes.")
+                    code = make_reset_code(c)
+                    link = request.host_url.rstrip("/") + "/account/reset?step=verify&who=" + urllib.parse.quote(who)
+                    send_email(who, biz + " password reset code: " + code,
+                               "Hi " + ((c["name"] or "").split(" ")[0] or "there") + ",\n\n"
+                               "Your " + biz + " password reset code is " + code + ". It works for 15 minutes.\n\n"
+                               "Enter it here to pick a new password:\n" + link + "\n\n"
+                               "If you didn't ask for this, you can ignore this email. Your password stays the same.")
+                msg = "If that email has an account, we just sent it a 6 digit code. Check your spam folder too."
+            elif by_email and texting_on() and c and len(phone_digits(c["phone"])) == 10:
+                send_text("+1" + phone_digits(c["phone"]), biz + " password reset code: " + make_reset_code(c) +
+                          ". It works for 15 minutes.")
+                msg = "If that email has an account, we just texted a 6 digit code to the phone on it."
+            elif not by_email and texting_on():
+                if c:
+                    send_text("+1" + phone_digits(who), biz + " password reset code: " + make_reset_code(c) +
+                              ". It works for 15 minutes.")
                 msg = "If that number has an account, we just texted it a 6 digit code."
             else:
-                msg = ("Call dispatch at " + (nice_phone(dispatch_phone()) or "our number") +
-                       " and they'll give you a reset code, then enter it below.")
+                msg = call
             step = "verify"
     elif request.method == "POST" and step == "verify":
         code = "".join(ch for ch in (request.form.get("code") or "") if ch.isdigit())
         pw = request.form.get("password") or ""
-        c = db().execute("SELECT * FROM customers WHERE phone=?", (ph,)).fetchone() if len(ph) == 10 else None
+        c = find_customer(who)
         if len(pw) < 6:
             err = "Pick a password with at least 6 characters."
         elif pw != (request.form.get("password2") or ""):
@@ -17041,8 +17156,9 @@ def account_reset():
             session.pop("cust_fails", None)
             log("customer", (c["name"] or "Customer") + " reset their password")
             return redirect("/account")
-    return render_template("account_reset.html", step=step, msg=msg, err=err, phone=nice_phone(ph) if ph else "",
-                           texting=texting_on())
+    shown = who if by_email else (nice_phone(phone_digits(who)) if phone_digits(who) else "")
+    return render_template("account_reset.html", step=step, msg=msg, err=err, who=shown, phone=shown,
+                           texting=texting_on(), emailing=email_on(), biz_phone=nice_phone(dispatch_phone()))
 
 @app.post("/api/dispatch/customer-reset-code")
 def api_dispatch_customer_reset_code():
@@ -17055,7 +17171,7 @@ def api_dispatch_customer_reset_code():
     code = make_reset_code(c, 30)
     log("customer", "Reset code made for " + (c["name"] or nice_phone(c["phone"])) + " by " + (session.get("dispatcher_name") or "dispatch"))
     return jsonify({"ok": True, "code": code, "message": "Read this code to the customer. They go to " +
-                    request.host_url.rstrip("/") + "/account/reset?step=verify and enter it with their phone number. It works for 30 minutes."})
+                    request.host_url.rstrip("/") + "/account/reset?step=verify and enter it with their phone number or email. It works for 30 minutes."})
 
 
 
