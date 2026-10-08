@@ -1039,10 +1039,25 @@ def host_site():
                     break
             if s is None and session.get("site_preview"):
                 s = site_by_id(session.get("site_preview"))
+            if s is None:
+                s = home_brand_site()   # no shared "All brands" website: every address shows one brand
     except Exception:
         s = None
     g._hsite = s
     return s
+
+
+def home_brand_site():
+    """The brand shown on a web address that belongs to no brand (like the Railway address):
+    the one picked in Settings > Regions > Brand sites, else the first brand in the list."""
+    try:
+        v = (db().execute("SELECT value FROM settings WHERE key='home_site_id'").fetchone() or [""])[0]
+        s = site_by_id(v) if str(v or "").isdigit() else None
+        if s is None:
+            s = db().execute("SELECT * FROM sites ORDER BY sort, id LIMIT 1").fetchone()
+        return s
+    except Exception:
+        return None
 
 
 class order_site:
@@ -3382,39 +3397,8 @@ def home():
     paused = paused_region_ids()
     regions = [{"id": g["id"], "name": g["name"], "paused": g["id"] in paused}
                for g in all_regions() if g["id"] in used]
-    # brand picker on the main (shared) website: one button per brand site with restaurants
+    # one brand per web address: no brand picker and no "All brands" page
     brands, brand_site = [], None
-    if not _own_addr and brands_on():
-        reg_site = {g["id"]: (g["site_id"] or 0) for g in db().execute("SELECT id, site_id FROM regions").fetchall()}
-        used_all = {r["region_id"] for r in rs_all if r["region_id"]}
-        used_sites = {reg_site.get(rid, 0) for rid in used_all}
-        for srow in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
-            # every brand gets a button; one with no restaurants yet still opens its own page
-            brands.append({"id": srow["id"], "name": srow["name"], "logo": site_logo_url(srow),
-                           "empty": srow["id"] not in used_sites})
-        bpick = request.args.get("brand")
-        if bpick is not None:
-            session["cust_brand"] = bpick if bpick.isdigit() else ""
-            session["cust_region"] = ""
-        elif request.args.get("region") is not None:
-            session["cust_brand"] = ""
-        bsel = session.get("cust_brand") or ""
-        if bpick is not None and _site is not None:
-            # leaving a Preview: start again from every restaurant
-            _site = None
-            rs = rs_all
-            used = {r["region_id"] for r in rs if r["region_id"]}
-            regions = [{"id": g["id"], "name": g["name"], "paused": g["id"] in paused}
-                       for g in all_regions() if g["id"] in used]
-        if bsel.isdigit() and int(bsel) in {b["id"] for b in brands}:
-            brand_site = site_by_id(int(bsel))
-            _breg = site_region_ids(brand_site["id"])
-            rs = [r for r in rs if r["region_id"] and r["region_id"] in _breg]
-            regions = [g for g in regions if g["id"] in _breg]
-        elif bsel:
-            session["cust_brand"] = ""
-        elif _site is not None:
-            brand_site = _site   # previewing a brand: its button shows as picked
     if not regions_on():
         regions = []   # regions are off: one area, no "Where are you?" buttons
     pick = request.args.get("region")
@@ -3463,6 +3447,10 @@ def menu(slug):
         return redirect(url_for("home"))
     _site = host_site()
     if _site is not None and r["slug"] != "oneoff" and (r["region_id"] or 0) not in site_region_ids(_site["id"]):
+        _own = site_of_region(r["region_id"])
+        _doms = site_domains(_own) if _own is not None else []
+        if _doms and _norm_host(request.host) not in _doms:
+            return redirect("https://%s/r/%s" % (_doms[0], r["slug"]))
         return redirect(url_for("home"))
     if _site is None and r["slug"] != "oneoff":
         _rs = site_of_region(r["region_id"])
@@ -5593,7 +5581,7 @@ def track(code):
             return render_template("track.html", order=None, code=code, need_phone=True,
                                    primary=matches[0]["primary_no"], phone_err=err)
         return render_template("track.html", order=None, code=code)
-    if host_site() is None:
+    if True:   # the order's own brand, whatever web address the link was opened on
         _ts = site_of_region(o["region_id"])
         if _ts is not None:
             g._site_forced = _ts   # the order's brand logo, name and phone on its tracking page
@@ -9223,12 +9211,14 @@ def api_dispatcher_avail_edit():
 
 def sites_payload():
     out = []
+    _home = home_brand_site()
     for s in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
         lg = (s["logo"] or "").strip()
         out.append({"id": s["id"], "name": s["name"], "phone": nice_phone(s["phone"] or "") if (s["phone"] or "").strip() else "",
                     "domains": ", ".join(site_domains(s)),
                     "logo": media_url(lg) if lg and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(lg))) else "",
                     "regions": sorted(site_region_ids(s["id"])),
+                    "home": bool(_home is not None and _home["id"] == s["id"]),
                     "design": _design_payload(s)})
     return out
 
@@ -9299,6 +9289,10 @@ def sites_edit(b, con, who):
         else:
             con.execute("UPDATE sites SET name=?, phone=?, domains=? WHERE id=?", (name, ph, ",".join(doms), sid))
             log("site", who + " changed brand site " + name)
+        if str(b.get("home") or "").lower() in ("1", "true", "on", "yes"):
+            con.execute("DELETE FROM settings WHERE key='home_site_id'")
+            con.execute("INSERT INTO settings(key,value) VALUES('home_site_id',?)", (str(sid),))
+            log("site", who + " made " + name + " the brand on the Railway address")
         con.commit()
         return jsonify({"ok": True, "id": sid, **regions_payload()})
     if op == "site_design":
@@ -13375,8 +13369,12 @@ def staff_brand_site():
         return g._staff_site
     s = None
     try:
+        # a company picked in the shared driver/restaurant app wins, so one app address works for every brand
+        _pick = session.get("staff_brand")
+        if _pick and _pick != "main":
+            s = site_by_id(_pick)
         host = _norm_host(request.host)
-        for row in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
+        for row in (db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall() if s is None and _pick != "main" else []):
             if host in site_domains(row):
                 s = row
                 break
@@ -13418,16 +13416,17 @@ def staff_main_brand():
 
 def _session_brand_site():
     """The brand the signed-in driver/kitchen picked (or the web address belongs to), for API calls."""
-    h = host_brand_site()
-    if h is not None:
-        return h
     bs = session.get("staff_brand")
-    if bs and bs != "main":
+    if bs and bs != "main":   # the company picked in the shared app wins, on any web address
         try:
-            return site_by_id(int(bs))
+            s = site_by_id(int(bs))
+            if s is not None:
+                return s
         except (TypeError, ValueError):
-            return None
-    return None
+            pass
+    if bs == "main":
+        return None
+    return host_brand_site()
 
 
 @app.before_request
@@ -13487,7 +13486,7 @@ def inject_all_brand_logos():
     """On the shared customer website with no brand picked (All brands), every brand's logo,
     so the header and the browser tab show all of them together."""
     try:
-        if request.path.startswith(_STAFF_PREFIXES) or request.path.startswith(("/go/", "/reset/")):
+        if True:   # the All brands website is gone: every address shows one brand
             return {"all_logos": []}
         if not brands_on() or current_site() is not None:
             return {"all_logos": []}
@@ -17161,7 +17160,8 @@ def faq_region_id():
     return faq_target()[0]
 
 def faq_all_brands():
-    """True on the shared website's FAQ with no brand or area picked (All brands)."""
+    """True on the shared website's FAQ with no brand or area picked (All brands). Gone: always False."""
+    return False
     try:
         if not brands_on() or host_site() is not None:
             return False
