@@ -54,6 +54,7 @@
     <input id="name" placeholder="Your name">
     <input id="phone" placeholder="Mobile number">
     <textarea id="address" rows="2" placeholder="Street, city, state, ZIP"></textarea>
+    <div id="savedAddrLink" class="small"></div>
     <input id="note" placeholder="Gate code, apartment, door instructions">
     <label class="small" style="display:block;margin:6px 0">How should the driver hand it off?<select id="dropStyle" style="width:100%"><option value="door">Meet at door</option><option value="no_contact">No contact delivery</option><option value="call">Call on delivery</option></select></label>
     <button class="btn" onclick="validate()">Validate address and price delivery</button>
@@ -436,7 +437,12 @@ async function drawAcct(){
   const me = a.me;
   if(!document.getElementById('name').value) document.getElementById('name').value = me.name;
   if(!document.getElementById('phone').value) document.getElementById('phone').value = me.phone;
-  if(!document.getElementById('address').value && me.address){ document.getElementById('address').value = me.address; try{ validate(); }catch(e){} }
+  // offer the saved address as a link instead of filling the box in for them
+  const sal = document.getElementById('savedAddrLink');
+  if(sal && me.address){
+    sal.innerHTML = '<a href="#">Use my saved address: ' + String(me.address).replace(/[<>&"]/g,'') + '</a>';
+    sal.querySelector('a').onclick = function(e){ e.preventDefault(); document.getElementById('address').value = me.address; try{ validate(); }catch(x){} };
+  }
   let h = 'Signed in as <b>'+me.name+'</b>'+(me.loyalty_on?' · '+me.points+' points':'')+' · <a href="/account/logout">Sign out</a>';
   if(me.loyalty_on){
     h += ' · '+me.tier;
@@ -459,7 +465,9 @@ async function drawAcct(){
   box.innerHTML = h; box.classList.remove('muted');
 }
 function savedToggle(){ const s=document.getElementById('savedCard'), r=document.getElementById('saveCardRow'); if(s&&r) r.style.display = s.value ? 'none' : ''; }
-try { const _a = localStorage.getItem('ffAddr'); if(_a && !document.getElementById('address').value){ document.getElementById('address').value = _a; setTimeout(()=>{ try{ validate(); }catch(e){} }, 300); } } catch(e){}
+try { localStorage.removeItem('ffAddr'); } catch(e){}
+// only an address the customer just searched for in this same tab carries over from the home page
+try { const _a = sessionStorage.getItem('ffAddr'); if(_a && !document.getElementById('address').value){ document.getElementById('address').value = _a; setTimeout(()=>{ try{ validate(); }catch(e){} }, 300); } } catch(e){}
 drawAcct();
 attachAddressPicker('address', ()=>validate());
 drawMenu();

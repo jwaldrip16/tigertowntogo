@@ -1164,8 +1164,22 @@ def setting(key, cast=int):
             dv = str(site_design(s).get(key) or "").strip()
             if dv and (key not in BRAND_IMAGES or os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(dv)))):
                 return cast(dv)
-    row = db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
-    return cast(row["value"]) if row else None
+    # A page view reads the same settings many times (once per restaurant card); remember
+    # them for the rest of that one page view. Only for page views (GET), never while saving.
+    cache = None
+    try:
+        if has_request_context() and request.method == "GET":
+            cache = g.__dict__.setdefault("_setting_cache", {})
+    except Exception:
+        cache = None
+    if cache is not None and key in cache:
+        val = cache[key]
+    else:
+        row = db().execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+        val = row["value"] if row else None
+        if cache is not None:
+            cache[key] = val
+    return cast(val) if val is not None else None
 
 # ---------------------------------------------------------------- geo + fees
 

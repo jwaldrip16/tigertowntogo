@@ -115,7 +115,7 @@ function homeSearch(){
   m.textContent = 'Checking who delivers to you...';
   jpost('/api/home-search', {address:a}).then(r=>{
     if(!r.ok){ m.textContent = r.error; return; }
-    try { localStorage.setItem('ffAddr', r.formatted); } catch(e){}
+    try { sessionStorage.setItem('ffAddr', r.formatted); localStorage.removeItem('ffAddr'); } catch(e){}
     m.textContent = r.count ? (r.count + ' restaurant' + (r.count===1?'':'s') + ' deliver to ' + r.formatted) : ('Sorry, no restaurants deliver to ' + r.formatted + ' yet. Call us and we may still be able to help.');
     const by = {}; r.restaurants.forEach(x=>by[x.slug]=x);
     document.querySelectorAll('#restGrid .card[data-slug]').forEach(c=>{
@@ -130,7 +130,8 @@ function homeSearch(){
 }
 function showAll(){ document.querySelectorAll('#restGrid .card').forEach(c=>c.style.display=''); document.getElementById('reachNote').textContent=''; }
 (function(){
-  try { const s = localStorage.getItem('ffAddr'); if(s) document.getElementById('homeAddr').value = s; } catch(e){}
+  // the address box always starts empty; an address is only filled in when the customer picks one
+  try { localStorage.removeItem('ffAddr'); } catch(e){}
   try { attachAddressPicker('homeAddr', ()=>homeSearch()); } catch(e){}
   jget('/api/account/me').then(a=>{
     if(a.me && a.me.address){
