@@ -67,14 +67,17 @@ function draw(){
     (ix<order.length-1 ? '<button class="btn tiny" onclick="moveSection(\''+escH(s)+'\',\'down\')">Move down</button> ' : '')+
     '<button class="btn tiny" onclick="editItem(null,\''+escH(s)+'\')">Add item here</button></span></div>'+
     '<div class="mgrid">'+groups[s].map(it=>
+      '<div class="edwrap">'+
       '<button type="button" class="mcard ed-card'+(it.active?'':' hiddenitem')+'" onclick="editItem('+it.id+')">'+
       (it.image ? '<img class="mimg" src="'+it.image+'" alt="">' : '<div class="noimg">No photo</div>')+
       '<div class="mhead"><strong>'+escH(it.name)+'</strong><span class="mprice">'+it.price+'</span></div>'+
       (it.description ? '<div class="mdesc">'+escH(it.description)+'</div>' : '')+
-      '<div class="small">'+(it.active ? '' : '<span class="pill grey">hidden</span> ')+
+      '<div class="small">'+(it.active ? '' : '<span class="pill red">blocked</span> ')+
       (it.avail_label ? '<span class="pill">'+escH(it.avail_label)+'</span> ' : '')+
       (it.groups.length ? '<span class="pill blue">'+it.groups.length+' choice'+(it.groups.length>1?'s':'')+'</span>' : '')+
-      '</div></button>').join('')+'</div>').join('');
+      '</div></button>'+
+      '<button type="button" class="btn tiny '+(it.active?'danger':'primary')+' edblock" onclick="blockItem('+it.id+','+(it.active?1:0)+')">'+
+        (it.active ? 'Block item' : 'Unblock item')+'</button></div>').join('')+'</div>').join('');
 }
 function secAvailTag(list){
   const l = list.length ? (list[0].avail_label||'') : '';
@@ -184,6 +187,11 @@ function fillModal(it){
       '<button class="btn small" onclick="addGroup('+it.id+')">Add choice</button></div>'
       : '<p class="muted small">Create the item first, then add a photo and choices.</p>')+
     '</div><div>'+(it.id ? photoBlock('item', it.id, it.image) : '')+'</div></div></div>';
+}
+async function blockItem(id, isOn){
+  const res = await jpost('/api/dispatch/menu-item', {op:'update', item_id:id, active: isOn ? 0 : 1});
+  if (!res.ok){ alert(res.error || 'Could not change that item.'); return; }
+  load();
 }
 async function saveItem(id){
   const body = {name:document.getElementById('edName').value.trim(),
