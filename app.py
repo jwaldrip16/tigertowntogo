@@ -2319,7 +2319,7 @@ AUTO_MSGS = [
     ("drv_tip", "Tip changed", "Tells the driver when a customer changes the tip.", 1),
     ("drv_status", "Order marked delivered or picked up", "Confirms to the driver when an order's status is marked.", 1),
     ("drv_roster", "Moved to Scheduled or Unavailable", "Tells a driver when dispatch moves them between Scheduled and Unavailable.", 1),
-    ("drv_schedule", "Schedule and time off decisions", "Tells a driver when their hours or time off are approved, denied, added, changed or removed.", 1),
+    ("drv_schedule", "Schedule and time off decisions", "Tells a driver when their hours or time off are approved, denied, added, changed or removed, including when a closed date added for their region changes hours they already sent in.", 1),
     ("drv_request_ack", "Status request received", "Confirms to a driver that their online or offline request reached dispatch.", 1),
 ]
 AUTO_MSG_KEYS = {k: d for k, _l, _h, d in AUTO_MSGS}
@@ -9568,14 +9568,78 @@ def api_region_hours_save():
         d, v = str(d)[:10], " ".join(str(v or "").split())[:80]
         if d in dates and v:
             why[d] = v
+    old_all = set(region_closed_dates(rid))
+    old_part = region_closed_hours(rid)
     db().execute("UPDATE regions SET hours=?, closed_dates=?, closed_hours=?, closed_reasons=? WHERE id=?",
                  (hours_json, ",".join(sorted(dates)), json.dumps(part), json.dumps(why), rid))
-    db().commit()
     who = session.get("dispatcher_name", "dispatch")
+    # New closed dates (or changed closed hours) knock drivers' submitted hours off those days.
+    changed = sorted(d for d in dates if (d not in part and d not in old_all) or (d in part and old_part.get(d) != part[d]))
+    bumped = clear_closed_from_schedules(rid, changed, part, why, who) if changed else 0
+    db().commit()
     log("region_hours", r["name"] + ": " + ("own hours " + business_hours_label(rid) if hours_json else "business hours") +
         ("; " + closed_dates_label(rid, 60) if dates else "") + " by " + who)
     return jsonify({"ok": True, "label": business_hours_label(rid) or "no hours limit",
-                    "closed": closed_dates_label(rid, 60)})
+                    "closed": closed_dates_label(rid, 60), "drivers_changed": bumped})
+
+
+def clear_closed_from_schedules(rid, days, part, why, who):
+    """A region was just closed on these dates. Every driver hour already sent in for that region
+    on those dates is taken off (or trimmed around set closed hours), and the driver gets a message.
+    Returns how many drivers were changed."""
+    con = db()
+    rname = (_region(rid) or {"name": "Your region"})["name"]
+    hit = {}
+    for iso in days:
+        try:
+            day = dt.date.fromisoformat(iso)
+        except ValueError:
+            continue
+        ws, dow = monday_of(day).isoformat(), day.weekday()
+        span = part.get(iso)
+        rows = con.execute("""SELECT * FROM availability WHERE week_start=? AND dow=?
+                              AND COALESCE(status,'pending')!='denied'""", (ws, dow)).fetchall()
+        for a in rows:
+            regs = slot_regions(a) or driver_region_ids(a["driver_id"])
+            if rid not in regs:
+                continue
+            s_, e_ = _hm(a["start_time"]), _hm(a["end_time"])
+            if s_ is None or e_ is None:
+                continue
+            reason = (" (" + why[iso] + ")") if why.get(iso) else ""
+            when = DOW_NAMES[dow] + " " + short_date(day)
+            was = a["start_time"] + "-" + a["end_time"]
+            others = sorted(x for x in regs if x != rid)
+            if span:
+                pa, pb = _hm(span[0]), _hm(span[1])
+                pb = 1440 if span[1] == "23:59" else pb
+                if not (s_ < pb and pa < e_):
+                    continue            # their hours don't touch the closed hours
+                closed_txt = rname + " is closed " + _ampm(span[0]) + " to " + \
+                    ("close" if span[1] == "23:59" else _ampm(span[1])) + " on " + when + reason
+            else:
+                closed_txt = rname + " is closed all day " + when + reason
+            if others:
+                # still works their other region(s) those hours; just drop this one
+                con.execute("UPDATE availability SET region_ids=? WHERE id=?",
+                            (",".join(str(x) for x in others), a["id"]))
+                body = closed_txt + ". Your " + was + " hours now only cover " + region_names(set(others)) + "."
+            elif span and s_ < pa:
+                ne = span[0]
+                con.execute("UPDATE availability SET end_time=? WHERE id=?", (ne, a["id"]))
+                body = closed_txt + ". Your hours were changed from " + was + " to " + a["start_time"] + "-" + ne + "."
+            elif span and e_ > pb and span[1] != "23:59":
+                ns = span[1]
+                con.execute("UPDATE availability SET start_time=? WHERE id=?", (ns, a["id"]))
+                body = closed_txt + ". Your hours were changed from " + was + " to " + ns + "-" + a["end_time"] + "."
+            else:
+                con.execute("DELETE FROM availability WHERE id=?", (a["id"],))
+                body = closed_txt + ". Your " + was + " hours that day were taken off your schedule."
+            auto_msg("drv_schedule", "INSERT INTO messages(driver_id,sender,sender_name,body,created_at) VALUES(?,?,?,?,?)",
+                     (a["driver_id"], "dispatch", who, body, now()))
+            hit[a["driver_id"]] = True
+            log("availability", "Closed date " + iso + " in " + rname + " changed driver " + str(a["driver_id"]) + ": " + body)
+    return len(hit)
 
 
 @app.post("/api/dispatch/region-phone")
