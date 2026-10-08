@@ -4240,7 +4240,12 @@ def _pp_void(o, why="cancelled"):
     if (o["pp_state"] or "") != "authorized" or not o["pp_auth_id"]:
         return {"ok": False, "error": "No PayPal hold on this order."}
     st, j = pp_api("POST", "/v2/payments/authorizations/" + o["pp_auth_id"] + "/void")
-    if st in (200, 204):
+    issue = str((((j or {}).get("details") or [{}])[0] or {}).get("issue") or "").upper() if isinstance(j, dict) else ""
+    gone = issue in ("PREVIOUSLY_VOIDED", "AUTHORIZATION_VOIDED", "AUTHORIZATION_EXPIRED", "AUTHORIZATION_ALREADY_VOIDED")
+    if gone:
+        # PayPal already let go of this hold (released earlier or it expired): just catch our records up.
+        why = why + ", PayPal had already released it"
+    if st in (200, 204) or gone:
         db().execute("UPDATE orders SET pp_state='voided', paid_cents=0, pp_error=NULL WHERE id=?", (o["id"],))
         if o["dispatch_status"] not in ("delivered", "cancelled"):
             # Order is still open: it is unpaid again, so a new card can go on.
