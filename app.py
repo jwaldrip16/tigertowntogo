@@ -14473,6 +14473,12 @@ def api_dispatch_business():
     if not on:
         # end of day: drivers start tomorrow with an empty Completed tab. Dispatch keeps the history.
         db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('driver_done_cleared_at',?)", (now(),))
+        # closing the business clocks every driver out
+        for _d in db().execute("SELECT id FROM drivers WHERE COALESCE(status,'offline')!='offline'").fetchall():
+            try:
+                set_driver_status(_d["id"], "offline", "The business is closed, so you are offline now.")
+            except Exception as e:
+                print("close: driver offline skipped", _d["id"], e)
     # every open and every close starts chat fresh: driver chats, kitchen chats and mass texts
     cleared = purge_chats()
     db().commit()
