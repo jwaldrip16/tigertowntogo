@@ -43,6 +43,9 @@
     const msg = box.querySelector('#ppcfMsg'), go = box.querySelector('#ppcfGo');
     function say(t, bad){ msg.textContent = t; msg.style.color = bad ? '#c0392b' : ''; }
     let fields = [];
+    // First try saves the card with PayPal for added fees and tips. If PayPal turns that down
+    // (for example the name or ZIP doesn't match what the bank has), run it once more without saving.
+    let plain = false, lastArgs;
     function close(){
       // shut PayPal's card boxes down properly so the next card form starts clean
       fields.forEach(function(f){ try { f.close(); } catch(e){} });
@@ -52,24 +55,31 @@
     box.querySelector('#ppcfClose').onclick = close;
     loadSdk(o.code).then(function(pp){
       if (!document.body.contains(box)) return;
+      function failed(r){
+        say((r && r.error) || 'The card did not go through. Check the name, number, date, code and ZIP, or try another card.', true);
+        go.disabled = false; go.textContent = 'Run card';
+      }
       const cf = pp.CardFields({
         createOrder: async function(){
-          const r = await jpost('/api/paypal/create', {code: o.code, card: true});
+          const r = await jpost('/api/paypal/create', {code: o.code, card: true, no_save: plain});
           if (!r || !r.ok){ say((r && r.error) || 'Could not start the payment.', true); throw new Error('create'); }
           return r.id;
         },
         onApprove: async function(data){
           say('Finishing...');
           const r = await jpost('/api/paypal/approve', {code: o.code, id: data.orderID});
-          if (!r || !r.ok){ say((r && r.error) || 'The card did not go through.', true); go.disabled = false; go.textContent = 'Run card'; return; }
+          if (!r || !r.ok){
+            if (!plain){ plain = true; say('Trying the card again without saving it...'); cf.submit(lastArgs).catch(function(){ failed(r); }); return; }
+            failed(r); return;
+          }
           say('Card accepted. ' + r.held + ' held on the card.');
           go.textContent = 'Done';
           if (o.onDone) o.onDone(r);
           setTimeout(close, 1200);
         },
         onError: function(err){
-          say('The card did not go through. Check the number, date, code and ZIP, or try another card.', true);
-          go.disabled = false; go.textContent = 'Run card';
+          if (!plain){ plain = true; say('Trying the card again without saving it...'); cf.submit(lastArgs).catch(function(){ failed(); }); return; }
+          failed();
         }
       });
       if (!cf.isEligible()){
@@ -77,9 +87,8 @@
           say('Card boxes are not turned on for this PayPal account yet. Close this and use the PayPal button.', true);
           go.textContent = 'Unavailable'; return;
         }
-        say('Typed card payments are not turned on for this PayPal account yet. Use the pay page instead.', true);
-        go.textContent = 'Open pay page'; go.disabled = false;
-        go.onclick = function(){ window.open('/pay/' + encodeURIComponent(o.code), '_blank'); };
+        say('Typed card payments are not turned on for this PayPal account yet. Turn on card payments in PayPal, or use House account.', true);
+        go.textContent = 'Unavailable';
         return;
       }
       [[cf.NameField({placeholder: 'Name on card'}), '#ppcfName'], [cf.NumberField(), '#ppcfNum'],
@@ -91,7 +100,9 @@
         const zip = box.querySelector('#ppcfZip').value.trim();
         if (zip && !/^\d{5}(-?\d{4})?$/.test(zip)){ say('The billing ZIP is 5 digits.', true); return; }
         go.disabled = true; go.textContent = 'Running...'; say('');
+        plain = false;
         const args = zip ? {billingAddress: {postalCode: zip, countryCode: 'US'}} : undefined;
+        lastArgs = args;
         cf.submit(args).catch(function(){
           say('Fix the card details and try again.', true); go.disabled = false; go.textContent = 'Run card';
         });

@@ -1126,8 +1126,7 @@ function ppButtons(o){
   if(!p.enabled) return '';
   let h = '';
   if(p.can_pay)
-    h += '<button class="btn tiny primary" onclick="typeCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">Type card</button>'+
-         '<a class="btn tiny" href="'+p.pay_url+'" target="_blank" rel="noopener">Pay page</a>';
+    h += '<button class="btn tiny primary" onclick="typeCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">Type card</button>';
   if(p.state === 'authorized' && o.dispatch_status !== 'delivered' && o.dispatch_status !== 'cancelled')
     h += '<button class="btn tiny" onclick="replaceCard('+o.id+',\''+o.code+'\',\''+o.total+'\')">Change card</button>';
   if(p.state === 'authorized'){

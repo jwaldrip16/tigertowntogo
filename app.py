@@ -4340,7 +4340,10 @@ def _pp_create(o, b, kind, acct):
                                 "brand_name": (setting("business_name", str) or "Fleet Foot Delivery")[:120]}}
     if kind == "order":
         # Every order payment is saved with PayPal so fees and tips added later can go on it.
-        body["payment_source"] = (pp_vault_source(o) or pp_vault_any("card")) if b.get("card") else pp_vault_any("paypal", o)
+        if b.get("card") and b.get("no_save"):
+            pass      # second try after PayPal turned down saving the card: just take the payment
+        else:
+            body["payment_source"] = (pp_vault_source(o) or pp_vault_any("card")) if b.get("card") else pp_vault_any("paypal", o)
     plain = {k: v for k, v in body.items() if k != "payment_source"}
     if "paypal" in (body.get("payment_source") or {}):
         body.pop("application_context", None)     # PayPal wants its settings inside payment_source then
