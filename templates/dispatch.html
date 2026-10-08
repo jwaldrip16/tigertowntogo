@@ -1295,9 +1295,10 @@ async function unsendKitchen(id, started, app){
   if(!confirm(msg)) return;
   const res = await jpost('/api/order/unsend-kitchen', {order_id:id});
   if(!res.ok){ alert(res.error || 'Could not pull it back.'); return; }
-  if(res.future) ffToast('Moved back to Future orders for '+res.when+'. It comes out again at its normal time.'+(res.unassigned ? ' '+res.unassigned+' was taken off it.' : ''));
+  if(res.future) ffToast('Moved back to Future orders for '+res.when+'.'+(res.unassigned ? ' '+res.unassigned+' was taken off it.' : ''));
   else ffToast(app ? 'Pulled back from the kitchen. Tap Send to kitchen when it is ready to go.' : 'Unreleased. Tap Release order when it is ready.');
   board(true);
+  if(res.future){ try { loadFuture(); } catch(e) {} }
 }
 async function sendKitchen(id){
   const res = await jpost('/api/order/send-kitchen', {order_id:id});
