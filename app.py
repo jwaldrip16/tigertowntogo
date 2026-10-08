@@ -6674,13 +6674,37 @@ def api_unsend_kitchen():
     if db().execute("SELECT kitchen_status FROM orders WHERE id=?", (o["id"],)).fetchone()[0] != "waiting":
         db().rollback()
         return jsonify({"ok": False, "error": "The kitchen just confirmed this order, so it can't be unsent."}), 400
+    # A future order that isn't due yet goes back to Future orders and comes out again at its
+    # normal release time. One that is due now stays on the board waiting for Send to kitchen.
+    back_to_future, unassigned = False, ""
+    sf = _rv(o, "scheduled_for")
+    if sf:
+        try:
+            rel = dt.datetime.fromisoformat(str(sf)[:19]) - dt.timedelta(minutes=future_lead())
+        except Exception:
+            rel = None
+        if rel and rel > dt.datetime.now():
+            back_to_future = True
+            if o["driver_id"] and o["dispatch_status"] in ("assigned", "received", "at_restaurant"):
+                _d = db().execute("SELECT name FROM drivers WHERE id=?", (o["driver_id"],)).fetchone()
+                unassigned = _d["name"] if _d else "the driver"
+                auto_msg("drv_cancelled", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
+                         (o["driver_id"], "system", "Order " + o["code"] + " was moved back to a future order and taken off your run.", now()))
+            db().execute("""UPDATE orders SET sched_kitchen='pending', sched_dispatch='held', sched_hold='waiting on kitchen',
+                            kitchen_status='scheduled', dispatch_status='scheduled', release_at=?, auto_kitchen_at=NULL,
+                            driver_id=NULL, stack_seq=NULL, hold_reason=? WHERE id=?""",
+                         (rel.isoformat(timespec="seconds"),
+                          "future order for " + when_label(str(sf)[:19], _rv(o, "region_id")), o["id"]))
     db().commit()
     if order_uses_app(o):
         rest_auto(o["restaurant_id"], "Order " + rest_ord_no(o) + " was pulled back by dispatch. Don't start it yet." +
                   " We'll send it again when it's ready to go.")
     log("order", o["code"] + (" pulled back from the kitchen by " if order_uses_app(o) else " pulled back from call-in by ") +
-        who + (" (kitchen had already started it)" if started else ""))
-    return jsonify({"ok": True, "started": started})
+        who + ((" and moved back to future orders for " + when_label(str(sf)[:19], _rv(o, "region_id"))) if back_to_future else "") +
+        ((", " + unassigned + " taken off it") if unassigned else ""))
+    return jsonify({"ok": True, "started": started, "future": back_to_future,
+                    "when": when_label(str(sf)[:19], _rv(o, "region_id")) if back_to_future else "",
+                    "unassigned": unassigned})
 
 
 def release_to_kitchen(o, who):
