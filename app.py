@@ -6608,7 +6608,9 @@ def api_board():
         "region_filtered": bool(my_regions),
         "showing_all": show_all,
         "is_owner": owner_view,
-        "region_queues": region_queues(set() if owner_view else my_regions),
+        # queue rows follow the regions checked in I'm working; Show all regions brings back every one
+        "region_queues": region_queues(myr),
+        "queues_all": not myr,
         "auto": bool(setting("auto_assign")),
         "tokens": token_list(),
         "alerts": open_call_alerts(),

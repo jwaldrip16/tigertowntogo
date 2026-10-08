@@ -899,7 +899,7 @@ function drawRegionQueues(res){
   });
   window.RG_ORDER = view.map(q=>q.id);
   const anyOpen = view.some(q=>RGQ_OPEN[q.id]);
-  box.innerHTML = '<div class="row between"><span class="muted small">' + (res.is_owner ? 'Queue in every region (owner view)' : 'Queue in your regions') +
+  box.innerHTML = '<div class="row between"><span class="muted small">' + (res.queues_all ? 'Queue in every region' : 'Queue in the regions you are working') +
     '</span><button class="btn tiny" onclick="rgOpenAll(' + (anyOpen ? 'false' : 'true') + ')">' + (anyOpen ? 'Close all queues' : 'Open all queues') + '</button></div>' +
     view.map(q => {
       const late = q.oldest_min >= 15;
