@@ -71,14 +71,14 @@
   <table class="hours">
     {% for i in range(7) %}
     <tr><td>{{ week[i] }}</td>
-      <td><input type="time" name="open_{{ i }}" value="{{ d.hours[i|string][0] }}"></td>
-      <td><input type="time" name="close_{{ i }}" value="{{ d.hours[i|string][1] }}"></td></tr>
+      {% set span = d.hours.get(i|string) or ['', ''] %}{% set shut = not span[0] or not span[1] %}
+      <td><input type="time" name="open_{{ i }}" value="{{ span[0] }}"{{ ' disabled' if shut }}></td>
+      <td><input type="time" name="close_{{ i }}" value="{{ span[1] }}"{{ ' disabled' if shut }}></td>
+      <td><label class="small"><input type="checkbox" name="closed_{{ i }}"{{ ' checked' if shut }} onchange="dayClosed(this)"> Closed</label></td></tr>
     {% endfor %}
   </table>
   <label><input type="checkbox" name="closed_override" {{ 'checked' if d.r['closed_override'] }}>
     Force closed (kitchen paused)</label>
-  <label><input type="checkbox" name="open_24" {{ 'checked' if d.r['open_24'] }}>
-    Open 24 hours (ignores the table above)</label>
   <div class="row"><label>How this restaurant gets orders</label>
     <select name="order_method">
       <option value="app" {{ 'selected' if d.method == 'app' }}>Restaurant app (orders go to their tablet)</option>
@@ -122,6 +122,10 @@
 <p class="muted" id="rgNone" style="display:none">No restaurants in the regions you picked. Tick another region or press Show all.</p>
 {% endblock %}
 {% block scripts %}<script>
+function dayClosed(box){
+  const tr = box.closest('tr');
+  tr.querySelectorAll('input[type=time]').forEach(t=>{ t.disabled = box.checked; if(!box.checked && !t.value) t.value = t.name.startsWith('open') ? '11:00' : '21:00'; });
+}
 async function saveRestLogin(id){
   const code = document.getElementById('rlc'+id).value.trim();
   const pin = document.getElementById('rlp'+id).value.trim();

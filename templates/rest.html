@@ -44,7 +44,6 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
 <div class="head"><h1>{{ r['name'] }}</h1>
   <div><span class="pill {{ 'green' if open else 'grey' }}" id="openpill">{{ 'Open' if open else 'Closed' }}</span>
   <button class="btn small" onclick="toggle()">Pause / resume orders</button>
-  <button class="btn small" id="h24" onclick="open24()">Open 24 hours</button>
   <button class="btn small" data-awake-btn onclick="ffAwake.toggle()">Keep screen awake</button>
   <a class="btn small" href="/restaurant/account">Account</a>
   <a class="btn small" href="/restaurant/logout">Sign out</a></div></div>
@@ -160,9 +159,8 @@ async function load(force){
   try { drawLate(res.late || [], 'rest'); } catch(e) {}
   try { chatCheck(res); } catch(e) { console.log('chat skipped', e); }
   document.getElementById('openpill').textContent =
-    res.open_24 ? 'Open 24 hours' : (res.open ? 'Open' : 'Closed');
+    res.open ? 'Open' : 'Closed';
   document.getElementById('hourline').textContent = res.hours;
-  document.getElementById('h24').textContent = res.open_24 ? 'Back to set hours' : 'Open 24 hours';
   try {
     let dob = document.getElementById('dispOrdBar');
     if(res.dispatch_ordering && !dob){

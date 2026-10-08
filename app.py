@@ -1508,6 +1508,9 @@ def region_paused_for(restaurant):
     return bool(rg) and rg in paused_region_ids()
 
 
+# The Open 24 hours button was removed: every restaurant follows its hours table.
+OPEN_24_ON = False
+
 def is_open(restaurant, when=None):
     if restaurant["closed_override"]:
         return False
@@ -1516,7 +1519,7 @@ def is_open(restaurant, when=None):
     when = to_region(when or dt.datetime.now(), _rv(restaurant, "region_id"))
     if is_closed_day(restaurant["id"], when):
         return False
-    if restaurant["open_24"]:
+    if OPEN_24_ON and restaurant["open_24"]:
         return True
     hours = json.loads(restaurant["hours"])
     span = hours.get(str(when.weekday()))
@@ -1534,7 +1537,7 @@ def hours_label(restaurant):
     shut = is_closed_day(restaurant["id"], local)
     if shut:
         return "Closed today (" + shut + ")" if shut.strip() else "Closed today"
-    if restaurant["open_24"]:
+    if OPEN_24_ON and restaurant["open_24"]:
         return "Open 24 hours"
     hours = json.loads(restaurant["hours"])
     span = hours.get(str(local.weekday()))
@@ -10681,18 +10684,18 @@ def dispatch_restaurants():
         for i in range(7):
             o = request.form.get("open_" + str(i), "")
             c = request.form.get("close_" + str(i), "")
+            if request.form.get("closed_" + str(i)):
+                o = c = ""   # marked Closed that day
             hours[str(i)] = [o, c] if o and c else ["", ""]
         db().execute("""UPDATE restaurants SET hours=?, closed_override=?, open_24=?, prep_default=?,
                         phone=? WHERE id=?""",
                      (json.dumps(hours), 1 if request.form.get("closed_override") else 0,
-                      1 if request.form.get("open_24") else 0,
+                      0,
                       int(request.form.get("prep_default") or 15), request.form.get("phone", ""), rid))
         if _before:
             _ch = []
             if bool(_before["closed_override"]) != bool(request.form.get("closed_override")):
                 _ch.append("paused your restaurant" if request.form.get("closed_override") else "resumed your restaurant")
-            if bool(_before["open_24"]) != bool(request.form.get("open_24")):
-                _ch.append("set you to open 24 hours" if request.form.get("open_24") else "turned off 24 hours")
             try:
                 _oldh = json.loads(_before["hours"] or "{}")
             except Exception:
@@ -12227,6 +12230,8 @@ def api_rest_open24():
     r = db().execute("SELECT open_24 FROM restaurants WHERE id=?", (rid,)).fetchone()
     if not r:
         return jsonify({"ok": False}), 404
+    if not OPEN_24_ON:
+        return jsonify({"ok": False, "error": "Open 24 hours was removed. Set the hours in Restaurant hours."}), 400
     flip = 0 if r["open_24"] else 1
     db().execute("UPDATE restaurants SET open_24=?, closed_override=0 WHERE id=?", (flip, rid))
     db().commit()

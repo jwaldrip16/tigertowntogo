@@ -1054,12 +1054,10 @@ async function board(force){
   if (document.getElementById('rests')) document.getElementById('rests').innerHTML = (res.restaurants||[]).map(r=>
     '<div class="driver"><div><strong>'+r.name+'</strong> <span class="pill '+
     (r.paused?'red':r.open?'green':'grey')+'">'+
-    (r.paused?'paused':r.open_24?'open 24h':r.open?'open':'closed')+'</span>'+
+    (r.paused?'paused':r.open?'open':'closed')+'</span>'+
     '<div class="muted small">'+r.hours+'</div></div>'+
     '<div><button class="btn tiny" onclick="pauseRest('+r.id+')">'+
     (r.paused?'Resume':'Pause')+'</button>'+
-    '<button class="btn tiny" onclick="open24('+r.id+')">'+
-    (r.open_24?'Set hours':'24h')+'</button>'+
     '<a class="btn tiny" href="/dispatch/restaurants">Hours</a>'+
     '<a class="btn tiny" href="/dispatch/menu/'+r.id+'">Menu</a></div></div>').join('');
   const sel = document.getElementById('chatDriver');
