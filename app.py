@@ -286,6 +286,7 @@ def seed_dev_account(con):
 
 def init_db():
     con = dbx.connect(DB_PATH)
+    dbx.install_functions(con)
     con.executescript(SCHEMA)
     ensure_column(con, "drivers", "payout_wallet", "TEXT DEFAULT 'paypal'")
     ensure_column(con, "call_alerts", "kind", "TEXT")       # '911' when a driver hit Call 911
@@ -359,9 +360,12 @@ def init_db():
         # up to unlimited (stored as 999).
         con.execute("UPDATE drivers SET max_stack=3")
         con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('stack_limit_v2','1')")
-    con.execute("""UPDATE drivers SET max_stack=COALESCE((SELECT CAST(value AS INTEGER) FROM settings
-                   WHERE key='max_stack_default' AND CAST(value AS INTEGER) >= 1), 3)
-                   WHERE max_stack IS NULL OR max_stack < 1""")
+    _ms = con.execute("SELECT value FROM settings WHERE key='max_stack_default'").fetchone()
+    try:
+        _ms = int(float(_ms[0])) if _ms else 3
+    except (TypeError, ValueError):
+        _ms = 3
+    con.execute("UPDATE drivers SET max_stack=? WHERE max_stack IS NULL OR max_stack < 1", (_ms if _ms >= 1 else 3,))
     con.execute("""CREATE TABLE IF NOT EXISTS blocked_customers(
         id INTEGER PRIMARY KEY AUTOINCREMENT, phone TEXT UNIQUE, name TEXT, reason TEXT,
         created_at TEXT)""")
@@ -670,6 +674,9 @@ def init_db():
     ensure_column(con, "restaurants", "cuisine", "TEXT")
     con.execute("UPDATE drivers SET roster='scheduled' WHERE roster IS NULL OR roster=''")
     con.commit()
+    # First start on Postgres: bring over everything from the old SQLite file (once).
+    dbx.copy_from_sqlite_once(con, DB_PATH)
+    dbx.forget_table_info()
     # The status history triggers, installed once the
     # late-added columns above exist
     dbx.install_triggers(con)
@@ -1347,7 +1354,7 @@ def is_closed_day(restaurant_id, when=None):
 def paused_region_ids():
     try:
         return {r["id"] for r in db().execute("SELECT id FROM regions WHERE COALESCE(paused,0)=1").fetchall()}
-    except sqlite3.OperationalError:
+    except Exception:
         return set()
 
 
@@ -3961,7 +3968,7 @@ def _br_rows():
         return db().execute("SELECT * FROM branch_accounts ORDER BY id").fetchall()
     except Exception:
         try:
-            con = sqlite3.connect(DB_PATH); con.row_factory = sqlite3.Row
+            con = dbx.connect(DB_PATH)
             rows = con.execute("SELECT * FROM branch_accounts ORDER BY id").fetchall(); con.close()
             return rows
         except Exception:
@@ -4951,12 +4958,12 @@ def api_dispatch_rest_chats():
     """Every restaurant for the picker, unread first."""
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
-    rows = db().execute("""SELECT r.id, r.name,
+    rows = db().execute("""SELECT * FROM (SELECT r.id, r.name,
             (SELECT COUNT(*) FROM rest_messages m WHERE m.restaurant_id=r.id AND m.sender='restaurant'
                AND m.seen_by_dispatch=0) unread,
             (SELECT MAX(id) FROM rest_messages m WHERE m.restaurant_id=r.id) last_id
-            FROM restaurants r WHERE """ + REST_CHAT_OK_SQL + """
-            ORDER BY unread DESC, last_id IS NULL, last_id DESC, r.name""").fetchall()
+            FROM restaurants r WHERE """ + REST_CHAT_OK_SQL + """) x
+            ORDER BY unread DESC, last_id IS NULL, last_id DESC, name""").fetchall()
     return jsonify({"ok": True, "restaurants": [{"id": r["id"], "name": r["name"], "unread": r["unread"]} for r in rows]})
 
 @app.route("/api/dispatch/rest-chat/<int:rid>", methods=["GET", "POST"])
@@ -7325,10 +7332,9 @@ def api_order_note():
         rest_auto(o["restaurant_id"], "Note added to order " + rest_ord_no(o) + ": " + note)
     did = db().execute("SELECT driver_id FROM orders WHERE id=?", (oid,)).fetchone()["driver_id"]
     if did and note:
-        db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
-                     (did, "dispatch", "Note on " + o["code"] + ": " + note, now()))
-        db().execute("UPDATE messages SET sender_name=?, dispatcher_id=? WHERE id=last_insert_rowid()",
-                     (session.get("dispatcher_name"), session.get("dispatcher_id")))
+        db().execute("INSERT INTO messages(driver_id,sender,sender_name,dispatcher_id,body,created_at) VALUES(?,?,?,?,?,?)",
+                     (did, "dispatch", session.get("dispatcher_name"), session.get("dispatcher_id"),
+                      "Note on " + o["code"] + ": " + note, now()))
     log("note", o["code"] + " " + note[:80])
     db().commit()
     return jsonify({"ok": True, "note": note})
@@ -13376,7 +13382,7 @@ def api_dispatch_companies():
 def seed_brand_photos():
     """First start after this update: put the Popeyes photo on Popeyes if it has none."""
     try:
-        con = sqlite3.connect(DB_PATH)
+        con = dbx.connect(DB_PATH)
         if con.execute("SELECT 1 FROM settings WHERE key='popeyes_photo_v1'").fetchone():
             con.close()
             return
@@ -13398,8 +13404,7 @@ def seed_tiger_town_logo():
     """First start after this update: put the tiger (static/brand/tigertown-logo.png) on the
     Tiger Town To Go brand as its Design logo. Runs once."""
     try:
-        con = sqlite3.connect(DB_PATH)
-        con.row_factory = sqlite3.Row
+        con = dbx.connect(DB_PATH)
         if con.execute("SELECT 1 FROM settings WHERE key='tt_brand_logo_v2'").fetchone():
             con.close()
             return
@@ -13889,8 +13894,7 @@ def remote_picture_count():
 def _copy_pictures_worker():
     import hashlib
     try:
-        con = sqlite3.connect(DB_PATH, timeout=30)
-        con.row_factory = sqlite3.Row
+        con = dbx.connect(DB_PATH)
         os.makedirs(UPLOAD_DIR, exist_ok=True)
         urls = set()
         for sql in ("SELECT image u FROM restaurants WHERE image LIKE 'http%'",
