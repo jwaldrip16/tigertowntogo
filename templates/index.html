@@ -19,7 +19,7 @@
       <a class="brandbtn {{ 'on' if not sel_brand else '' }}" href="/?brand=all#restaurants"><span class="brandname">All brands</span></a>
       {% for b in brands %}
       <a class="brandbtn {{ 'on' if sel_brand == b.id else '' }}" href="/?brand={{ b.id }}#restaurants">
-        {% if b.logo %}<img src="{{ b.logo }}" alt="" loading="lazy">{% endif %}<span class="brandname">{{ b.name }}{% if b.empty %} <small>(coming soon)</small>{% endif %}</span></a>
+        {% if b.logo %}<img src="{{ b.logo }}" alt="" loading="lazy">{% endif %}<span class="brandname">{{ b.name }}{% if b.locked %} <small>(locked)</small>{% elif b.empty %} <small>(coming soon)</small>{% endif %}</span></a>
       {% endfor %}
     </div>
   </div>

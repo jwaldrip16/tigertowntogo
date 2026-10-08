@@ -1047,6 +1047,33 @@ def host_site():
     return s
 
 
+def site_locked(sid):
+    """A locked brand is not live yet: its restaurants are hidden from customers and online ordering,
+    and its company is left out of the shared driver/restaurant app picker. Unlock it to bring it in."""
+    try:
+        return str(setting("brand_locked_%d" % int(sid), str) or "") == "1"
+    except Exception:
+        return False
+
+
+def locked_region_ids():
+    """Regions attached to a locked brand."""
+    try:
+        return {r["id"] for r in db().execute("SELECT id, site_id FROM regions").fetchall()
+                if r["site_id"] and site_locked(r["site_id"])}
+    except Exception:
+        return set()
+
+
+def restaurant_locked(r):
+    """True when this restaurant's region belongs to a locked brand (developers in the test view still see it)."""
+    try:
+        rid = r["region_id"] if r is not None else None
+    except Exception:
+        rid = None
+    return bool(rid) and rid in locked_region_ids() and not dev_all_brands_mode()
+
+
 def dev_all_brands_mode():
     """Developer test view: with the switch on in Account > Developer access, a signed-in developer
     sees every brand on an address that belongs to no brand (the Railway address), with the old
@@ -1069,6 +1096,13 @@ def home_brand_site():
     try:
         v = (db().execute("SELECT value FROM settings WHERE key='home_site_id'").fetchone() or [""])[0]
         s = site_by_id(v) if str(v or "").isdigit() else None
+        if s is not None and site_locked(s["id"]):
+            s = None   # a locked brand is not live: show the first unlocked brand instead
+        if s is None:
+            for row in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
+                if not site_locked(row["id"]):
+                    s = row
+                    break
         if s is None:
             s = db().execute("SELECT * FROM sites ORDER BY sort, id LIMIT 1").fetchone()
         return s
@@ -3400,6 +3434,9 @@ def order_dict(o):
 @app.route("/")
 def home():
     rs = db().execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()
+    if not dev_all_brands_mode():
+        _lk = locked_region_ids()
+        rs = [r for r in rs if not (r["region_id"] and r["region_id"] in _lk)]   # locked brands are not live yet
     rs_all = rs
     _site = host_site()
     # is this web address itself a brand's own address (not just a Preview in this browser)?
@@ -3422,7 +3459,7 @@ def home():
         used_sites = {reg_site.get(rid, 0) for rid in used_all}
         for srow in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
             brands.append({"id": srow["id"], "name": srow["name"], "logo": site_logo_url(srow),
-                           "empty": srow["id"] not in used_sites})
+                           "empty": srow["id"] not in used_sites, "locked": site_locked(srow["id"])})
         bpick = request.args.get("brand")
         if bpick is not None:
             session["cust_brand"] = bpick if bpick.isdigit() else ""
@@ -3492,6 +3529,8 @@ def menu(slug):
         return redirect(url_for("home"))
     if r["slug"] == "oneoff" and not any_rest_on():
         return redirect(url_for("home"))
+    if restaurant_locked(r):
+        return redirect(url_for("home"))   # its brand is locked (not live yet)
     _site = host_site()
     if _site is not None and r["slug"] != "oneoff" and (r["region_id"] or 0) not in site_region_ids(_site["id"]):
         _own = site_of_region(r["region_id"])
@@ -4005,8 +4044,14 @@ def pp_brand_ready(sid, mode=None):
     return bool(b.get(mode + "_client") and b.get(mode + "_secret"))
 
 def _pp_page_acct():
-    """Every page uses the main PayPal keys, brand websites included (one PayPal account for all brands).
-    Older orders held under a brand's own keys still finish on those keys through pp_order_acct."""
+    """On a brand's website, that brand's own PayPal keys when it has them; else (and on staff pages
+    and background jobs) the main keys."""
+    try:
+        if has_request_context():
+            s = current_site()
+            return int(s["id"]) if (s and pp_brand_ready(s["id"])) else 0
+    except Exception:
+        pass
     return 0
 
 def pp_conf(acct=None):
@@ -4052,7 +4097,7 @@ def pp_region_acct(rid):
         s = site_of_region(rid)
     except Exception:
         s = None
-    return 0   # one set of PayPal keys (the main ones) for every brand
+    return int(s["id"]) if (s and pp_brand_ready(s["id"])) else 0
 
 def pp_new_acct(o):
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
@@ -5227,6 +5272,8 @@ def checkout():
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (payload["restaurant_id"],)).fetchone()
     if not r:
         return jsonify({"ok": False, "error": "Unknown restaurant"}), 400
+    if r is not None and restaurant_locked(r) and not dispatcher_required():
+        return jsonify({"ok": False, "error": "This restaurant is not taking online orders yet."}), 403
     placed_by = payload.get("placed_by", "customer")
     if placed_by == "dispatch" and dispatcher_required() and not can_create_in_region(_rv(r, "region_id")):
         return jsonify({"ok": False, "error": "You're not assigned to " + region_label(_rv(r, "region_id")) +
@@ -9283,6 +9330,7 @@ def sites_payload():
                     "logo": media_url(lg) if lg and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(lg))) else "",
                     "regions": sorted(site_region_ids(s["id"])),
                     "home": bool(_home is not None and _home["id"] == s["id"]),
+                    "locked": site_locked(s["id"]),
                     "design": _design_payload(s)})
     return out
 
@@ -9317,6 +9365,18 @@ def sites_edit(b, con, who):
     if not is_owner():
         return jsonify({"ok": False, "error": "Only an owner can change the brand sites."}), 403
     op = b.get("op")
+    if op == "site_lock":
+        sid = int(b.get("id") or 0)
+        srow = con.execute("SELECT * FROM sites WHERE id=?", (sid,)).fetchone()
+        if not srow:
+            return jsonify({"ok": False, "error": "That brand is gone."}), 404
+        on = str(b.get("locked") or "").lower() in ("1", "true", "on", "yes")
+        con.execute("DELETE FROM settings WHERE key=?", ("brand_locked_%d" % sid,))
+        if on:
+            con.execute("INSERT INTO settings(key,value) VALUES(?,?)", ("brand_locked_%d" % sid, "1"))
+        log("site", who + (" locked " if on else " unlocked ") + srow["name"] + (" (not live)" if on else " (live)"))
+        con.commit()
+        return jsonify({"ok": True, **regions_payload()})
     if op in ("add_site", "edit_site"):
         name = " ".join(str(b.get("name") or "").split())[:60]
         if not name:
@@ -9911,7 +9971,7 @@ def api_regions_edit():
                 out.add(x)
         return out
 
-    if op in ("add_site", "edit_site", "delete_site", "set_region_site", "site_design"):
+    if op in ("add_site", "edit_site", "delete_site", "set_region_site", "site_design", "site_lock"):
         return sites_edit(b, con, who)
     if op in ("add_region", "rename_region"):
         name = " ".join(str(b.get("name") or "").split())[:40]
@@ -13430,6 +13490,16 @@ def live_company_url(u):
     return u
 
 
+def company_locked(c):
+    """A company whose brand is locked in Settings > Regions > Brand sites stays out of the shared
+    driver and restaurant apps (/go/driver, /go/kitchen) until the brand is unlocked."""
+    try:
+        s = company_site(c)
+        return bool(s is not None and site_locked(s["id"]))
+    except Exception:
+        return False
+
+
 def hub_company(c):
     return dict({"name": c["name"], "code": c["code"], "url": live_company_url(c["url"])}, **company_look(c))
 
@@ -13628,7 +13698,8 @@ def hub_pick(which):
 
 @app.get("/api/hub/companies")
 def api_hub_companies():
-    rows = [hub_company(r) for r in company_rows() if (r.get("listed") if r.get("listed") is not None else 1)]
+    rows = [hub_company(r) for r in company_rows() if (r.get("listed") if r.get("listed") is not None else 1)
+            and not company_locked(r)]   # locked brands stay hidden until unlocked
     return jsonify({"ok": True, "companies": rows})
 
 
@@ -13638,6 +13709,8 @@ def api_hub_find():
     r = db().execute("SELECT * FROM companies WHERE code=? AND COALESCE(active,1)=1", (code,)).fetchone()
     if not r:
         return jsonify({"ok": False, "error": "No company with that code. Check with your manager."}), 404
+    if company_locked(dict(r)):
+        return jsonify({"ok": False, "error": "That company is not open in the app yet. Check with your manager."}), 403
     return jsonify({"ok": True, "company": hub_company(dict(r))})
 
 

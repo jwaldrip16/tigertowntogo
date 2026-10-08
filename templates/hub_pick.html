@@ -73,7 +73,12 @@ button{font-size:16px;padding:12px 16px;border:0;border-radius:10px;background:{
       if (saved.logo) document.getElementById('openLogo').src = saved.logo;
       document.getElementById('switchNow').onclick = function(ev){ ev.preventDefault();
         try{ localStorage.removeItem(KEY); }catch(e){} showPicker(); };
-      setTimeout(function(){ location.href = target(saved); }, 400);
+      // only open the saved company if it is still offered (its brand may have been locked)
+      fetch('/api/hub/companies').then(function(r){return r.json();}).then(function(j){
+        var ok = ((j && j.companies) || []).some(function(c){ return c.code === saved.code; });
+        if (ok) { location.href = target(saved); }
+        else { try{ localStorage.removeItem(KEY); }catch(e){} showPicker(); }
+      }).catch(function(){ location.href = target(saved); });
     }
   }
   function draw(){

@@ -149,17 +149,21 @@ function drawSites(){
     '<div class="row between schedrow"><span style="display:flex;gap:10px;align-items:center">' +
     (s.logo ? '<img src="'+e(s.logo)+'" alt="" style="width:44px;height:44px;object-fit:contain;border-radius:8px;background:#fff">' : '') +
     '<span><strong>'+e(s.name)+'</strong>' +
+    (s.locked ? ' <span class="pill red">Locked, not live</span>' : ' <span class="pill green">Live</span>') +
     '<div class="muted small">Phone: '+e(s.phone || 'business number')+'</div>' +
     '<div class="muted small">Web address: '+e(s.domains || 'none yet')+(s.home ? ' &middot; also shown on the Railway address' : '')+'</div>' +
     '<div class="muted small">Design: '+designLine(s)+'</div>' +
     '<div class="muted small">Regions: '+e(RG.regions.filter(r=>r.site_id===s.id).map(r=>r.name).join(', ') || 'none yet')+'</div></span></span>' +
-    (RG.owner ? '<span><button class="btn tiny" onclick="siteForm('+s.id+')">Edit</button>' +
+    (RG.owner ? '<span><label class="small" style="display:block;margin-bottom:4px"><input type="checkbox"'+(s.locked?' checked':'')+' onchange="lockSite('+s.id+', this.checked)"> Locked</label>' +
+      '<button class="btn tiny" onclick="siteForm('+s.id+')">Edit</button>' +
       '<label class="btn tiny">Logo<input type="file" accept="image/*" style="display:none" onchange="siteLogo('+s.id+', this)"></label>' +
       (s.logo ? '<button class="btn tiny" onclick="siteLogoReset('+s.id+')">Remove logo</button>' : '') +
       '<button class="btn tiny" onclick="designForm('+s.id+')">Design</button>' +
       '<a class="btn tiny" href="/?site='+s.id+'" target="_blank">Preview</a>' +
       '<button class="btn tiny danger" onclick="delSite('+s.id+')">Delete</button></span>' : '') + '</div>').join('')
     : '<p class="muted small">No brand sites yet. Until you add one, every web address shows every region under the business name in Settings. Each brand site gets its own web address; there is no shared All brands website.</p>';
+  if(S.length && !document.getElementById('stLockNote')) document.getElementById('stList').insertAdjacentHTML('afterbegin',
+    '<p class="muted small" id="stLockNote">Lock a brand to keep it off the website, online ordering and the driver and restaurant app list until you are ready. Unlock one at a time to bring each company in on the Railway address.</p>');
   if(RG.owner && !document.getElementById('stName')) document.getElementById('stForm').innerHTML =
     '<button class="btn primary small" onclick="siteForm(0)">Add site</button>';
   if(!RG.owner) document.getElementById('stForm').innerHTML = '<p class="muted small">Only an owner can change brand sites.</p>';
@@ -184,6 +188,15 @@ async function saveSite(id){
   const r = await jpost('/api/dispatch/regions', b);
   if(!r.ok){ alert(r.error || 'That did not save.'); return; }
   document.getElementById('stForm').innerHTML = ''; RG = r; draw();
+}
+async function lockSite(id, on){
+  const s = (RG.sites||[]).find(x=>x.id===id) || {};
+  const msg = on ? 'Lock '+s.name+'? Its restaurants come off the website and online ordering, and its company leaves the driver and restaurant app list (/go/driver and /go/kitchen) until you unlock it.'
+                 : 'Unlock '+s.name+'? Its restaurants go live on the website and its company shows in the driver and restaurant app list.';
+  if(!confirm(msg)){ draw(); return; }
+  const r = await jpost('/api/dispatch/regions', {op:'site_lock', id:id, locked: on ? 1 : 0});
+  if(!r.ok){ alert(r.error || 'That did not save.'); draw(); return; }
+  RG = r; draw();
 }
 function delSite(id){
   const s = RG.sites.find(x=>x.id===id);
