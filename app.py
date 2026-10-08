@@ -2910,6 +2910,15 @@ def ordshow(screen):
     return v if v in ORDSHOW_CHOICES else "both"
 
 
+def ord_label(primary_no, code, screen="dispatch"):
+    """Order number as Settings > Order numbers says to show it on that screen:
+    'TT12 (FF2213...)', 'TT12' or 'FF2213...'."""
+    show, p, c = ordshow(screen), (primary_no or "").strip(), (code or "").strip()
+    main = p if (show != "secondary" and p) else c
+    sub = c if (show == "both" and p and c and p != c) else ""
+    return main + ((" (" + sub + ")") if sub else "")
+
+
 def make_order_code():
     """Secondary (system) order number, unique across every order. Format from Settings > Order numbers."""
     prefix = clean_prefix(_ordset("secondary_prefix", "FF")) or "FF"
@@ -6125,7 +6134,7 @@ def extra_pay_payload(driver_id=None):
         drivers.append({"id": d["id"], "name": d["name"], "to": t[3] if t else "",
                         "wallet": (d["payout_wallet"] or "paypal"), "ready": bool(t),
                         "week": money(tot["wk"]), "today": money(tot["td"])})
-    q = """SELECT p.*, d.name driver, o.code FROM driver_payouts p JOIN drivers d ON d.id=p.driver_id
+    q = """SELECT p.*, d.name driver, o.code, o.primary_no FROM driver_payouts p JOIN drivers d ON d.id=p.driver_id
            LEFT JOIN orders o ON o.id=p.order_id"""
     args = ()
     if driver_id:
@@ -6133,7 +6142,7 @@ def extra_pay_payload(driver_id=None):
         args = (driver_id,)
     rows = con.execute(q + " ORDER BY p.id DESC LIMIT 100", args).fetchall()
     hist = [{"id": r["id"], "driver": r["driver"], "driver_id": r["driver_id"], "amount": money(r["cents"]),
-             "kind": "Trip " + r["code"] if r["code"] else "Extra pay",
+             "kind": ("Trip " + ord_label(r["primary_no"], r["code"], "dispatch")) if r["code"] else "Extra pay",
              "reason": r["reason"] or "", "ref": r["ref"] or "", "to": r["receiver"] or r["wallet"] or "",
              "status": r["status"] or "", "open": (r["status"] or "") in PAYOUT_OPEN,
              "label": PAYOUT_LABEL.get(r["status"] or "", (r["status"] or "").lower()), "error": r["error"] or "",
@@ -8155,6 +8164,23 @@ def week_label(week_start):
     return pretty_day(week_start) + " to " + pretty_day(end)
 
 
+def region_closed_label_for(rids, day):
+    """'Auburn closed (Staff training)' when every one of these regions is closed all day on this date,
+    so nobody can put hours there. Blank when at least one region is open."""
+    rids = sorted(parse_rids(rids) if not isinstance(rids, (set, list, tuple)) else rids)
+    if not rids:
+        return ""
+    iso = day.isoformat()
+    parts = []
+    for rid in rids:
+        if iso not in set(region_closed_dates(rid)):
+            return ""
+        r = _region(rid)
+        why = region_closed_reasons(rid).get(iso)
+        parts.append(((r["name"] if r else "Region") + " closed") + ((" (" + why + ")") if why else ""))
+    return "; ".join(parts)
+
+
 def week_block(driver_id, week_start):
     """One driver's week: their submitted days, whether it is in, and the deadline."""
     ws = week_start.isoformat()
@@ -8177,6 +8203,7 @@ def week_block(driver_id, week_start):
             "regions": sorted(slot_regions(mine[0])) if mine else [],
             "region_label": region_names(slot_regions(mine[0])) if mine and slot_regions(mine[0]) else "",
             "closed": bool(off_today(driver_id, date.isoformat())),
+            "region_closed": region_closed_label_for(driver_region_ids(driver_id), date),
         })
     due = week_due(week_start)
     opens = week_opens(week_start)

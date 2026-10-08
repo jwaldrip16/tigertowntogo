@@ -967,19 +967,20 @@ function drawWeek(){
   document.getElementById('weekState').textContent =
     w.hours + ' day' + (w.hours===1?'':'s') + ' picked';
   document.getElementById('weekCal').innerHTML = w.days.map(d=>
-    '<div class="wcell'+(d.off?' offday':'')+'">'+
+    '<div class="wcell'+(d.off||d.region_closed?' offday':'')+'">'+
       '<div class="wtop"><label><input type="checkbox" data-dow="'+d.dow+'" class="wOn"'+
-        (d.off?'':' checked')+(shut?' disabled':'')+' onchange="toggleDay('+d.dow+')"> '+d.label+'</label>'+
+        (d.off||d.region_closed?'':' checked')+(shut||d.region_closed?' disabled':'')+' onchange="toggleDay('+d.dow+')"> '+d.label+'</label>'+
+        (d.region_closed?' <span class="pill red">'+d.region_closed+'</span>':'')+
         (d.status?' <span class="pill '+(d.status==='approved'?'green':d.status==='denied'?'red':'amber')+
           '">'+d.status+'</span>':'')+
         (d.closed?' <span class="pill grey">time off</span>':'')+'</div>'+
       '<div class="wtimes">'+
         '<input type="time" class="wStart" data-dow="'+d.dow+'" value="'+(d.start||'16:00')+'"'+
-          (d.off||shut?' disabled':'')+'>'+
+          (d.off||shut||d.region_closed?' disabled':'')+'>'+
         '<input type="time" class="wEnd" data-dow="'+d.dow+'" value="'+(d.end||'22:00')+'"'+
-          (d.off||shut?' disabled':'')+'>'+
+          (d.off||shut||d.region_closed?' disabled':'')+'>'+
       '</div>'+
-      '<div class="wrg">'+regionBoxes('wRg'+d.dow, d.regions||[], (d.off||shut?' disabled':''))+'</div>'+
+      '<div class="wrg">'+regionBoxes('wRg'+d.dow, d.regions||[], (d.off||shut||d.region_closed?' disabled':''))+'</div>'+
       (d.reply?'<div class="muted small">'+d.reply+'</div>':'')+
     '</div>').join('');
 }

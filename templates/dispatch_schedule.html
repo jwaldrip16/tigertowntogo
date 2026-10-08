@@ -292,7 +292,9 @@ async function loadWeek(start){
     '<table class="weekgrid"><tr><th>Driver</th>' +
     DAYS.map((d,i)=>'<th>'+d+' '+(r.dates?r.dates[i]:'')+'</th>').join('') + '<th>Sent</th></tr>' +
     r.drivers.map(d=>'<tr><td><strong>'+d.driver+'</strong></td>' +
-      d.days.map(x=>'<td class="daycell'+(!d.submitted && x.off?' noshow':'')+'" title="Click to set hours" '+
+      d.days.map(x=> x.region_closed
+        ? '<td class="daycell" title="Region closed this day"><span class="pill red">'+x.region_closed+'</span></td>'
+        : '<td class="daycell'+(!d.submitted && x.off?' noshow':'')+'" title="Click to set hours" '+
         'onclick="editDay('+d.driver_id+',\''+d.driver.replace(/'/g,"")+'\',\''+x.date+'\',\''+x.day+'\',\''+(x.start||'')+'\',\''+(x.end||'')+'\')">' +
         (x.off ? '<span class="muted">off</span>'
                : x.start+'-'+x.end+'<br>'+pill(x.status||'pending')) +
