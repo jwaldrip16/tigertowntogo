@@ -72,7 +72,7 @@
           approving = false;
           if (r && (r.ok || r.already_paid)) done = true;
           if (!r || !r.ok){
-            if (!plain && !done){ plain = true; say('Trying the card again without saving it...'); cf.submit(lastArgs).catch(function(){ if (!done && !approving) failed(r); }); return; }
+            if (!plain && !done && !r.declined){ plain = true; say('Trying the card again without saving it...'); cf.submit(lastArgs).catch(function(){ if (!done && !approving) failed(r); }); return; }
             failed(r); return;
           }
           done = true;

@@ -4136,6 +4136,37 @@ def pp_err(j, fallback="PayPal did not accept that."):
         return "That card or account was declined. Try another way to pay."
     return (d.get("description") or (j.get("message") if isinstance(j, dict) else "") or fallback)
 
+PP_DECLINES = {
+    "5120": "Declined: not enough money on the card.", "5400": "Declined: the card is expired.",
+    "5180": "Declined: the card number isn't valid.", "1330": "Declined: the card isn't valid.",
+    "0500": "Declined by the bank (do not honor).", "0580": "Declined: the card isn't valid.",
+    "5110": "Declined: the security code (CVV) doesn't match.", "00N7": "Declined: the security code (CVV) doesn't match.",
+    "0880": "Declined: the security code (CVV) doesn't match.", "5100": "Declined by the bank.",
+    "9500": "Declined: the bank flagged it as possible fraud.", "5650": "Declined: the bank wants the card holder to verify it.",
+    "1000": "Declined: partial approval only. Use another card.", "5200": "Declined: the card is restricted.",
+    "0800": "Declined: the bank couldn't process it. Try again or use another card.",
+    "INSUFFICIENT_FUNDS": "Declined: not enough money on the card.", "CARD_EXPIRED": "Declined: the card is expired.",
+    "INSTRUMENT_DECLINED": "Declined: the card or account was declined. Use another card.",
+    "TRANSACTION_REFUSED": "Declined: PayPal refused the payment. Use another card.",
+    "CARD_CLOSED": "Declined: the card is closed.", "INVALID_CVV": "Declined: the security code (CVV) doesn't match.",
+}
+
+def pp_decline_msg(j, auth=None):
+    """The bank's or PayPal's reason in plain words when a card or account is declined, else ''."""
+    try:
+        a = auth or {}
+        pr = a.get("processor_response") or {}
+        code = str(pr.get("response_code") or "").upper()
+        if a.get("status") in ("DECLINED", "DENIED", "VOIDED", "EXPIRED") or (code and code not in ("0000", "00", "0")):
+            return PP_DECLINES.get(code) or ("Declined by the bank" + (" (code " + code + ")" if code else "") + ". Use another card.")
+        d = ((j or {}).get("details") or [{}])[0] if isinstance(j, dict) else {}
+        issue = str(d.get("issue") or "").upper()
+        if issue in PP_DECLINES:
+            return PP_DECLINES[issue]
+    except Exception:
+        pass
+    return ""
+
 def pp_cap_cents(auth_cents):
     """Most PayPal lets us charge on a hold: 115% of it or $75 more, whichever is less."""
     a = int(auth_cents or 0)
@@ -4442,8 +4473,18 @@ def _pp_approve(o, b, ppid, acct):
         return jsonify({"ok": True, "already": True})
     st, j = pp_api("POST", "/v2/checkout/orders/" + ppid + "/authorize", request_id="auth-" + ppid)
     auth = (((j.get("purchase_units") or [{}])[0].get("payments") or {}).get("authorizations") or [{}])[0]
-    if st not in (200, 201) or auth.get("status") not in ("CREATED", "PENDING") or not auth.get("id"):
-        return jsonify({"ok": False, "error": pp_err(j, "The payment did not go through.")}), 400
+    dec = pp_decline_msg(j, auth)
+    if dec or st not in (200, 201) or auth.get("status") not in ("CREATED", "PENDING") or not auth.get("id"):
+        if auth.get("id") and auth.get("status") in ("CREATED", "PENDING"):
+            try:   # the bank said no: never leave a hold behind
+                pp_api("POST", "/v2/payments/authorizations/" + auth["id"] + "/void", request_id="declvoid-" + auth["id"])
+            except Exception:
+                pass
+        msg = dec or pp_err(j, "The payment did not go through.")
+        db().execute("UPDATE orders SET pp_error=? WHERE id=?", (msg[:300], o["id"]))
+        db().commit()
+        log("payment", o["code"] + " card declined: " + msg)
+        return jsonify({"ok": False, "declined": bool(dec), "error": msg}), 400
     cents = int(round(float(auth["amount"]["value"]) * 100))
     src = next(iter(j.get("payment_source") or {"paypal": 1}))
     db().execute("""UPDATE orders SET pp_auth_id=?, pp_auth_cents=?, pp_state='authorized', pp_source=?,
