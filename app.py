@@ -16899,7 +16899,7 @@ def partner_apply():
     f, errs, done = request.form, [], False
     if request.method == "POST":
         if f.get("website"):
-            return render_template("partner.html", done=True, errs=[], f={}, regions=_region_choices(), states=US_STATES)
+            return render_template("partner.html", done=True, errs=[], f={}, regions=_region_choices(), states=US_STATES, all_contacts=faq_brand_contacts())
         ph, fax = _phone3(f, "phone"), _phone3(f, "fax")
         need = {"rest_name": "the restaurant name", "rest_address": "the restaurant address", "rest_city": "the city",
                 "first_name": "your first name", "last_name": "your last name"}
@@ -16932,7 +16932,7 @@ def partner_apply():
             db().commit()
             log("application", "New restaurant application: " + data["rest_name"])
             done = True
-    return render_template("partner.html", done=done, errs=errs, f=f, regions=_region_choices(), states=US_STATES)
+    return render_template("partner.html", done=done, errs=errs, f=f, regions=_region_choices(), states=US_STATES, all_contacts=faq_brand_contacts())
 
 def _apps_visible():
     rows = db().execute("SELECT * FROM applications ORDER BY id DESC LIMIT 500").fetchall()

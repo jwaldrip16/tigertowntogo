@@ -2,9 +2,10 @@
 <div class="applybox">
 <h1 class="applytitle">Own a restaurant? Partner with us</h1>
 {% if done %}
-<div class="panel"><h2>Thanks, your application is in.</h2><p>We will contact you to discuss the details.{% if biz_phone %} Questions? Call <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>.{% endif %}</p></div>
+<div class="panel"><h2>Thanks, your application is in.</h2><p>We will contact you to discuss the details.{% if all_logos and all_contacts %}{% set _ph = all_contacts|selectattr('phone')|list %}{% if _ph %} Questions? Call {% for b in _ph %}{{ b.name }} at <a href="tel:{{ b.tel }}">{{ b.phone }}</a>{{ ', ' if not loop.last else '' }}{% endfor %}.{% endif %}{% elif biz_phone %} Questions? Call <a href="tel:{{ biz_tel }}">{{ biz_phone }}</a>.{% endif %}</p></div>
 {% else %}
-<p>Are you ready to increase your revenue and expand your restaurant's customer base? Let {{ biz_name }} help. Partnering with us gives you access to a network of independent delivery drivers, and your restaurant gains extra exposure from our marketing to customers across the area.</p>
+{% if all_logos and all_contacts %}{% set _bn = all_contacts|map(attribute='name')|list %}{% set _who = (_bn[:-1]|join(', ')) ~ (' and ' if _bn|length > 1 else '') ~ _bn[-1] %}{% else %}{% set _who = biz_name %}{% endif %}
+<p>Are you ready to increase your revenue and expand your restaurant's customer base? Let {{ _who }} help. Partnering with us gives you access to a network of independent delivery drivers, and your restaurant gains extra exposure from our marketing to customers across the area.</p>
 <p>Just enter your information below to get started, and we will contact you to discuss the details!</p>
 {% for e in errs %}<p class="cc-err">{{ e }}</p>{% endfor %}
 <form method="post" class="applyform">
