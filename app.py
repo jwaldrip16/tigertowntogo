@@ -453,6 +453,8 @@ def init_db():
     ensure_column(con, "orders", "pay_method", "TEXT")
     ensure_column(con, "orders", "paid_at", "TEXT")
     ensure_column(con, "orders", "pay_link", "TEXT")
+    ensure_column(con, "orders", "pp_vault_id", "TEXT")
+    ensure_column(con, "orders", "pp_vault_src", "TEXT")
     ensure_column(con, "orders", "pay_ref", "TEXT")
     ensure_column(con, "orders", "stripe_session", "TEXT")
     ensure_column(con, "orders", "stripe_intent", "TEXT")
@@ -3693,6 +3695,8 @@ def is_cash(o):
 def balance_cents(o):
     """What is still owed: order total less what was collected, plus refunds.
     Negative means the customer was charged more than the order now comes to."""
+    if (_rv(o, "pay_method") or "") == "house_account":
+        return 0      # billed to the house account for whatever the order comes to
     kept = int(o["paid_cents"] or 0) - int(o["refunded_cents"] or 0)
     return int(o["total_cents"] or 0) - credits_cents(o) - kept
 
@@ -4327,14 +4331,19 @@ def _pp_create(o, b, kind, acct):
         cents, intent = pp_info(o)["owed_cents"], "CAPTURE"
         if cents <= 0:
             return jsonify({"ok": False, "error": "Nothing is owed on this order."}), 400
-    st, j = pp_api("POST", "/v2/checkout/orders", {
+    body = {
         "intent": intent,
         "purchase_units": [{"reference_id": o["code"], "custom_id": o["code"],
-                            "description": ("Delivery order " if kind == "order" else "Rest of tip, order ") + o["code"],
+                            "description": ("Delivery order " if kind == "order" else "Rest of order ") + o["code"],
                             "amount": pp_money(cents)}],
         "application_context": {"shipping_preference": "NO_SHIPPING", "user_action": "PAY_NOW",
                                 "brand_name": (setting("business_name", str) or "Fleet Foot Delivery")[:120]}}
-        | ({"payment_source": pp_vault_source(o)} if (kind == "order" and b.get("card") and pp_vault_source(o)) else {}))
+    if kind == "order":
+        # Every order payment is saved with PayPal so fees and tips added later can go on it.
+        body["payment_source"] = (pp_vault_source(o) or pp_vault_any("card")) if b.get("card") else pp_vault_any("paypal", o)
+    if "paypal" in (body.get("payment_source") or {}):
+        body.pop("application_context", None)     # PayPal wants its settings inside payment_source then
+    st, j = pp_api("POST", "/v2/checkout/orders", body)
     if st not in (200, 201) or not j.get("id"):
         return jsonify({"ok": False, "error": pp_err(j, "PayPal could not start the payment.")}), 400
     if kind == "order":
@@ -4394,6 +4403,7 @@ def _pp_approve(o, b, ppid, acct):
                     pp_error=NULL, pp_auth_at=? WHERE id=?""", (auth["id"], cents, src, now(), o["id"]))
     db().commit()
     saved = pp_keep_vaulted(o, j, acct)
+    pp_keep_order_vault(o, j)
     o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
     mark_paid(o, src if src in ("venmo", "paypal") else "card_paypal", auth["id"], cents)
     return jsonify({"ok": True, "held": money(cents), "source": PP_SOURCES.get(src, "PayPal"),
@@ -4470,7 +4480,11 @@ def pp_collect_rest(o, why="extra charges"):
             return {"ok": True, "nothing": True}
         acct = pp_order_acct(o)
         sc = None
-        if (o["pp_source"] or "") == "card" and o["customer_id"]:
+        if _rv(o, "pp_vault_id"):
+            vsrc = _rv(o, "pp_vault_src") or "card"
+            sc = {"vault_id": o["pp_vault_id"], "pp_acct": acct, "src": vsrc,
+                  "brand": {"paypal": "PayPal", "venmo": "Venmo"}.get(vsrc, "card"), "last4": ""}
+        elif (o["pp_source"] or "") == "card" and o["customer_id"]:
             sc = db().execute("""SELECT * FROM saved_cards WHERE customer_id=? AND COALESCE(pp_acct,0)=?
                                  ORDER BY id DESC LIMIT 1""", (o["customer_id"], int(acct or 0))).fetchone()
         link = "/pay/" + o["code"] + "?kind=balance"
@@ -4490,7 +4504,7 @@ def pp_collect_rest(o, why="extra charges"):
                 "intent": "CAPTURE",
                 "purchase_units": [{"reference_id": o["code"], "custom_id": o["code"],
                                     "description": "Rest of order " + o["code"], "amount": pp_money(owed)}],
-                "payment_source": {"card": {"vault_id": sc["vault_id"]}}},
+                "payment_source": {(sc["src"] if isinstance(sc, dict) else "card"): {"vault_id": sc["vault_id"]}}},
                 request_id="rest-" + o["code"] + "-" + str(int(o["paid_cents"] or 0)) + "-" + str(owed))
         cap = (((j.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or [{}])[0]
         if st not in (200, 201) or cap.get("status") not in ("COMPLETED", "PENDING"):
@@ -4499,7 +4513,8 @@ def pp_collect_rest(o, why="extra charges"):
             return {"ok": False, "owed": money(owed), "pay_url": link,
                     "error": "Card on file didn't take " + money(owed) + ": " + msg + " It shows as Pay the rest on their tracking page."}
         cents = int(round(float(cap["amount"]["value"]) * 100))
-        card = (sc["brand"] or "card").title() + " ending " + (sc["last4"] or "")
+        card = (sc["brand"] or "card") if (isinstance(sc, dict) and sc["src"] != "card") else \
+            ((sc["brand"] or "card").title() + (" ending " + sc["last4"] if sc["last4"] else " on file"))
         add_extra_charge(o, cents, "Rest of order (" + card + ")", cap.get("id", ""))
         db().execute("UPDATE orders SET pp_captured_cents=COALESCE(pp_captured_cents,0)+? WHERE id=?", (cents, o["id"]))
         db().commit()
@@ -14998,6 +15013,37 @@ def apply_checkout_credits(oid, code, cr, placed_by):
         note["message"] = ("Applied " + " and ".join(parts) + ". " + note["message"]).strip()
     return note
 
+def pp_vault_any(src, o=None):
+    """Ask PayPal to save this payment for later charges on the same order (added fees, late tips)."""
+    if src == "card":
+        return {"card": {"attributes": {"vault": {"store_in_vault": "ON_SUCCESS"},
+                                        "verification": {"method": "SCA_WHEN_REQUIRED"}}}}
+    host = ""
+    try:
+        host = request.host_url.rstrip("/")
+    except Exception:
+        pass
+    back = host + "/track/" + (o["code"] if o is not None else "")
+    return {src: {"attributes": {"vault": {"store_in_vault": "ON_SUCCESS", "usage_type": "MERCHANT",
+                                            "customer_type": "CONSUMER"}},
+                  "experience_context": {"shipping_preference": "NO_SHIPPING", "user_action": "PAY_NOW",
+                                         "brand_name": (setting("business_name", str) or "Fleet Foot Delivery")[:120],
+                                         "return_url": back, "cancel_url": back}}}
+
+def pp_keep_order_vault(o, j):
+    """Remember on the order the PayPal token for what the customer paid with (never a card number)."""
+    try:
+        ps = j.get("payment_source") or {}
+        for src in ("card", "paypal", "venmo"):
+            v = ((ps.get(src) or {}).get("attributes") or {}).get("vault") or {}
+            if v.get("id"):
+                db().execute("UPDATE orders SET pp_vault_id=?, pp_vault_src=? WHERE id=?", (v["id"], src, o["id"]))
+                db().commit()
+                return src
+    except Exception as e:
+        print("keep vault failed:", e)
+    return None
+
 def pp_vault_source(o):
     """Ask PayPal to keep the card on file when a signed-in customer ticks Save this card."""
     k = _okeys(o)
@@ -15046,8 +15092,8 @@ def _pp_charge_saved(o, sc, acct):
         log("payment", o["code"] + " card on file declined: " + pp_err(j, "declined"))
         return False, "Your card on file didn't go through. Finish paying with another card on the next page."
     db().execute("""UPDATE orders SET pp_order_id=?, pp_auth_id=?, pp_auth_cents=?, pp_state='authorized',
-                    pp_source='card', pp_error=NULL, pp_auth_at=?, pp_acct=? WHERE id=?""",
-                 (j.get("id"), auth["id"], cents, now(), acct, o["id"]))
+                    pp_source='card', pp_error=NULL, pp_auth_at=?, pp_acct=?, pp_vault_id=?, pp_vault_src='card' WHERE id=?""",
+                 (j.get("id"), auth["id"], cents, now(), acct, sc["vault_id"], o["id"]))
     db().commit()
     o = db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
     mark_paid(o, "card_paypal", auth["id"], cents)
