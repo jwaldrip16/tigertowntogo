@@ -52,7 +52,7 @@ let HR = null;
 async function hoursRegion(id){
   const r = await jget('/api/dispatch/region-hours?region_id='+id);
   if (!r.ok){ alert(r.error || 'Could not load the hours.'); return; }
-  HR = {id:id, dates:r.closed_dates.slice(), hours:Object.assign({}, r.closed_hours||{})};
+  HR = {id:id, dates:r.closed_dates.slice(), hours:Object.assign({}, r.closed_hours||{}), why:Object.assign({}, r.closed_reasons||{})};
   const old = document.getElementById('hrModal'); if (old) old.remove();
   const box = document.createElement('div'); box.id = 'hrModal';
   box.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center;overflow:auto';
@@ -74,6 +74,7 @@ async function hoursRegion(id){
       ' <label class="small"><input type="checkbox" id="hrAllDay" checked onchange="hrAllToggle()"> All day</label></div>' +
       '<div class="row" id="hrPart" style="display:none;margin-top:4px"><span class="small">Closed from</span> <input type="time" id="hrFrom" value="15:00">' +
       ' <span class="small">to</span> <input type="time" id="hrTo" value="23:59"> <span class="muted small">(11:59 PM = rest of the day)</span></div>' +
+      '<div class="row" style="margin-top:4px"><input id="hrWhy" maxlength="80" placeholder="Reason customers see (optional), like Thanksgiving"></div>' +
       '<div class="row" style="margin-top:4px"><button class="btn tiny" onclick="hrAddDate()">Add date</button></div>' : '') +
     '<div class="small" id="hrErr" style="color:#b42318;min-height:1em;margin-top:6px"></div>' +
     '<div class="btnrow" style="margin-top:10px">' + (r.can_edit ? '<button class="btn primary" onclick="hrSave()">Save</button> ' : '<span class="muted small">You can only change hours for regions you are assigned to.</span> ') +
@@ -92,7 +93,7 @@ function hrT(v){ if (v === '23:59') return 'close'; const [H,M] = v.split(':').m
 function hrNice(d){ const x = new Date(d+'T12:00:00'); return x.toLocaleDateString('en-US',{weekday:'short',month:'short',day:'numeric',year:'numeric'}); }
 function hrDrawDates(){
   const box = document.getElementById('hrDates');
-  box.innerHTML = HR.dates.length ? HR.dates.sort().map(d => '<span class="rgchip">'+hrNice(d)+(HR.hours[d] ? ', closed '+hrT(HR.hours[d][0])+' - '+hrT(HR.hours[d][1]) : ', all day')+
+  box.innerHTML = HR.dates.length ? HR.dates.sort().map(d => '<span class="rgchip">'+hrNice(d)+(HR.hours[d] ? ', closed '+hrT(HR.hours[d][0])+' - '+hrT(HR.hours[d][1]) : ', all day')+(HR.why[d] ? ' ('+e(HR.why[d])+')' : '')+
     (HR.can ? ' <button class="rgx" title="Remove" onclick="hrDelDate(\''+d+'\')">&times;</button>' : '')+'</span>').join(' ')
     : '<span class="muted small">No closed dates.</span>';
 }
@@ -106,10 +107,13 @@ function hrAddDate(){
     if (b <= a){ document.getElementById('hrErr').textContent = 'The to time has to be after the from time.'; return; }
     HR.hours[v] = [a, b];
   } else { delete HR.hours[v]; }
+  const why = (document.getElementById('hrWhy').value || '').trim();
+  if (why) HR.why[v] = why; else delete HR.why[v];
+  document.getElementById('hrWhy').value = '';
   if (!HR.dates.includes(v)) HR.dates.push(v);
   document.getElementById('hrErr').textContent = ''; hrDrawDates();
 }
-function hrDelDate(d){ HR.dates = HR.dates.filter(x => x !== d); delete HR.hours[d]; hrDrawDates(); }
+function hrDelDate(d){ HR.dates = HR.dates.filter(x => x !== d); delete HR.hours[d]; delete HR.why[d]; hrDrawDates(); }
 async function hrSave(){
   const own = (document.querySelector('input[name=hrOwn]:checked')||{}).value === '1';
   const hours = {};
@@ -117,7 +121,7 @@ async function hrSave(){
     hours[k] = {open: document.getElementById('hro'+k).value, close: document.getElementById('hrc'+k).value,
                 closed: document.getElementById('hrx'+k).checked};
   }
-  const r = await jpost('/api/dispatch/region-hours', {region_id: HR.id, own: own, hours: hours, closed_dates: HR.dates, closed_hours: HR.hours});
+  const r = await jpost('/api/dispatch/region-hours', {region_id: HR.id, own: own, hours: hours, closed_dates: HR.dates, closed_hours: HR.hours, closed_reasons: HR.why});
   if (!r.ok){ document.getElementById('hrErr').textContent = r.error || 'That did not save.'; return; }
   document.getElementById('hrModal').remove();
   load();

@@ -534,6 +534,7 @@ def init_db():
     ensure_column(con, "regions", "paused_at", "TEXT")
     ensure_column(con, "regions", "hours", "TEXT")          # blank = use the business hours
     ensure_column(con, "regions", "closed_dates", "TEXT")   # "2026-11-26,2026-12-25"
+    ensure_column(con, "regions", "closed_reasons", "TEXT")   # {"2026-11-26": "Thanksgiving"} optional, shown to customers
     ensure_column(con, "regions", "closed_hours", "TEXT")   # {"2026-11-26": ["15:00","23:59"]} closed only that window
     ensure_column(con, "regions", "phone", "TEXT")          # blank = the business dispatch number
     con.execute("""CREATE TABLE IF NOT EXISTS sites (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
@@ -3303,6 +3304,9 @@ def home():
                            # several areas and none picked: the footer lists every area's hours instead
                            hours_text=(business_hours_label(_hr) if _hr else ("" if regions else business_hours_label())),
                            closed_text=closed_dates_label(_hr) if _hr else "",
+                           closed_today=[(("" if _hr else g["name"] + ": ") + region_closed_today(g["id"]))
+                                         for g in ([{"id": _hr, "name": _hr_name}] if _hr else regions)
+                                         if region_closed_today(g["id"])],
                            any_on=any_rest_on(), any_open=biz and any_rest_open())
 
 @app.route("/r/<slug>")
@@ -8590,15 +8594,18 @@ def slot_hours_error(dow, start, end, rids=None, day=None):
     for rid in (targets or [None]):
         rname = (_region(rid)["name"] if rid and _region(rid) else "The business")
         if day is not None and rid and day.isoformat() in set(region_closed_dates(rid)):
-            return rname + " is closed all day on " + short_date(day) + ", so no hours can be set that day."
+            _why = region_closed_reasons(rid).get(day.isoformat())
+            return (rname + " is closed all day on " + short_date(day) + ((" (" + _why + ")") if _why else "") +
+                    ", so no hours can be set that day.")
         _part = region_closed_hours(rid).get(day.isoformat()) if (day is not None and rid) else None
         if _part:
             pa, pb = _hm(_part[0]), _hm(_part[1])
             pb = 1440 if pb == 23 * 60 + 59 else pb
             if s < pb and pa < e:
+                _why = region_closed_reasons(rid).get(day.isoformat())
                 return (rname + " is closed " + _ampm(_part[0]) + " to " +
                         ("close" if _part[1] == "23:59" else _ampm(_part[1])) + " on " + short_date(day) +
-                        ". Pick hours outside that.")
+                        ((" (" + _why + ")") if _why else "") + ". Pick hours outside that.")
         h = business_hours(rid)
         if not h:
             continue
@@ -9381,7 +9388,7 @@ def api_region_hours_get():
                     "rows": business_hours_rows(rid) if own else business_hours_rows(),
                     "business_label": business_hours_label() or "no hours limit",
                     "closed_dates": region_closed_list(rid), "closed_hours": region_closed_hours(rid),
-                    "days": BH_DAYS})
+                    "closed_reasons": region_closed_reasons(rid), "days": BH_DAYS})
 
 
 @app.post("/api/dispatch/region-hours")
@@ -9444,8 +9451,13 @@ def api_region_hours_save():
         if _hm(c) <= _hm(a):
             return jsonify({"ok": False, "error": "On " + d + " the closed-until time has to be after the from time."}), 400
         part[d] = [a, c]
-    db().execute("UPDATE regions SET hours=?, closed_dates=?, closed_hours=? WHERE id=?",
-                 (hours_json, ",".join(sorted(dates)), json.dumps(part), rid))
+    why = {}
+    for d, v in (b.get("closed_reasons") or {}).items():
+        d, v = str(d)[:10], " ".join(str(v or "").split())[:80]
+        if d in dates and v:
+            why[d] = v
+    db().execute("UPDATE regions SET hours=?, closed_dates=?, closed_hours=?, closed_reasons=? WHERE id=?",
+                 (hours_json, ",".join(sorted(dates)), json.dumps(part), json.dumps(why), rid))
     db().commit()
     who = session.get("dispatcher_name", "dispatch")
     log("region_hours", r["name"] + ": " + ("own hours " + business_hours_label(rid) if hours_json else "business hours") +
@@ -14824,6 +14836,34 @@ def region_closed_hours(rid):
             and _hm(v[0]) is not None and _hm(v[1]) is not None}
 
 
+def region_closed_reasons(rid):
+    """{"2026-11-26": "Thanksgiving"}: the optional reason dispatch gave for a closed date."""
+    r = _region(rid)
+    if not r or "closed_reasons" not in r.keys():
+        return {}
+    try:
+        h = json.loads(r["closed_reasons"] or "{}")
+    except Exception:
+        h = {}
+    if not isinstance(h, dict):
+        return {}
+    keep = set(region_closed_list(rid))
+    return {d: str(v).strip() for d, v in h.items() if d in keep and str(v or "").strip()}
+
+
+def region_closed_today(rid):
+    """'Closed today for Thanksgiving' when the region is closed (all day or set hours) today."""
+    if not rid:
+        return ""
+    today = region_now(rid).date().isoformat()
+    if today not in set(region_closed_list(rid)):
+        return ""
+    part = region_closed_hours(rid).get(today)
+    why = region_closed_reasons(rid).get(today, "")
+    t = "Closed today" + ((" " + _ampm(part[0]) + " - " + ("close" if part[1] == "23:59" else _ampm(part[1]))) if part else "")
+    return t + ((" for " + why) if why else "")
+
+
 def region_closed_dates(rid):
     """Dates a region is closed all day, like holidays. Past dates drop off."""
     part = region_closed_hours(rid)
@@ -14917,11 +14957,14 @@ def closed_dates_label(rid, limit=3):
     if not ds:
         return ""
     part = region_closed_hours(rid)
+    why = region_closed_reasons(rid)
     def one(d):
         t = dt.date.fromisoformat(d).strftime("%a %b %-d")
         if d in part:
             a, b = part[d]
             t += " " + _ampm(a) + " - " + ("close" if b == "23:59" else _ampm(b))
+        if why.get(d):
+            t += " (" + why[d] + ")"
         return t
     return "Closed " + ", ".join(one(d) for d in ds)
 
