@@ -13353,8 +13353,38 @@ def company_look(c):
     return {"brand": brand, "logo": logo, "bs": bs}
 
 
+def live_company_url(u):
+    """A company saved with an old Railway address (the app's railway.app name was changed) opens on
+    the address this app runs on now, so the shared driver and restaurant apps keep working."""
+    try:
+        h = _norm_host(u)
+        now_h = _norm_host(os.environ.get("RAILWAY_PUBLIC_DOMAIN") or (request.host if has_request_context() else ""))
+        if h and now_h and h != now_h and h.endswith(".up.railway.app") and now_h.endswith(".up.railway.app"):
+            return "https://" + now_h
+    except Exception:
+        pass
+    return u
+
+
 def hub_company(c):
-    return dict({"name": c["name"], "code": c["code"], "url": c["url"]}, **company_look(c))
+    return dict({"name": c["name"], "code": c["code"], "url": live_company_url(c["url"])}, **company_look(c))
+
+
+def fix_old_railway_company_urls():
+    """Each start: companies saved with an older railway.app address get the current one."""
+    try:
+        cur = _norm_host(os.environ.get("RAILWAY_PUBLIC_DOMAIN") or "")
+        if not cur.endswith(".up.railway.app"):
+            return
+        con = dbx.connect(DB_PATH)
+        for r in con.execute("SELECT id, url FROM companies").fetchall():
+            h = _norm_host(r[1])
+            if h.endswith(".up.railway.app") and h != cur:
+                con.execute("UPDATE companies SET url=? WHERE id=?", ("https://" + cur, r[0]))
+        con.commit()
+        con.close()
+    except Exception as e:
+        print("company address fix skipped:", e)
 
 
 def staff_brand_site():
@@ -14834,6 +14864,7 @@ def _auto_secret_key():
 
 _auto_secret_key()
 seed_brand_photos()
+fix_old_railway_company_urls()
 seed_tiger_town_logo()
 
 def current_portal():
