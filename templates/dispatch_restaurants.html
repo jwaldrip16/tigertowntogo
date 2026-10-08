@@ -93,7 +93,8 @@
     </select>{% if not regions %}<span class="muted small">Add regions with the Regions button above.</span>{% endif %}</div>
   <div class="row"><label>Default prep minutes</label>
     <input type="number" name="prep_default" value="{{ d.r['prep_default'] }}" min="1" max="120"></div>
-  <div class="row"><label>Phone</label><input name="phone" value="{{ d.r['phone'] }}"></div>
+  <div class="row"><label>Phone</label><input name="phone" value="{{ d.r['phone'] }}">
+    <button type="button" class="btn small" onclick="restGoogle({{ d.r['id'] }}, this)">Get phone and address from Google</button></div>
   <div class="photoedit"><label>Photo for the customer website</label>
     {% if d.r['image'] %}<img class="edimg" src="{{ d.r['image'] if d.r['image'].startswith('http') else '/media/' ~ d.r['image'] }}" alt="">{% else %}<div class="noimg">No photo yet</div>{% endif %}
     <label class="btn small">{{ 'Replace photo' if d.r['image'] else 'Upload photo' }}
@@ -174,4 +175,20 @@ function rgAll(on){
     if (f && f.parentElement.style.display === 'none'){ rgAll(true); f.scrollIntoView(); }
   }
 })();
-</script>{% endblock %}
+</script><script>
+async function restGoogle(id, btn){
+  if (!confirm('Replace this restaurant\'s phone and address with what Google has?')) return;
+  btn.disabled = true; const t = btn.textContent; btn.textContent = 'Looking up...';
+  try {
+    const r = await fetch('/api/dispatch/restaurant-google', {method:'POST', headers:{'Content-Type':'application/json'},
+                          body: JSON.stringify({restaurant_id: id})});
+    const d = await r.json();
+    if (!d.ok) { alert(d.error || 'Could not look it up.'); return; }
+    const f = document.getElementById('rest' + id);
+    if (f) { f.querySelector('input[name=phone]').value = d.phone || ''; f.querySelector('input[name=address]').value = d.address || ''; }
+    alert('Saved: ' + (d.phone || 'no phone listed') + '\n' + (d.address || ''));
+  } catch (e) { alert('Could not look it up. Check your signal and try again.'); }
+  finally { btn.disabled = false; btn.textContent = t; }
+}
+</script>
+{% endblock %}

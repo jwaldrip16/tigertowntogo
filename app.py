@@ -450,6 +450,7 @@ def init_db():
     ensure_column(con, "drivers", "short_alert_at", "TEXT")
     ensure_column(con, "restaurants", "zup_id", "TEXT")
     ensure_column(con, "restaurants", "phone_checked", "INTEGER DEFAULT 0")
+    ensure_column(con, "restaurants", "places_checked", "INTEGER DEFAULT 0")
     ensure_column(con, "restaurants", "eta_min", "INTEGER")
     ensure_column(con, "menu_items", "zup_id", "TEXT")
     ensure_column(con, "option_groups", "max_each", "INTEGER NOT NULL DEFAULT 1")
@@ -13588,6 +13589,7 @@ def tigertown_import(pick_ids=None, skip_paused=True, replace_menu=True, region_
                 con.executemany("INSERT INTO options(group_id,name,price_delta_cents,sort) VALUES(?,?,?,?)",
                                 [(gid, o["name"][:80], int(o["delta"]), oi) for oi, o in enumerate(g["options"])])
     con.commit()
+    threading.Thread(target=_startup_phone_repair, daemon=True).start()   # phones and addresses from Google
     return {"ok": True, "created": made, "updated": updated, "items": items, "skipped": skipped}
 
 
@@ -14248,10 +14250,11 @@ def brand_phone_digits():
     return out
 
 
-def places_phone(name, address, lat=None, lng=None):
-    """The restaurant's own phone number from Google Places, or '' when not found."""
+def places_lookup(name, address, lat=None, lng=None):
+    """The restaurant's own phone and address from Google Places.
+    Returns None when Google can't be asked (no key, error), {} when nothing matched."""
     if not GOOGLE_KEY or not (name or "").strip():
-        return ""
+        return None
     body = {"textQuery": ", ".join(x for x in [name, address] if x), "maxResultCount": 3}
     if lat and lng:
         body["locationBias"] = {"circle": {"center": {"latitude": float(lat), "longitude": float(lng)},
@@ -14259,16 +14262,14 @@ def places_phone(name, address, lat=None, lng=None):
     req = urllib.request.Request("https://places.googleapis.com/v1/places:searchText",
                                  data=json.dumps(body).encode(), method="POST",
                                  headers={"Content-Type": "application/json", "X-Goog-Api-Key": GOOGLE_KEY,
-                                          "X-Goog-FieldMask": "places.nationalPhoneNumber,places.location,places.displayName"})
+                                          "X-Goog-FieldMask": "places.nationalPhoneNumber,places.formattedAddress,"
+                                                              "places.location,places.displayName"})
     try:
         res = json.loads(urllib.request.urlopen(req, timeout=10).read().decode())
     except Exception as e:
-        print("places phone lookup failed:", name, e)
-        return ""
+        print("places lookup failed:", name, e)
+        return None
     for p in res.get("places") or []:
-        ph = p.get("nationalPhoneNumber") or ""
-        if not ph:
-            continue
         loc = p.get("location") or {}
         if lat and lng and loc.get("latitude") is not None:
             try:
@@ -14276,16 +14277,31 @@ def places_phone(name, address, lat=None, lng=None):
                     continue
             except Exception:
                 pass
-        return nice_phone(ph)
-    return ""
+        return {"phone": nice_phone(p.get("nationalPhoneNumber") or ""),
+                "address": (p.get("formattedAddress") or "").replace(", USA", ""),
+                "lat": loc.get("latitude"), "lng": loc.get("longitude")}
+    return {}
 
 
-def fix_rest_phones(only_ids=None):
-    """Takes the delivery company's number off restaurants and fills in each restaurant's own number."""
+def places_phone(name, address, lat=None, lng=None):
+    return ((places_lookup(name, address, lat, lng) or {}).get("phone")) or ""
+
+
+def _addr_needs_fix(a):
+    a = (a or "").strip()
+    return (not a) or (not any(ch.isdigit() for ch in a.split(",")[0])) or a.lower() in ("auburn, al", "auburn al")
+
+
+def fix_rest_phones(only_ids=None, force=False):
+    """Takes the delivery company's number off restaurants and fills in each restaurant's own phone
+    number and street address from Google. force=True (the per-restaurant button) uses Google's
+    phone and address even when the restaurant already has one."""
     brand = brand_phone_digits()
-    rows = db().execute("SELECT id,name,address,phone,lat,lng,COALESCE(phone_checked,0) AS pc FROM restaurants "
-                        "WHERE slug!='oneoff'").fetchall()
-    fixed = found = 0
+    rows = db().execute("""SELECT r.id, r.name, r.address, r.phone, r.lat, r.lng, COALESCE(r.places_checked,0) AS pc,
+                                  g.name AS rg FROM restaurants r LEFT JOIN regions g ON g.id=r.region_id
+                           WHERE r.slug!='oneoff'""").fetchall()
+    fixed = found = addrs = 0
+    out = {}
     for r in rows:
         if only_ids is not None and r["id"] not in only_ids:
             continue
@@ -14294,28 +14310,60 @@ def fix_rest_phones(only_ids=None):
         if wrong:
             db().execute("UPDATE restaurants SET phone='' WHERE id=?", (r["id"],))
             fixed += 1
-        if (wrong or len(d) != 10) and (not r["pc"] or only_ids is not None):
-            ph = places_phone(r["name"], r["address"], r["lat"], r["lng"])
-            if ph and digits(ph)[-10:] not in brand:
+        need_phone = wrong or len(d) != 10
+        need_addr = _addr_needs_fix(r["address"])
+        if (force or ((need_phone or need_addr) and not r["pc"])):
+            where = r["address"] if not need_addr else ", ".join(x for x in [r["address"], r["rg"] or "", "AL"] if x)
+            g = places_lookup(r["name"], where, r["lat"], r["lng"])
+            if g is None:
+                continue          # Google not set up or not answering: try again next time
+            ph = g.get("phone") or ""
+            if ph and digits(ph)[-10:] not in brand and (need_phone or force):
                 db().execute("UPDATE restaurants SET phone=? WHERE id=?", (ph, r["id"]))
                 found += 1
-            db().execute("UPDATE restaurants SET phone_checked=1 WHERE id=?", (r["id"],))
+            if g.get("address") and (need_addr or force):
+                db().execute("UPDATE restaurants SET address=?, lat=COALESCE(?,lat), lng=COALESCE(?,lng) WHERE id=?",
+                             (g["address"], g.get("lat"), g.get("lng"), r["id"]))
+                addrs += 1
+            db().execute("UPDATE restaurants SET places_checked=1 WHERE id=?", (r["id"],))
+            out = g
         db().commit()
-    print("restaurant phones: removed %d delivery-company numbers, found %d real numbers" % (fixed, found))
-    return {"removed": fixed, "found": found}
+    print("restaurants: removed %d delivery-company numbers, found %d phones and %d addresses" % (fixed, found, addrs))
+    return {"removed": fixed, "found": found, "addresses": addrs, "last": out}
 
 
 def _startup_phone_repair():
     time.sleep(15)   # let the database finish its start-up changes first
     try:
         with app.app_context():
-            ensure_column(db(), "restaurants", "phone_checked", "INTEGER DEFAULT 0")
+            ensure_column(db(), "restaurants", "places_checked", "INTEGER DEFAULT 0")
             fix_rest_phones()
     except Exception as e:
         print("phone repair skipped:", e)
 
 
 threading.Thread(target=_startup_phone_repair, daemon=True).start()
+
+
+@app.post("/api/dispatch/restaurant-google")
+def api_dispatch_restaurant_google():
+    """Dispatch button: fill one restaurant's phone and address from Google."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    if not GOOGLE_KEY:
+        return jsonify({"ok": False, "error": "Add GOOGLE_MAPS_API_KEY in Railway first."}), 400
+    try:
+        rid = int((request.get_json(force=True, silent=True) or {}).get("restaurant_id") or 0)
+    except (TypeError, ValueError):
+        rid = 0
+    r = db().execute("SELECT name FROM restaurants WHERE id=?", (rid,)).fetchone()
+    if not r:
+        return jsonify({"ok": False, "error": "Restaurant not found."}), 404
+    res = fix_rest_phones(only_ids={rid}, force=True)
+    row = db().execute("SELECT phone,address FROM restaurants WHERE id=?", (rid,)).fetchone()
+    if not res["last"]:
+        return jsonify({"ok": False, "error": "Google couldn't find " + r["name"] + ". Type the phone and address in yourself."}), 404
+    return jsonify({"ok": True, "phone": row["phone"], "address": row["address"]})
 
 
 def _startup_picture_repair():
