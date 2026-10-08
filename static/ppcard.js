@@ -45,7 +45,7 @@
     let fields = [];
     // First try saves the card with PayPal for added fees and tips. If PayPal turns that down
     // (for example the name or ZIP doesn't match what the bank has), run it once more without saving.
-    let plain = false, lastArgs;
+    let plain = false, lastArgs, approving = false, done = false;
     function close(){
       // shut PayPal's card boxes down properly so the next card form starts clean
       fields.forEach(function(f){ try { f.close(); } catch(e){} });
@@ -66,19 +66,24 @@
           return r.id;
         },
         onApprove: async function(data){
+          approving = true;
           say('Finishing...');
           const r = await jpost('/api/paypal/approve', {code: o.code, id: data.orderID});
+          approving = false;
+          if (r && (r.ok || r.already_paid)) done = true;
           if (!r || !r.ok){
-            if (!plain){ plain = true; say('Trying the card again without saving it...'); cf.submit(lastArgs).catch(function(){ failed(r); }); return; }
+            if (!plain && !done){ plain = true; say('Trying the card again without saving it...'); cf.submit(lastArgs).catch(function(){ if (!done && !approving) failed(r); }); return; }
             failed(r); return;
           }
+          done = true;
           say('Card accepted. ' + r.held + ' held on the card.');
           go.textContent = 'Done';
           if (o.onDone) o.onDone(r);
           setTimeout(close, 1200);
         },
         onError: function(err){
-          if (!plain){ plain = true; say('Trying the card again without saving it...'); cf.submit(lastArgs).catch(function(){ failed(); }); return; }
+          if (done || approving) return;      // the card already went through: never run it twice
+          if (!plain){ plain = true; say('Trying the card again without saving it...'); cf.submit(lastArgs).catch(function(){ if (!done && !approving) failed(); }); return; }
           failed();
         }
       });
@@ -104,7 +109,11 @@
         const args = zip ? {billingAddress: {postalCode: zip, countryCode: 'US'}} : undefined;
         lastArgs = args;
         cf.submit(args).catch(function(){
-          say('Fix the card details and try again.', true); go.disabled = false; go.textContent = 'Run card';
+          // PayPal can report an error after the card was already accepted; only complain if it really failed.
+          setTimeout(function(){
+            if (done || approving) return;
+            say('Fix the card details and try again.', true); go.disabled = false; go.textContent = 'Run card';
+          }, 2500);
         });
       };
     }).catch(function(e){ say(e.message || 'Could not load the card form.', true); go.textContent = 'Unavailable'; });
