@@ -41,7 +41,20 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
   <div id="gateCall"><a class="btn primary calldisp" href="tel:{{ biz_tel }}" onclick="tellDispatch()">Call dispatch</a>
   <div class="muted small callnote"></div></div>
 </div>
-<div class="row" id="sosRow"><a class="btn" href="tel:911" onclick="call911()" style="background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700;width:100%;text-align:center">Call 911</a></div>
+<div class="row" id="sosRow"><button type="button" class="btn" onclick="open911()" style="background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700;width:100%;text-align:center">Call 911</button></div>
+<div id="sosBack" class="modalback hidden" onclick="if(event.target===this) close911()">
+  <div class="panel modal" role="dialog" aria-labelledby="sosTitle">
+    <h3 id="sosTitle" style="margin:0;color:#c0392b">Call 911?</h3>
+    <div>Only use this in a real emergency. When you tap OK, your phone calls 911, dispatch gets an urgent alert with your location, and you go on break. An order you already picked up stays with you; orders not picked up go to another driver.</div>
+    <label for="sosReason" class="muted small">Reason (optional)</label>
+    <textarea id="sosReason" rows="2" maxlength="200" placeholder="What happened? (optional)"></textarea>
+    <div class="row" style="gap:8px">
+      <button type="button" class="btn" onclick="close911()" style="flex:1">Cancel</button>
+      <button type="button" class="btn" onclick="confirm911()" style="flex:1;background:#1565c0;color:#fff;border-color:#1565c0;font-weight:700">OK, call 911</button>
+    </div>
+    <a id="sosDial" href="tel:911" class="hidden" aria-hidden="true">911</a>
+  </div>
+</div>
 <div class="panel" id="status"></div>
 <div class="row"><span class="muted small" id="locNote">Checking your location...</span></div>
 <div class="row"><span class="muted small" id="soundNote"></span>
@@ -241,13 +254,27 @@ function setDispatchTel(tel){
     b.classList.toggle('disabled', !DISP_TEL);
   });
 }
-function call911(){
+function open911(){
+  const r = document.getElementById('sosReason'); if (r) r.value = '';
+  document.getElementById('sosBack').classList.remove('hidden');
+}
+function close911(){ document.getElementById('sosBack').classList.add('hidden'); }
+function confirm911(){
+  const r = document.getElementById('sosReason');
+  const reason = r ? r.value.trim().slice(0, 200) : '';
+  close911();
+  call911(reason);
+  const a = document.getElementById('sosDial');
+  try { a.click(); } catch(e){ window.location.href = 'tel:911'; }
+}
+function call911(reason){
   // the phone dials 911; dispatch gets an urgent alert with the order and where the driver is,
   // the driver goes on break and their order goes to another driver
   let sent = false;
   const send = function(lat, lng){
     if (sent) return; sent = true;
     const body = {};
+    if (reason) body.reason = reason;
     if (lat != null){ body.lat = lat; body.lng = lng; }
     const blob = new Blob([JSON.stringify(body)], {type: 'application/json'});
     if (!(navigator.sendBeacon && navigator.sendBeacon('/api/driver/call-911', blob))){

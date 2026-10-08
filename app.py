@@ -14956,6 +14956,9 @@ def api_driver_call_911():
     stage_words = {"enroute": "on the way to the customer (food already picked up)", "at_restaurant": "at the restaurant",
                    "received": "heading to the restaurant", "assigned": "not accepted yet"}
     note = "URGENT: 911 is being called right now. Follow up with the driver."
+    reason = " ".join(str(data.get("reason") or "").split())[:200]
+    if reason:
+        note += " Reason: " + reason + ("" if reason.endswith((".", "!", "?")) else ".")
     # food already picked up (en route) stays with the driver; anything not picked up goes back in the queue
     keep = [r for r in live if r["dispatch_status"] == "enroute"]
     moved = [r for r in live if r["dispatch_status"] != "enroute"]
@@ -14983,7 +14986,8 @@ def api_driver_call_911():
         _code = (_rv(_c, "primary_no") or _c["code"]) if _c else None
     db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                  (did, "driver", "Automatic message: I am calling 911 right now. Please follow up with me." +
-                  (" I was on order " + _code + "." if _code else ""), now()))
+                  (" I was on order " + _code + "." if _code else "") +
+                  (" Reason: " + reason if reason else ""), now()))
     db().commit()
     # hand every live order back to the queue so another driver gets it
     if moved:
