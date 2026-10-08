@@ -12,6 +12,18 @@
   <div id="savedAddr">{% if not session.get('customer_id') %}<a class="herolink" href="/account/login?next=/">Sign in to use your saved addresses</a>{% endif %}</div>
   <button class="btn primary herobtn" onclick="homeSearch()">Search</button>
   <div id="searchMsg" class="heromsg"></div>
+  {% if brands %}
+  <div class="brandpick herobrands">
+    <span class="brandlabel">Developer test: pick a brand</span>
+    <div class="brandrow">
+      <a class="brandbtn {{ 'on' if not sel_brand else '' }}" href="/?brand=all#restaurants"><span class="brandname">All brands</span></a>
+      {% for b in brands %}
+      <a class="brandbtn {{ 'on' if sel_brand == b.id else '' }}" href="/?brand={{ b.id }}#restaurants">
+        {% if b.logo %}<img src="{{ b.logo }}" alt="" loading="lazy">{% endif %}<span class="brandname">{{ b.name }}{% if b.empty %} <small>(coming soon)</small>{% endif %}</span></a>
+      {% endfor %}
+    </div>
+  </div>
+  {% endif %}
 
 </section>
 

@@ -1039,12 +1039,28 @@ def host_site():
                     break
             if s is None and session.get("site_preview"):
                 s = site_by_id(session.get("site_preview"))
-            if s is None:
+            if s is None and not dev_all_brands_mode():
                 s = home_brand_site()   # no shared "All brands" website: every address shows one brand
     except Exception:
         s = None
     g._hsite = s
     return s
+
+
+def dev_all_brands_mode():
+    """Developer test view: with the switch on in Account > Developer access, a signed-in developer
+    sees every brand on an address that belongs to no brand (the Railway address), with the old
+    brand picker, all logos and the All brands FAQ. Customers and everyone else never see it."""
+    try:
+        if not has_request_context() or not session.get("dispatcher_id"):
+            return False
+        if "_devall" in g:
+            return g._devall
+        on = str(setting("dev_all_brands") or 0) == "1" and is_dev()
+        g._devall = on
+        return on
+    except Exception:
+        return False
 
 
 def home_brand_site():
@@ -3397,8 +3413,38 @@ def home():
     paused = paused_region_ids()
     regions = [{"id": g["id"], "name": g["name"], "paused": g["id"] in paused}
                for g in all_regions() if g["id"] in used]
-    # one brand per web address: no brand picker and no "All brands" page
+    # one brand per web address: no brand picker and no "All brands" page,
+    # except for a developer with the All brands test switch on
     brands, brand_site = [], None
+    if dev_all_brands_mode() and not _own_addr and brands_on():
+        reg_site = {g["id"]: (g["site_id"] or 0) for g in db().execute("SELECT id, site_id FROM regions").fetchall()}
+        used_all = {r["region_id"] for r in rs_all if r["region_id"]}
+        used_sites = {reg_site.get(rid, 0) for rid in used_all}
+        for srow in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
+            brands.append({"id": srow["id"], "name": srow["name"], "logo": site_logo_url(srow),
+                           "empty": srow["id"] not in used_sites})
+        bpick = request.args.get("brand")
+        if bpick is not None:
+            session["cust_brand"] = bpick if bpick.isdigit() else ""
+            session["cust_region"] = ""
+        elif request.args.get("region") is not None:
+            session["cust_brand"] = ""
+        bsel = session.get("cust_brand") or ""
+        if bpick is not None and _site is not None:
+            _site = None
+            rs = rs_all
+            used = {r["region_id"] for r in rs if r["region_id"]}
+            regions = [{"id": g["id"], "name": g["name"], "paused": g["id"] in paused}
+                       for g in all_regions() if g["id"] in used]
+        if bsel.isdigit() and int(bsel) in {b["id"] for b in brands}:
+            brand_site = site_by_id(int(bsel))
+            _breg = site_region_ids(brand_site["id"])
+            rs = [r for r in rs if r["region_id"] and r["region_id"] in _breg]
+            regions = [g for g in regions if g["id"] in _breg]
+        elif bsel:
+            session["cust_brand"] = ""
+        elif _site is not None:
+            brand_site = _site
     if not regions_on():
         regions = []   # regions are off: one area, no "Where are you?" buttons
     pick = request.args.get("region")
@@ -3429,6 +3475,7 @@ def home():
         far_name = _fr["name"] if _fr else ""
     return render_template("index.html", cards=cards, biz_open=biz, regions=regions, far_name=far_name,
                            brands=brands, sel_brand=brand_site["id"] if brand_site is not None else 0,
+                           dev_all=bool(brands),
                            sel_region=sel_id, sel_region_name=sel_name, hours_region_name=_hr_name,
                            # several areas and none picked: the footer lists every area's hours instead
                            hours_text=(business_hours_label(_hr) if _hr else ("" if regions else business_hours_label())),
@@ -7528,6 +7575,7 @@ def api_dispatch_users():
     return jsonify({"ok": True, "me": session.get("dispatcher_id"),
                     "i_am_owner": is_owner(), "i_am_dev": is_dev(), "i_am_real_owner": is_real_owner(),
                     "dev_order_edit": dev_can_edit_orders(),
+                    "dev_all_brands": str(setting("dev_all_brands") or 0) == "1",
                     "users": [{"id": r["id"], "name": r["name"], "username": r["username"],
                                "owner": bool(r["is_owner"]), "dev": bool(r["is_dev"]),
                                "created_at": (r["created_at"] or "")[:10]} for r in rows]})
@@ -7594,6 +7642,22 @@ def api_dev_order_edit():
     on = 1 if (request.get_json(force=True) or {}).get("on") else 0
     db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('dev_order_edit',?)", (str(on),))
     log("dispatcher", (session.get("dispatcher_name") or "owner") + (" let developers change orders" if on else " stopped developers changing orders"))
+    db().commit()
+    return jsonify({"ok": True, "on": bool(on)})
+
+@app.post("/api/dispatch/dev-all-brands")
+def api_dev_all_brands():
+    """Developer test switch: every brand and website on the Railway address, for developers only."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    if not is_dev():
+        return jsonify({"ok": False, "error": "Only a developer can change this."}), 403
+    on = 1 if (request.get_json(force=True) or {}).get("on") else 0
+    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('dev_all_brands',?)", (str(on),))
+    if not on:
+        session.pop("cust_brand", None)
+    log("dispatcher", (session.get("dispatcher_name") or "developer") + (" turned on" if on else " turned off") +
+        " the developer All brands test view")
     db().commit()
     return jsonify({"ok": True, "on": bool(on)})
 
@@ -13516,7 +13580,8 @@ def inject_all_brand_logos():
     """On the shared customer website with no brand picked (All brands), every brand's logo,
     so the header and the browser tab show all of them together."""
     try:
-        if True:   # the All brands website is gone: every address shows one brand
+        # the All brands website is gone (every address shows one brand), except in the developer test view
+        if not dev_all_brands_mode() or request.path.startswith(_STAFF_PREFIXES) or request.path.startswith(("/go/", "/reset/")):
             return {"all_logos": []}
         if not brands_on() or current_site() is not None:
             return {"all_logos": []}
@@ -17198,8 +17263,9 @@ def faq_region_id():
     return faq_target()[0]
 
 def faq_all_brands():
-    """True on the shared website's FAQ with no brand or area picked (All brands). Gone: always False."""
-    return False
+    """True on the shared website's FAQ with no brand or area picked (All brands). Only in the developer test view."""
+    if not dev_all_brands_mode():
+        return False
     try:
         if not brands_on() or host_site() is not None:
             return False

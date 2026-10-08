@@ -44,6 +44,14 @@
       They can only change orders while this is on. Only a developer can remove a developer account, and the last one can't be removed.</p>
       <label id="devPermRow"><input type="checkbox" id="devPerm" onchange="setDevPerm(this.checked)"> Let developers change orders</label>
       <div class="muted small" id="devPermMsg"></div>
+      <div id="devAllRow" style="display:none;margin-top:12px">
+        <label><input type="checkbox" id="devAll" onchange="setDevAll(this.checked)"> All brands test view</label>
+        <p class="muted small">Only for developers who are signed in. Open the Railway address (not a brand's own address) and the
+        customer website shows every brand with a brand picker, all three logos and the All brands FAQ, so you can test each
+        brand's website from one address. Customers, drivers, restaurants and owners still see one brand.
+        <a href="/" target="_blank">Open the website</a></p>
+        <div class="muted small" id="devAllMsg"></div>
+      </div>
     </div>
     <div class="panel mt">
       <h2>Dispatcher room</h2>
@@ -69,6 +77,8 @@ async function loadUsers(){
   const anyDev = res.users.some(u => u.dev);
   DEVS = res.users.filter(u => u.dev).length;
   document.getElementById('devPanel').style.display = (res.i_am_owner && (anyDev || res.i_am_dev)) ? '' : 'none';
+  document.getElementById('devAllRow').style.display = res.i_am_dev ? '' : 'none';
+  document.getElementById('devAll').checked = !!res.dev_all_brands;
   const dp = document.getElementById('devPerm'); dp.checked = !!res.dev_order_edit; dp.disabled = !res.i_am_real_owner;
   document.getElementById('devPermMsg').textContent = res.i_am_real_owner ? '' :
     ('Only the business owner can change this. Right now developers ' + (res.dev_order_edit ? 'can' : 'can\'t') + ' change orders.');
@@ -116,6 +126,11 @@ async function setOwner(id, on){
   const res = await jpost('/api/dispatch/user', {id:id, name:u.name, username:u.username, password:'', owner:on});
   if(!res.ok) alert(res.error || 'Could not change that.');
   loadUsers();
+}
+async function setDevAll(on){
+  const res = await jpost('/api/dispatch/dev-all-brands', {on:on});
+  document.getElementById('devAllMsg').textContent = res.ok ? (on ? 'On. Open the website on the Railway address to see every brand.' : 'Off. The website shows one brand again.') : (res.error || 'Could not change that.');
+  if(!res.ok) document.getElementById('devAll').checked = !on;
 }
 async function setDevPerm(on){
   const res = await jpost('/api/dispatch/dev-order-edit', {on:on});
