@@ -19,6 +19,7 @@
   <section>
     <h2>Restaurant</h2>
     <p class="small muted">One restaurant per order. For a second restaurant, place a separate order and link it below. The order minimum and delivery fee apply to each order, and it may go with a different driver, so the tip is per order.</p>
+    {% if locked_brands %}<p class="small" style="color:#b42318">Locked brand, no orders until it's unlocked in Settings &gt; Regions &gt; Brand sites: {{ locked_brands|join(', ') }}</p>{% endif %}
     {% if locked_out %}<p class="small muted">Only restaurants in the regions you're assigned to are listed. Ask the owner to add you to another region.</p>{% endif %}
     <select id="rest" onchange="drawMenu()">
       {% if rest_groups|length > 1 %}

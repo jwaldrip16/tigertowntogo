@@ -5323,7 +5323,11 @@ def checkout():
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (payload["restaurant_id"],)).fetchone()
     if not r:
         return jsonify({"ok": False, "error": "Unknown restaurant"}), 400
-    if r is not None and restaurant_locked(r) and not dispatcher_required():
+    if r is not None and restaurant_locked(r):
+        # A locked brand takes no orders at all, from customers or dispatch (developer test view excepted).
+        if dispatcher_required():
+            return jsonify({"ok": False, "error": region_label(_rv(r, "region_id")) + " belongs to a locked brand, so no orders can be "
+                            "created there. Unlock the brand in Settings > Regions > Brand sites first."}), 403
         return jsonify({"ok": False, "error": "This restaurant is not taking online orders yet."}), 403
     placed_by = payload.get("placed_by", "customer")
     if placed_by == "dispatch" and dispatcher_required() and not can_create_in_region(_rv(r, "region_id")):
@@ -7557,7 +7561,8 @@ def dispatch_new_order():
                          "drop_style": clean_drop_style(_rv(mo, "drop_style")),
                          "region_id": int((_mr["region_id"] if _mr else 0) or 0),
                          "pay_method": _rv(mo, "pay_method") or "", "house_name": house_name_of(mo)}
-    shown = [r for r in rests if r["slug"] != "oneoff" and can_create_in_region(_rv(r, "region_id"))]
+    shown = [r for r in rests if r["slug"] != "oneoff" and can_create_in_region(_rv(r, "region_id"))
+             and not restaurant_locked(r)]   # a locked brand's restaurants can't take dispatch orders
     order_of = {x["id"]: i for i, x in enumerate(all_regions())}
     groups = {}
     for r in shown:
@@ -7574,7 +7579,11 @@ def dispatch_new_order():
                             " GROUP BY restaurant_id").fetchall():
         has_menu[str(row["restaurant_id"])] = int(row["n"] or 0)
     menus = menus_payload([src["restaurant_id"]]) if src else {}
+    _lkr = set() if dev_all_brands_mode() else locked_region_ids()
+    locked_brands = sorted({region_label(int(_rv(r, "region_id") or 0)) for r in rests
+                            if r["slug"] != "oneoff" and int(_rv(r, "region_id") or 0) in _lkr})
     return render_template("dispatch_new_order.html", rest_groups=rest_groups, locked_out=locked_out, rest_region=rest_region,
+                           locked_brands=locked_brands,
                            restaurants=[dict(r) for r in shown],
                            menus=menus, has_menu=has_menu, src=src, multi_src=multi_src, multi_policy=MULTI_POLICY, oneoff=oneoff, tokens=token_list(),
                            reasons=[{"key": k, "label": v} for k, v in REDO_REASONS.items()])
