@@ -390,7 +390,11 @@ async function editOrder(oid){
       '<input id="edcNote" placeholder="Note for the kitchen (optional)" maxlength="120">'+
       '<button type="button" class="btn small" onclick="edCustom()">Add custom item</button></details>'+
     '<div class="edrow"><label>Delivery fee $ <input id="edFee" type="number" step="0.01" min="0" value="'+(res.fee_cents/100).toFixed(2)+'"></label>'+
-      '<label>Tip $ <input id="edTip" type="number" step="0.01" min="0" value="'+(res.tip_cents/100).toFixed(2)+'"></label></div>'+
+      '<label>Tip $ <input id="edTip" type="number" step="0.01" min="0" value="'+(res.tip_cents/100).toFixed(2)+'" oninput="edTipTyped()"></label></div>'+
+    '<div class="row" style="flex-wrap:wrap;gap:6px;margin:4px 0">'+[10,15,18,20,25].map(p=>'<button type="button" class="btn tiny" onclick="edTipPct('+p+')">'+p+'%</button>').join('')+
+      '<button type="button" class="btn tiny" onclick="edTipPct(0)">No tip</button>'+
+      '<button type="button" class="btn tiny" onclick="var t=document.getElementById(\'edTip\');t.focus();t.select()">Custom</button>'+
+      '<span class="small muted" id="edTipLbl"></span></div>'+
     '<label class="small">Their order number <input id="edRef" maxlength="40" value="'+edEsc(res.ref)+'"></label>'+
     '<div class="small muted" id="edSub"></div>'+
     '<div class="addbag"><button type="button" class="btn" onclick="edClose()">Cancel</button>'+
@@ -442,9 +446,23 @@ function edCustom(){
     note: (document.getElementById('edcNote').value||'').trim()});
   ['edcName','edcNote'].forEach(k=>document.getElementById(k).value='');
   document.getElementById('edcPrice').value='0'; document.getElementById('edcFee').value='0'; document.getElementById('edcQty').value='1';
-  document.getElementById('edErr').textContent=''; edDraw();
+  document.getElementById('edErr').textContent=''; edDraw(); edTipLabel();
+}
+function edFood(){ return (ED && ED.items || []).reduce((s,i)=>s+(i.price_cents||0)*(i.qty||1),0); }
+function edTipLabel(){
+  const el = document.getElementById('edTipLbl'); if(!el) return;
+  const v = parseFloat(document.getElementById('edTip').value||'0'), f = edFood();
+  el.textContent = (v>0 && f) ? Math.round(v*10000/f)+'% of the food' : '';
+}
+function edTipPct(p){ document.getElementById('edTip').value = (Math.round(edFood()*p/100)/100).toFixed(2); edTipLabel(); }
+function edTipTyped(){
+  const t = document.getElementById('edTip');
+  if(String(t.value).trim().startsWith('-') || parseFloat(t.value) < 0){ t.value = '0.00'; document.getElementById('edErr').textContent = "The tip can't be a negative amount."; }
+  edTipLabel();
 }
 async function edSave(){
+  if(parseFloat(document.getElementById('edTip').value) < 0 || parseFloat(document.getElementById('edFee').value) < 0){
+    document.getElementById('edErr').textContent = "The fee and tip can't be negative."; return; }
   if(!ED.items.length){ document.getElementById('edErr').textContent='An order needs at least one item. Cancel the order instead if it is not wanted.'; return; }
   const btn=document.getElementById('edSave'); btn.disabled=true;
   const ref=document.getElementById('edRef').value;
@@ -1425,6 +1443,7 @@ function orderCard(o, opts, drivers){
         +(o.kitchen_status==='pending'?(o.uses_app?'sent to kitchen':(o.manual_state==='ordering'?'ordering in process':'needs ordering')+(o.order_method==='online'?' online':' by phone')):o.kitchen_status)+'</span> <span class="pill blue">'+o.dispatch_status+'</span> ')+timer+' '+q+' '+hold+
     ' '+srcPill(o)+
     payPill(o)+
+    (o.tip_cents ? ' <span class="pill grey">tip '+o.tip+(o.tip_pct!==null && o.tip_pct!==undefined ? ' ('+o.tip_pct+'%)' : '')+'</span>' : '')+
     (o.placed_by!=='customer' ? ' <span class="pill grey">by '+o.placed_by+'</span>' : '')+'</div>'+
     (o.needs_address_approval ? '<div class="issuebar">Address not verified &middot; pending dispatch '+
       'approval. The kitchen has not seen this order yet.</div>' : '')+

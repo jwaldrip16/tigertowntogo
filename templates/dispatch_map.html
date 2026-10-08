@@ -16,6 +16,11 @@
 grey once a fix is more than 10 minutes old, which usually means the driver closed the app.
 Add this page to your home screen to keep it as its own Tracker app.</p>
 <div class="row" id="rgChips" style="flex-wrap:wrap;gap:6px;margin:6px 0"></div>
+<div class="row" style="flex-wrap:wrap;gap:6px;margin:6px 0;align-items:center">
+  <button type="button" class="btn small" id="autoBtn" onclick="toggleAuto()">Auto map drivers: On</button>
+  <button type="button" class="btn small" id="allBtn" onclick="showAll()">Show all drivers</button>
+  <span class="small muted" id="autoHint"></span>
+</div>
 <div class="maprow">
   <div id="map" class="map"></div>
   <aside class="panel" id="side"></aside>
@@ -25,6 +30,30 @@ Add this page to your home screen to keep it as its own Tracker app.</p>
 <script src="/static/maptiles.js"></script>
 <script>
 let MAP = null, LAYER = null, FITTED = false, RG = 0, RGLIST = [];
+// Auto map: keeps the map on the drivers as they move. Follow one driver with their "Map" button.
+let AUTO = localStorage.getItem('ffAutoMap') !== '0', FOLLOW = null, FOLLOW_NAME = '', PTS = [], NAMES = {}, MOVING = false;
+function drawAuto(){
+  const b = document.getElementById('autoBtn'); if(!b) return;
+  b.textContent = 'Auto map drivers: ' + (AUTO ? 'On' : 'Off');
+  b.className = 'btn small' + (AUTO ? ' primary' : '');
+  document.getElementById('autoHint').textContent = !AUTO ? 'Map stays where you put it.'
+    : (FOLLOW ? 'Following ' + FOLLOW_NAME + '.' : 'Keeping every driver in view.');
+}
+function autoMap(){
+  if(!AUTO || !MAP) return;
+  MOVING = true;
+  if(FOLLOW && MARKS[FOLLOW]){ MAP.setView(MARKS[FOLLOW]._fft || MARKS[FOLLOW].getLatLng(), Math.max(MAP.getZoom(), 15), {animate:true}); }
+  else if(PTS.length === 1){ MAP.setView(PTS[0], Math.max(MAP.getZoom(), 14), {animate:true}); }
+  else if(PTS.length){ MAP.fitBounds(PTS, {padding:[40,40], maxZoom:15, animate:true}); }
+  setTimeout(()=>{ MOVING = false; }, 900);
+}
+function toggleAuto(){ AUTO = !AUTO; localStorage.setItem('ffAutoMap', AUTO ? '1' : '0'); drawAuto(); autoMap(); }
+function showAll(){ FOLLOW = null; FOLLOW_NAME = ''; AUTO = true; localStorage.setItem('ffAutoMap','1'); drawAuto(); autoMap(); }
+function mapDriver(id){
+  if(!MARKS[id]) return;
+  FOLLOW = id; FOLLOW_NAME = NAMES[id] || 'driver'; AUTO = true; localStorage.setItem('ffAutoMap','1');
+  drawAuto(); autoMap(); MARKS[id].openPopup();
+}
 function pickRegion(id){ RG = id; FITTED = false; tick(); }
 function drawChips(regs){
   const box = document.getElementById('rgChips');
@@ -49,6 +78,9 @@ function initMap(){
   MAP = L.map('map').setView([32.6454, -85.3783], 12);
   ffBaseMap(MAP);
   LAYER = L.layerGroup().addTo(MAP);
+  // Dragging the map yourself turns auto map off so it doesn't fight you.
+  MAP.on('dragstart', () => { if(!MOVING && AUTO){ AUTO = false; localStorage.setItem('ffAutoMap','0'); drawAuto(); } });
+  drawAuto();
 }
 function dot(color, letter){
   return L.divIcon({className:'', iconSize:[26,26], html:
@@ -82,7 +114,8 @@ async function refresh(){
     const rows = [];
     rows.push('<div class="row between"><div><strong>'+d.name+'</strong> '+
       '<span class="pill '+(d.status==='online'?'green':d.status==='break'?'amber':'grey')+'">'+d.status+'</span></div>'+
-      '<a class="btn tiny" href="tel:'+d.phone+'">Call</a></div>');
+      '<span>'+(d.location ? '<button type="button" class="btn tiny'+(FOLLOW===d.id?' primary':'')+'" onclick="mapDriver('+d.id+')">Map</button> ' : '')+
+      '<a class="btn tiny" href="tel:'+d.phone+'">Call</a></span></div>');
     if(d.location){
       const age = d.location.minutes_ago===null ? 'just now'
         : (d.location.minutes_ago<1 ? 'seconds ago' : d.location.minutes_ago+' min ago');
@@ -97,10 +130,11 @@ async function refresh(){
         (d.location.address ? ('<br>'+d.location.address) : '')+
         (d.next_stop ? ('<br>next: '+d.next_stop.code) : '')+'<br>'+age;
       const ll = [d.location.lat, d.location.lng];
+      NAMES[d.id] = d.name;
       let mk = MARKS[d.id];
       if (!mk){ mk = L.marker(ll, {icon: dot(color, d.name[0])}).addTo(LAYER); mk.bindPopup(pop); mk._ffc = color; MARKS[d.id] = mk; }
       else {
-        glide(mk, ll, 1800);
+        glide(mk, ll, 1800); mk._fft = ll;
         if (mk._ffc !== color){ mk.setIcon(dot(color, d.name[0])); mk._ffc = color; }
         mk.setPopupContent(pop);
       }
@@ -120,7 +154,10 @@ async function refresh(){
   if (!shownDrivers.length){ const p2 = document.createElement('p'); p2.className = 'muted small'; p2.textContent = 'No drivers in this region right now.'; SIDE.appendChild(p2); }
   Object.keys(MARKS).forEach(id=>{ if (!seen[id]){ LAYER.removeLayer(MARKS[id]); delete MARKS[id]; } });
   document.getElementById('side').replaceChildren(...SIDE.childNodes);
+  PTS = pts;
+  if(FOLLOW && !seen[FOLLOW]){ FOLLOW = null; FOLLOW_NAME = ''; drawAuto(); }
   if(pts.length && !FITTED){ MAP.fitBounds(pts, {padding:[40,40], maxZoom:14}); FITTED = true; }
+  else autoMap();
 }
 async function tick(){ try { await refresh(); } catch(e){} }
 initMap(); tick(); setInterval(tick, 2000);

@@ -47,7 +47,7 @@
     var rph = o.restaurant_phone ? '<a href="tel:'+digits(o.restaurant_phone)+'">'+esc(o.restaurant_phone)+'</a>' : '';
     var times = (o.timeline||[]).map(function(x){ return esc(x.time)+' &nbsp;'+esc(x.label); }).join('<br>');
     var pay = money('Food', o.subtotal) + money('Tax', o.tax) + money('Delivery fee', o.fee) + money('Service fee', o.service) +
-              money('Tip', o.tip) + (o.discount_note ? '<div class="ovmoney"><span>Discount</span><span>'+esc(o.discount_note)+'</span></div>' : '') +
+              money('Tip'+((o.tip_pct!==null && o.tip_pct!==undefined && o.tip_cents) ? ' ('+o.tip_pct+'% of food)' : ''), o.tip) + (o.discount_note ? '<div class="ovmoney"><span>Discount</span><span>'+esc(o.discount_note)+'</span></div>' : '') +
               '<div class="ovmoney ovtotal"><span>Total</span><span>'+esc(o.total||'')+'</span></div>';
     return '<div class="ovhead"><div><div class="ovnum">Order '+esc(num)+(o.ref?' <span class="pill grey">#'+esc(o.ref)+'</span>':'')+'</div>'+
         (sub ? '<div class="muted small">'+esc(sub)+'</div>' : '')+

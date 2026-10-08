@@ -3169,6 +3169,7 @@ def order_dict(o):
         "refunded_cents": int(o["refunded_cents"] or 0),
         "refund_note": o["refund_note"] or "",
         "tip_cents": int(o["tip_cents"] or 0),
+        "tip_pct": (int(round(int(o["tip_cents"] or 0) * 100.0 / int(o["subtotal_cents"]))) if int(o["subtotal_cents"] or 0) > 0 else None),
         "tip_sig": o["tip_sig"] or "",
         "tip_signed_at": o["tip_signed_at"] or "",
         "tip_declined": bool(o["tip_declined"]),
@@ -5203,7 +5204,12 @@ def checkout():
                             % (miles, r["name"], r["name"], rules["max_miles"])}), 400
     tax = int(round(subtotal * setting("tax_rate_bp") / 10000.0))
     service = int(round(subtotal * setting("service_fee_bp") / 10000.0))
-    tip = int(payload.get("tip_cents", 0))
+    try:
+        tip = int(round(float(payload.get("tip_cents", 0) or 0)))
+    except Exception:
+        return jsonify({"ok": False, "error": "Type a tip amount, like 5.00."}), 400
+    if tip < 0:
+        return jsonify({"ok": False, "error": "The tip can't be a negative amount."}), 400
     total = subtotal + fee + ifee + tax + service + tip
     # rewards account, rewards, gift card and saved card
     cr = checkout_credits(payload, placed_by, dg, subtotal, total)
@@ -7125,7 +7131,8 @@ def api_order_edit():
     ifee = item_fees(items)
     fee = o["fee_cents"] if data.get("fee_cents") in (None, "") else int(round(float(data["fee_cents"])))
     tip = o["tip_cents"] if data.get("tip_cents") in (None, "") else int(round(float(data["tip_cents"])))
-    fee, tip = max(0, fee), max(0, tip)
+    if fee < 0 or tip < 0:
+        return jsonify({"ok": False, "error": "The delivery fee and tip can't be negative."}), 400
     tax = int(round(subtotal * setting("tax_rate_bp") / 10000.0))
     service = int(round(subtotal * setting("service_fee_bp") / 10000.0))
     disc = min(order_discount(o), subtotal + fee + ifee + tax + service)
