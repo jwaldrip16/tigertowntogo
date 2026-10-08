@@ -43,7 +43,7 @@
     const msg = box.querySelector('#ppcfMsg'), go = box.querySelector('#ppcfGo');
     function say(t, bad){ msg.textContent = t; msg.style.color = bad ? '#c0392b' : ''; }
     let fields = [];
-    let approving = false, done = false;
+    let approving = false, done = false, lastErr = '';
     function close(){
       // shut PayPal's card boxes down properly so the next card form starts clean
       fields.forEach(function(f){ try { f.close(); } catch(e){} });
@@ -54,13 +54,13 @@
     loadSdk(o.code).then(function(pp){
       if (!document.body.contains(box)) return;
       function failed(r){
-        say((r && r.error) || 'The card did not go through. Check the name, number, date, code and ZIP, or try another card.', true);
+        say((r && r.error) || lastErr || 'The card did not go through. Check the name, number, date, code and ZIP, or try another card.', true);
         go.disabled = false; go.textContent = 'Run card';
       }
       const cf = pp.CardFields({
         createOrder: async function(){
           const r = await jpost('/api/paypal/create', {code: o.code, card: true});
-          if (!r || !r.ok){ say((r && r.error) || 'Could not start the payment.', true); throw new Error('create'); }
+          if (!r || !r.ok){ lastErr = (r && r.error) || 'Could not start the payment.'; say(lastErr, true); throw new Error('create'); }
           return r.id;
         },
         onApprove: async function(data){
@@ -69,7 +69,7 @@
           const r = await jpost('/api/paypal/approve', {code: o.code, id: data.orderID});
           approving = false;
           if (r && (r.ok || r.already_paid)) done = true;
-          if (!r || !r.ok){ failed(r); return; }
+          if (!r || !r.ok){ lastErr = (r && r.error) || ''; failed(r); return; }
           done = true;
           say('Card accepted. ' + r.held + ' held on the card.');
           go.textContent = 'Done';
@@ -98,13 +98,13 @@
       go.onclick = function(){
         const zip = box.querySelector('#ppcfZip').value.trim();
         if (zip && !/^\d{5}(-?\d{4})?$/.test(zip)){ say('The billing ZIP is 5 digits.', true); return; }
-        go.disabled = true; go.textContent = 'Running...'; say('');
+        go.disabled = true; go.textContent = 'Running...'; say(''); lastErr = '';
         const args = zip ? {billingAddress: {postalCode: zip, countryCode: 'US'}} : undefined;
         cf.submit(args).catch(function(){
           // PayPal can report an error after the card was already accepted; only complain if it really failed.
           setTimeout(function(){
             if (done || approving) return;
-            say('Fix the card details and try again.', true); go.disabled = false; go.textContent = 'Run card';
+            say(lastErr || 'Fix the card details and try again.', true); go.disabled = false; go.textContent = 'Run card';
           }, 2500);
         });
       };

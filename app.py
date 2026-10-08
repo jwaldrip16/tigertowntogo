@@ -4411,7 +4411,14 @@ def _pp_create(o, b, kind, acct):
         if b.get("card") and b.get("no_save"):
             pass      # second try after PayPal turned down saving the card: just take the payment
         else:
-            body["payment_source"] = (pp_vault_source(o) or pp_vault_any("card")) if b.get("card") else pp_vault_any("paypal", o)
+            if b.get("card"):
+                # Typed cards: only ask PayPal to keep the card when the customer ticked Save this card.
+                # Saving makes PayPal run extra name/ZIP checks that turn down good cards.
+                vs = pp_vault_source(o)
+                if vs:
+                    body["payment_source"] = vs
+            else:
+                body["payment_source"] = pp_vault_any("paypal", o)
     plain = {k: v for k, v in body.items() if k != "payment_source"}
     if "paypal" in (body.get("payment_source") or {}):
         body.pop("application_context", None)     # PayPal wants its settings inside payment_source then
@@ -4483,7 +4490,7 @@ def _pp_approve(o, b, ppid, acct):
         msg = dec or pp_err(j, "The payment did not go through.")
         db().execute("UPDATE orders SET pp_error=? WHERE id=?", (msg[:300], o["id"]))
         db().commit()
-        log("payment", o["code"] + " card declined: " + msg)
+        log("payment", o["code"] + " card not accepted: " + msg + " [PayPal status %s, debug %s]" % (st, (j or {}).get("debug_id", "")))
         return jsonify({"ok": False, "declined": bool(dec), "error": msg}), 400
     cents = int(round(float(auth["amount"]["value"]) * 100))
     src = next(iter(j.get("payment_source") or {"paypal": 1}))
