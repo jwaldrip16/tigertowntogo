@@ -15,8 +15,8 @@
   <label>Restaurant city</label><input name="rest_city" value="{{ f.get('rest_city','') }}" required>
   <label>Restaurant state</label><select name="rest_state">{% for st in states %}<option {{ 'selected' if f.get('rest_state', 'AL') == st else '' }}>{{ st }}</option>{% endfor %}</select>
   <label>Restaurant ZIP</label><input name="rest_zip" maxlength="10" inputmode="numeric" value="{{ f.get('rest_zip','') }}" required>
-  <label>Area</label><select name="region"><option value="">Pick one</option><option value="any" {{ 'selected' if f.get('region') == 'any' else '' }}>Not sure</option>
-    {% for g in regions %}<option value="{{ g.id }}" {{ 'selected' if f.get('region') == (g.id|string) else '' }}>{{ g.name }}</option>{% endfor %}</select>
+  <label>Area</label><select name="region" required>{% if regions|length != 1 %}<option value="">Pick one</option>{% endif %}
+    {% for g in regions %}<option value="{{ g.id }}" {{ 'selected' if f.get('region') == (g.id|string) or regions|length == 1 else '' }}>{{ g.name }}</option>{% endfor %}</select>
   <label>Restaurant phone number</label>
   <div class="phone3">(<input name="phone1" maxlength="3" inputmode="numeric" value="{{ f.get('phone1','') }}">) <input name="phone2" maxlength="3" inputmode="numeric" value="{{ f.get('phone2','') }}"> - <input name="phone3" maxlength="4" inputmode="numeric" value="{{ f.get('phone3','') }}"></div>
   <label>Restaurant fax number (optional)</label>

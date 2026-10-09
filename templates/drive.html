@@ -21,8 +21,8 @@
     <select name="car_make"><option value="">Make</option>{% for m in makes %}<option {{ 'selected' if f.get('car_make') == m else '' }}>{{ m }}</option>{% endfor %}</select>
     <input name="car_model" placeholder="Model" value="{{ f.get('car_model','') }}"></div>
   <label>Where do you want to drive?</label>
-  <div class="regchecks"><label><input type="checkbox" name="regions" value="any" {{ 'checked' if 'any' in f.getlist('regions') or not f.getlist else '' }}> Any area</label>
-    {% for g in regions %}<label><input type="checkbox" name="regions" value="{{ g.id }}" {{ 'checked' if (g.id|string) in f.getlist('regions') else '' }}> {{ g.name }}</label>{% endfor %}</div>
+  <div class="regchecks">
+    {% for g in regions %}<label><input type="checkbox" name="regions" value="{{ g.id }}" {{ 'checked' if (g.id|string) in f.getlist('regions') or regions|length == 1 else '' }}> {{ g.name }}</label>{% endfor %}</div>
   <label>Anything else we should know? (optional)</label><textarea name="note" rows="2" maxlength="300">{{ f.get('note','') }}</textarea>
   <button class="btn primary applybtn">Submit your application</button>
 </form>

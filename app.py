@@ -17709,13 +17709,13 @@ def drive_apply():
                 or not f.get("car_make") or not (f.get("car_model") or "").strip():
             errs.append("Fill in your car's color, year, make and model.")
         regs = f.getlist("regions")
-        if not regs:
-            errs.append("Pick the area you want to drive in, or Any area.")
+        if _region_choices() and not _picked_region_ids(regs):
+            errs.append("Pick the area you want to drive in.")
         if not errs and not _apply_rate_ok():
             errs.append("Too many applications from this device. Try again later.")
         if not errs:
             _ids = _picked_region_ids(regs)
-            rids = "any" if ("any" in regs or not _ids) else ",".join(str(i) for i in _ids)
+            rids = ",".join(str(i) for i in _ids) if _ids else "any"
             data = {k: (f.get(k) or "").strip()[:120] for k in ("first_name", "last_name", "dob", "address", "email",
                                                                    "car_color", "car_year", "car_make", "car_model", "note")}
             db().execute("""INSERT INTO applications (kind, name, phone, email, region_ids, data, created_at)
@@ -17749,8 +17749,8 @@ def partner_apply():
             errs.append("The fax number needs 10 digits, or leave it blank.")
         if "@" not in (f.get("email") or ""):
             errs.append("Enter your email address.")
-        if not f.get("region"):
-            errs.append("Pick the area the restaurant is in, or Not sure.")
+        if _region_choices() and not _picked_region_ids([f.get("region")]):
+            errs.append("Pick the area the restaurant is in.")
         if not errs and not _apply_rate_ok():
             errs.append("Too many applications from this device. Try again later.")
         if not errs:
