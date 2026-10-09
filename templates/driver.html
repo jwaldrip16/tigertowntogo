@@ -154,8 +154,9 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
      z-index:60;box-shadow:0 -6px 24px rgba(0,0,0,.35);max-height:92vh;overflow:auto">
   <div class="row"><b>Tip for <span id="tipCode"></span></b>
     <span class="muted small">order total <span id="tipTotal"></span></span></div>
-  <p class="small muted">No tip was added online. Hand the phone to the customer: the tip
-     charges to the same card they paid with, and their signature is kept with the order.</p>
+  <p class="small muted">No tip was added online. Hand the phone to the customer. They can add a tip
+     (it charges to the same card they paid with) or leave no tip. Either way they sign below,
+     and their signature is kept on file with the order.</p>
   <div class="row" id="tipPct" style="gap:6px;flex-wrap:wrap"></div>
   <label>Tip amount ($)</label>
   <input id="tipAmt" type="number" step="0.01" min="0" inputmode="decimal" placeholder="0.00">
@@ -165,7 +166,7 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
   <div class="row" style="gap:6px;flex-wrap:wrap">
     <button class="btn tiny" onclick="clearPad()">Clear signature</button>
     <button class="btn tiny go" onclick="saveTip()">Charge tip and complete</button>
-    <button class="btn tiny" onclick="noTip()">No tip, complete</button>
+    <button class="btn tiny" onclick="noTip()">No tip, sign and complete</button>
     <button class="btn tiny" onclick="closeTip()">Back</button>
   </div>
   <div id="tipMsg" class="small muted"></div>
@@ -629,12 +630,17 @@ async function stage(id, st, code){
   if (st === 'delivered'){
     const o = (LAST_STACK||[]).filter(function(x){ return x.id === id; })[0];
     // no tip online on a card order: ask at the door and take a signature
-    if (o && !o.cash && !o.tip_cents && !o.tip_declined && !o.tip_sig){
+    if (o && !o.cash && !o.tip_cents && !o.tip_sig){
       openTip(o); return;
     }
     if (!confirm((o && o.cash && !o.paid ? 'Cash order: did you collect '+o.total+'?\n\n' : '')+'Complete '+(o ? ordBoth(o) : code)+'? It leaves your run and moves to completed orders.')) return;
   }
-  await jpost('/api/order/status', {order_id:id, dispatch_status:st});
+  const sres = await jpost('/api/order/status', {order_id:id, dispatch_status:st});
+  if (sres && sres.need_signature){
+    const o2 = (LAST_STACK||[]).filter(function(x){ return x.id === id; })[0];
+    if (o2){ openTip(o2); return; }
+    alert(sres.error); return;
+  }
   state();
 }
 function openTip(o){
@@ -692,8 +698,12 @@ async function saveTip(){
 }
 async function noTip(){
   if(!TIP_ORDER) return;
+  const msg = document.getElementById('tipMsg');
+  if(!SIG_DREW){ msg.textContent = 'No tip is fine, but the customer still has to sign in the box. The signature is kept on file.'; return; }
   const id = TIP_ORDER.id;
-  await jpost('/api/driver/tip-sign', {order_id:id, declined:true});
+  msg.textContent = 'Saving the signature...';
+  const res = await jpost('/api/driver/tip-sign', {order_id:id, declined:true, signature: SIG.c.toDataURL('image/png')});
+  if(!res.ok){ msg.textContent = res.error || 'The signature did not save. Have the customer sign again.'; return; }
   closeTip();
   await jpost('/api/order/status', {order_id:id, dispatch_status:'delivered'});
   state();

@@ -2,7 +2,7 @@
 import urllib.error
 import base64, contextlib, contextvars, difflib, hashlib, os, json, math, re, secrets, sqlite3, threading, time, datetime as dt, urllib.parse, urllib.request
 import dbx
-from flask import Flask, g, has_request_context, request, session, redirect, url_for, render_template, render_template_string, jsonify, send_from_directory, flash, get_flashed_messages, Response
+from flask import Flask, g, has_request_context, request, session, redirect, url_for, render_template, render_template_string, jsonify, send_from_directory, flash, get_flashed_messages, Response, make_response
 import presets
 
 # ---------------------------------------------------------------- local time
@@ -477,6 +477,7 @@ def init_db():
     ensure_column(con, "orders", "refund_note", "TEXT")
     ensure_column(con, "orders", "tip_sig", "TEXT")
     ensure_column(con, "orders", "tip_signed_at", "TEXT")
+    ensure_column(con, "orders", "tip_sig_data", "TEXT")   # the signature PNG itself, so a copy is always on file
     ensure_column(con, "orders", "tip_charge_id", "TEXT")
     ensure_column(con, "orders", "tip_declined", "INTEGER NOT NULL DEFAULT 0")
     con.execute("UPDATE orders SET payment_status='unpaid' "
@@ -6815,6 +6816,9 @@ def api_order_status():
     if session.get("driver_id") and not dispatcher_required() and not session.get("restaurant_id"):
         if o["driver_id"] != session["driver_id"]:
             return jsonify({"ok": False, "error": "not your order"}), 403
+        if data.get("dispatch_status") == "delivered" and needs_door_signature(o):
+            return jsonify({"ok": False, "need_signature": True,
+                            "error": "No tip on this order, so the customer has to sign before you complete it."}), 400
         if data.get("dispatch_status") == "received" and o["dispatch_status"] == "assigned":
             rc = region_conflict(session["driver_id"], o["region_id"], o["id"])
             if rc:
@@ -7250,6 +7254,37 @@ def api_refund():
     return jsonify({"ok": True, "refunded": money(total_ref), "left": money(paid - total_ref),
                     "refund_id": rid, "cancelled": cancelled})
 
+@app.get("/dispatch/signature/<int:oid>")
+def dispatch_signature(oid):
+    """The customer's signature on an order (tip or no tip). Dispatch only."""
+    if not dispatcher_required():
+        return redirect("/dispatch/login")
+    o = db().execute("SELECT code, tip_sig_data FROM orders WHERE id=?", (oid,)).fetchone()
+    if not o:
+        return "No such order.", 404
+    raw = None
+    if _rv(o, "tip_sig_data"):
+        try:
+            raw = base64.b64decode(o["tip_sig_data"])
+        except Exception:
+            raw = None
+    if raw is None:
+        p = os.path.join(APP_DIR, "static", "signatures", o["code"] + ".png")
+        if os.path.exists(p):
+            with open(p, "rb") as fh:
+                raw = fh.read()
+    if raw is None:
+        return "No signature on file for this order.", 404
+    resp = make_response(raw)
+    resp.headers["Content-Type"] = "image/png"
+    resp.headers["Content-Disposition"] = 'inline; filename="signature-%s.png"' % o["code"]
+    resp.headers["Cache-Control"] = "private, no-store"
+    return resp
+
+def needs_door_signature(o):
+    """A card order with no tip and no signature yet: the driver must get the customer to sign."""
+    return not is_cash(o) and not int(o["tip_cents"] or 0) and not (o["tip_sig"] or "")
+
 @app.post("/api/driver/tip-sign")
 def api_tip_sign():
     """Customer adds a tip at the door and signs for it on the driver's phone."""
@@ -7261,30 +7296,41 @@ def api_tip_sign():
     if not dispatcher_required():
         if not did or o["driver_id"] != did:
             return jsonify({"ok": False, "error": "not your order"}), 403
+    sig = (data.get("signature") or "").strip()
+    if not sig.startswith("data:image") or "," not in sig:
+        return jsonify({"ok": False, "error": "Have the customer sign in the box first. "
+                        "A signature is kept on file for every order with no tip."}), 400
+    try:
+        raw = base64.b64decode(sig.split(",", 1)[1])
+        if len(raw) < 100 or len(raw) > 2000000:
+            raise ValueError("bad size")
+    except Exception:
+        return jsonify({"ok": False, "error": "That signature did not save. Have the customer sign again."}), 400
+    # the PNG is kept in the database (always on file, survives redeploys) and as a file when the disk allows
+    try:
+        folder = os.path.join(APP_DIR, "static", "signatures")
+        os.makedirs(folder, exist_ok=True)
+        with open(os.path.join(folder, o["code"] + ".png"), "wb") as fh:
+            fh.write(raw)
+    except Exception:
+        pass
+    sig_b64 = base64.b64encode(raw).decode("ascii")
+    sig_url = "/dispatch/signature/%d" % o["id"]
     if data.get("declined"):
-        db().execute("UPDATE orders SET tip_declined=1 WHERE id=?", (o["id"],))
+        db().execute("""UPDATE orders SET tip_declined=1, tip_sig=?, tip_sig_data=?, tip_signed_at=?
+                        WHERE id=?""", (sig_url, sig_b64, now(), o["id"]))
         db().commit()
+        log("tip", "no tip on " + o["code"] + ": customer signed, signature on file")
         return jsonify({"ok": True, "tip": money(o["tip_cents"]), "declined": True})
     cents = int(round(float(data.get("cents") or 0)))
     if cents <= 0:
         return jsonify({"ok": False, "error": "Enter a tip amount."}), 400
-    sig = (data.get("signature") or "").strip()
-    if not sig.startswith("data:image"):
-        return jsonify({"ok": False, "error": "Have the customer sign before you save."}), 400
     if o["tip_charge_id"]:
         return jsonify({"ok": False, "error": "A tip was already signed for on this order."}), 400
-    folder = os.path.join(APP_DIR, "static", "signatures")
-    os.makedirs(folder, exist_ok=True)
-    path = os.path.join(folder, o["code"] + ".png")
-    try:
-        with open(path, "wb") as fh:
-            fh.write(base64.b64decode(sig.split(",", 1)[1]))
-    except Exception:
-        return jsonify({"ok": False, "error": "That signature did not save."}), 400
     charge = ""
     db().execute("""UPDATE orders SET tip_cents=tip_cents+?, total_cents=total_cents+?,
-                    tip_sig=?, tip_signed_at=?, tip_charge_id=?, tip_declined=0 WHERE id=?""",
-                 (cents, cents, "/static/signatures/" + o["code"] + ".png", now(),
+                    tip_sig=?, tip_sig_data=?, tip_signed_at=?, tip_charge_id=?, tip_declined=0 WHERE id=?""",
+                 (cents, cents, sig_url, sig_b64, now(),
                   charge or "signed", o["id"]))
     db().commit()
     log("tip", money(cents) + " tip signed at the door on " + o["code"])

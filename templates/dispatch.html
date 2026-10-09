@@ -1138,7 +1138,7 @@ function payPill(o){
   if(o.balance_cents > 0 && o.house) s += ' <span class="pill grey">'+o.balance+' more on house account</span>';
   else if(o.balance_cents > 0) s += ' <span class="pill red">balance due '+o.balance+'</span>';
   else if(o.balance_cents < 0) s += ' <span class="pill amber">overcharged '+o.balance+'</span>';
-  if(o.tip_sig) s += ' <span class="pill green">tip signed</span>';
+  if(o.tip_sig) s += o.tip_cents ? ' <span class="pill green">tip signed</span>' : ' <span class="pill green">no tip, signed</span>';
   if(o.pp && o.pp.state === 'authorized') s += ' <span class="pill amber">'+o.pp.held+' held on '+(o.pp.source||'PayPal')+', charges after delivery</span>';
   if(o.pp && o.pp.state === 'captured') s += ' <span class="pill green">charged '+o.pp.charged+'</span>';
   if(o.pp && o.pp.error) s += ' <span class="pill red">PayPal: '+esc(o.pp.error)+'</span>';
