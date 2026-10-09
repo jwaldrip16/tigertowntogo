@@ -1,7 +1,7 @@
 {% extends "base.html" %}{% block title %}Best shifts{% endblock %}{% block body %}
 <a class="back" href="/dispatch">Back to board</a>
-<h1>Best shifts</h1>
-<p class="muted small">Which day and time pays drivers best in each region, from delivered orders in the last few weeks. Pay per hour is driver pay (trip pay sent, else your pay rule) divided by the hours drivers were online then. A shift with too few online hours shows an estimate for one driver covering it alone. Times are the region's local time.</p>
+<h1>Best shifts by hour</h1>
+<p class="muted small">Which day and hour pays drivers best in each region, from delivered orders in the last few weeks. Pay per hour is driver pay (trip pay sent, else your pay rule) divided by the hours drivers were online then. An hour with too few online hours shows an estimate for one driver covering it alone. Times are the region's local time.</p>
 <form method="get" class="row gap" style="flex-wrap:wrap;margin:8px 0">
   <select name="region">{% for id, name in regs %}<option value="{{ id }}" {{ 'selected' if id == rid else '' }}>{{ name }}</option>{% endfor %}</select>
   <select name="weeks">{% for w in (4, 8, 12, 26) %}<option value="{{ w }}" {{ 'selected' if w == st.weeks else '' }}>Last {{ w }} weeks</option>{% endfor %}</select>
@@ -13,9 +13,9 @@
 <div class="panel" style="margin-bottom:12px">
   <h2 style="margin-top:0">Best shifts in {{ rname }}</h2>
   <ol style="margin:0;padding-left:20px">{% for r in st.best %}
-    <li style="margin:4px 0"><b>{{ r.day }} {{ r.block|lower }}</b> ({{ r.hours }}): about <b>{{ r.per_hr }}/hr</b>{% if not r.measured %} (estimate){% endif %}, {{ r.per_shift }} orders a shift, {{ r.avg_pay }} pay and {{ r.avg_tip }} tip per order</li>
+    <li style="margin:4px 0"><b>{{ r.day }} {{ r.hours }}</b>: about <b>{{ r.per_hr }}/hr</b>{% if not r.measured %} (estimate){% endif %}, {{ r.per_shift }} orders a week, {{ r.avg_pay }} pay and {{ r.avg_tip }} tip per order</li>
   {% endfor %}</ol>
-  {% if st.worst %}<p class="muted small" style="margin-bottom:0">Slowest: {% for r in st.worst %}{{ r.day[:3] }} {{ r.block|lower }} (about {{ r.per_hr }}/hr){{ ', ' if not loop.last else '' }}{% endfor %}</p>{% endif %}
+  {% if st.worst %}<p class="muted small" style="margin-bottom:0">Slowest: {% for r in st.worst %}{{ r.day[:3] }} {{ r.hours }} (about {{ r.per_hr }}/hr){{ ', ' if not loop.last else '' }}{% endfor %}</p>{% endif %}
 </div>
 <form method="post" action="/dispatch/shift-stats/send" class="panel" style="margin-bottom:12px">
   <input type="hidden" name="region" value="{{ rid }}"><input type="hidden" name="weeks" value="{{ st.weeks }}">
@@ -24,12 +24,14 @@
   <button class="btn small primary" onclick="return confirm('Send this to every driver who works {{ rname }}?')">Send to {{ rname }} drivers</button>
   <span class="muted small">Drivers also see their regions' best shifts any time under Best shifts in the driver app.</span>
 </form>
-{% else %}<p class="muted">Not enough delivered orders yet in {{ rname }} to rank shifts. Each shift needs at least 3 orders in the time picked.</p>{% endif %}
-<div style="overflow-x:auto">
+{% else %}<p class="muted">Not enough delivered orders yet in {{ rname }} to rank shifts. Each hour needs at least 2 orders in the time picked.</p>{% endif %}
+{% if hours %}<div style="overflow-x:auto">
 <table class="small" style="border-collapse:collapse;min-width:560px">
-  <tr><th style="text-align:left;padding:4px 6px">Day</th>{% for b in blocks %}<th style="padding:4px 6px">{{ b[0] }}</th>{% endfor %}</tr>
-  {% for d in days %}{% set di = loop.index0 %}<tr style="border-top:1px solid #e5e7eb"><td style="padding:4px 6px"><b>{{ d[:3] }}</b></td>
-    {% for b in blocks %}{% set bi = loop.index0 %}{% set c = st.grid|selectattr('wd', 'equalto', di)|selectattr('bi', 'equalto', bi)|list %}
+  <tr><th style="text-align:left;padding:4px 6px">Hour</th>{% for d in days %}<th style="padding:4px 6px">{{ d[:3] }}</th>{% endfor %}</tr>
+  {% for h, label in hours %}<tr style="border-top:1px solid #e5e7eb"><td style="padding:4px 6px;white-space:nowrap"><b>{{ label }}</b></td>
+    {% for d in days %}{% set di = loop.index0 %}{% set c = st.grid|selectattr('wd', 'equalto', di)|selectattr('bi', 'equalto', h)|list %}
     <td style="padding:4px 6px;text-align:center">{% if c and c[0].orders %}<b>{{ c[0].per_hr }}</b>/hr<br><span class="muted">{{ c[0].per_shift }} orders</span>{% else %}<span class="muted">none</span>{% endif %}</td>{% endfor %}</tr>{% endfor %}
 </table></div>
+<p class="muted small">Hours with no delivered orders in the time picked are left out. Orders a week is the average for that hour.</p>
+{% endif %}
 {% endblock %}

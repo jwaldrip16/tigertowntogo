@@ -35,6 +35,11 @@ until you approve them, and anything you add or change is approved straight away
   <div id="stShort"></div>
   <div style="overflow-x:auto"><table class="weekgrid" id="stGrid"></table></div>
   <p class="muted small">Red is short, green is covered, yellow has 2 or more extra drivers. Hover a box to see who is on and the busiest hour.</p>
+  <div id="stOwner" class="row" style="display:none;gap:12px;flex-wrap:wrap;align-items:center">
+    <button class="btn tiny" type="button" onclick="stEditOpen()">Change shift hours</button>
+    <label class="small" style="display:flex;gap:6px;align-items:center"><input type="checkbox" id="stShare" style="width:auto" onchange="stShare(this.checked)"> Show drivers needed in the driver app</label>
+  </div>
+  <div id="stEdit" class="panel" style="display:none;margin-top:8px"></div>
 </div>
 
 <h2 class="mt">Weekly submissions</h2>
@@ -70,7 +75,7 @@ until you approve them, and anything you add or change is approved straight away
       <span class="muted small" id="actLabel"></span>
       <button class="btn tiny" onclick="actWeek(7)">Week &rarr;</button></div>
   </div>
-  <p class="muted small">Time each driver was actually online or on break, recorded live when dispatch changes their status. Click a name for each stretch. Scheduled is their approved hours for the week.</p>
+  <p class="muted small">Time each driver was actually online or on break, recorded live when dispatch changes their status. Click a name for each stretch. Owners can delete a whole week or one stretch. Scheduled is their approved hours for the week.</p>
   <div style="overflow-x:auto"><table class="tbl" id="actTbl"></table></div>
   <div id="actSessions"></div>
 </div>
@@ -98,12 +103,13 @@ until you approve them, and anything you add or change is approved straight away
     WEEK = r.week_start;
     document.getElementById('actLabel').textContent = r.week_label;
     let h = '<tr><th>Name</th><th>Now</th>'+r.days.map(d=>'<th>'+e(d)+'</th>').join('')+
-            '<th>Total online</th><th>Break</th><th>Scheduled</th></tr>';
+            '<th>Total online</th><th>Break</th><th>Scheduled</th>'+(r.can_delete?'<th></th>':'')+'</tr>';
     for(const p of r.people){
       h += '<tr><td><a href="#" onclick="actOpen('+p.id+');return false">'+e(p.name)+'</a></td><td>'+
            (p.now ? '<span class="pill '+(p.now==='On break'?'amber':'green')+'">'+e(p.now)+'</span>' : '<span class="muted small">off</span>')+'</td>'+
            p.days.map(d=>'<td>'+e(d.online)+(d.break?'<div class="muted small">break '+e(d.break)+'</div>':'')+'</td>').join('')+
-           '<td><b>'+e(p.total)+'</b></td><td>'+e(p.break_total)+'</td><td>'+(e(p.scheduled)||'<span class="muted small">none</span>')+'</td></tr>';
+           '<td><b>'+e(p.total)+'</b></td><td>'+e(p.break_total)+'</td><td>'+(e(p.scheduled)||'<span class="muted small">none</span>')+'</td>'+
+           (r.can_delete ? '<td>'+(p.sessions && p.sessions.length ? '<button class="btn tiny danger" onclick="actDelWeek('+p.id+')">Delete week</button>' : '')+'</td>' : '')+'</tr>';
     }
     document.getElementById('actTbl').innerHTML = h;
     const p = r.people.find(x=>x.id===OPEN);
@@ -230,12 +236,54 @@ load(); setInterval(load, 15000);
 
 
 function stEsc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+let ST = null;
+function stHourSel(v){
+  let h = '<select class="stH">';
+  for(let i=0;i<24;i++){ const l = (i%12===0?12:i%12) + (i<12?' AM':' PM'); h += '<option value="'+i+'"'+(i===v?' selected':'')+'>'+l+'</option>'; }
+  return h + '</select>';
+}
+function stRow(b){
+  return '<div class="row stRow" style="gap:6px;margin:4px 0;align-items:center"><input class="stN" maxlength="30" value="'+stEsc(b.name)+'" placeholder="Shift name" style="max-width:160px">'+
+    stHourSel(b.start)+'<span class="small">to</span>'+stHourSel(b.end)+
+    '<button class="btn tiny" type="button" onclick="this.parentNode.remove()">Remove</button></div>';
+}
+window.stEditOpen = function(){
+  const box = document.getElementById('stEdit');
+  if(box.style.display !== 'none'){ box.style.display = 'none'; return; }
+  box.innerHTML = '<h3 style="margin-top:0">Shift hours for '+stEsc(ST.region_name)+'</h3>'+
+    '<p class="muted small">Example: Lunch 11 AM to 4 PM, Dinner 4 PM to 9 PM. A shift that ends after midnight, like 9 PM to 2 AM, counts as that night. Drivers needed by shift uses these hours for this region.</p>'+
+    '<div id="stRows">'+ST.block_defs.map(stRow).join('')+'</div>'+
+    '<div class="row" style="gap:6px;margin-top:6px"><button class="btn tiny" type="button" onclick="stAdd()">Add a shift</button>'+
+    '<button class="btn tiny primary" type="button" onclick="stSave(false)">Save shift hours</button>'+
+    (ST.custom ? '<button class="btn tiny" type="button" onclick="stSave(true)">Go back to the standard shifts</button>' : '')+'</div>';
+  box.style.display = '';
+};
+window.stAdd = function(){ document.getElementById('stRows').insertAdjacentHTML('beforeend', stRow({name:'', start:11, end:16})); };
+window.stSave = async function(reset){
+  const blocks = reset ? [] : [...document.querySelectorAll('#stRows .stRow')].map(r=>{
+    const s = r.querySelectorAll('.stH'); return {name: r.querySelector('.stN').value, start: +s[0].value, end: +s[1].value};
+  });
+  if(!reset && !blocks.length){ alert('Add at least one shift, or go back to the standard shifts.'); return; }
+  const j = await fetch('/api/dispatch/shift-blocks', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({region: ST.region_id, blocks: blocks})}).then(x=>x.json()).catch(()=>({ok:false}));
+  if(!j.ok){ alert(j.error || 'Could not save the shift hours.'); return; }
+  document.getElementById('stEdit').style.display = 'none';
+  loadStaff();
+};
+window.stShare = async function(on){
+  const j = await fetch('/api/dispatch/staffing-share', {method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({on: on})}).then(x=>x.json()).catch(()=>({ok:false}));
+  if(!j.ok){ alert(j.error || 'Could not change that.'); loadStaff(); }
+};
 async function loadStaff(){
   const sel = document.getElementById('stRegion');
   const q = '?week=' + encodeURIComponent(WEEK || '') + '&weeks=' + document.getElementById('stWeeks').value +
             (sel.value ? '&region=' + sel.value : '');
   const r = await jget('/api/dispatch/staffing' + q);
   if(!r || !r.ok) return;
+  ST = r;
+  document.getElementById('stOwner').style.display = r.owner ? 'flex' : 'none';
+  document.getElementById('stShare').checked = !!r.share_driver;
   sel.innerHTML = r.regions.map(x=>'<option value="'+x.id+'"'+(x.id===r.region_id?' selected':'')+'>'+stEsc(x.name)+'</option>').join('');
   sel.style.display = r.regions.length > 1 ? '' : 'none';
   document.getElementById('stNote').textContent = r.has_history
@@ -254,7 +302,7 @@ async function loadStaff(){
   }
   let html = '<tr><th>Shift</th>' + r.days.map(d=>'<th>'+d.day.slice(0,3)+' '+stEsc(d.date_label)+'</th>').join('') + '</tr>';
   r.blocks.forEach((bn, bi)=>{
-    html += '<tr><th>'+stEsc(bn)+'<br><span class="muted small">'+stEsc(r.days[0].blocks[bi].hours)+'</span></th>';
+    html += '<tr><th>'+stEsc(bn)+'<br><span class="muted small">'+stEsc(r.block_defs[bi].hours)+'</span></th>';
     r.days.forEach(d=>{
       const b = d.blocks[bi];
       const tip = (b.drivers.length ? 'On: ' + b.drivers.join(', ') : 'Nobody scheduled') +

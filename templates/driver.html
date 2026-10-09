@@ -763,17 +763,27 @@ function dtab(which){
   if (which==='chat'){ clearChatBadge(); chat(); }
   if (which==='best') bestShifts();
 }
+function neededHtml(n, e){
+  // Drivers needed by shift, when the owner shares it with the driver app (no names, just the gaps)
+  if (!n) return '';
+  let h = '<h4 style="margin:12px 0 4px">Drivers needed, ' + e(n.week_label) + '</h4>';
+  if (!n.has_history) return h + '<p class="muted small">Not enough deliveries yet to work out how many drivers each shift needs.</p>';
+  h += n.short.length
+    ? '<ul style="margin:0;padding-left:20px">' + n.short.map(x => '<li style="margin:4px 0;color:#8a2020"><b>' + e(x.day.slice(0,3) + ' ' + x.date_label + ' ' + x.block.toLowerCase()) + '</b> (' + e(x.hours) + '): ' + x.gap + ' more driver' + (x.gap === 1 ? '' : 's') + ' needed' + (x.gap_at ? ', busiest around ' + e(x.gap_at) : '') + '</li>').join('') + '</ul><p class="muted small">Ask for these hours under Schedule.</p>'
+    : '<p class="muted small">Every shift that week has enough drivers.</p>';
+  return h;
+}
 function bestShifts(){
   const box = document.getElementById('bestList');
   const e = s => String(s==null?'':s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
   fetch('/api/driver/shift-stats', {credentials:'same-origin'}).then(r => r.json()).then(function(j){
     if (!j.ok){ box.innerHTML = '<p class="muted">Could not load best shifts.</p>'; return; }
-    box.innerHTML = '<p class="muted small" style="margin-top:0">Where drivers earned the most per hour online, from the last 8 weeks of deliveries.</p>' +
+    box.innerHTML = '<p class="muted small" style="margin-top:0">The hours where drivers earned the most per hour online, from the last 8 weeks of deliveries.</p>' +
       (j.regions.length ? j.regions.map(function(g){
         return '<h3 style="margin:10px 0 4px">' + e(g.region) + '</h3>' + (g.best.length
-          ? '<ol style="margin:0;padding-left:20px">' + g.best.map(r => '<li style="margin:4px 0"><b>' + e(r.day) + ' ' + e(r.block.toLowerCase()) + '</b> (' + e(r.hours) + '): about <b>' + e(r.per_hr) + '/hr</b>' + (r.measured ? '' : ' (estimate)') + ', ' + r.per_shift + ' orders a shift</li>').join('') + '</ol>' +
-            (g.worst.length ? '<p class="muted small">Slowest: ' + g.worst.map(r => e(r.day.slice(0,3)) + ' ' + e(r.block.toLowerCase())).join(', ') + '</p>' : '')
-          : '<p class="muted small">Not enough deliveries here yet.</p>');
+          ? '<ol style="margin:0;padding-left:20px">' + g.best.map(r => '<li style="margin:4px 0"><b>' + e(r.day) + ' ' + e(r.hours) + '</b>: about <b>' + e(r.per_hr) + '/hr</b>' + (r.measured ? '' : ' (estimate)') + ', ' + r.per_shift + ' orders a week</li>').join('') + '</ol>' +
+            (g.worst.length ? '<p class="muted small">Slowest: ' + g.worst.map(r => e(r.day.slice(0,3)) + ' ' + e(r.hours)).join(', ') + '</p>' : '')
+          : '<p class="muted small">Not enough deliveries here yet.</p>') + neededHtml(g.needed, e);
       }).join('') : '<p class="muted">No regions yet.</p>');
   }).catch(function(){ box.innerHTML = '<p class="muted">Could not load best shifts.</p>'; });
 }

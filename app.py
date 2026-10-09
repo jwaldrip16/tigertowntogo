@@ -16527,15 +16527,58 @@ def _hr12(h):
     return ("12" if h % 12 == 0 else str(h % 12)) + (" AM" if h < 12 else " PM")
 
 def _shift_slot(t):
-    """Local datetime -> (weekday, block index). Hours before 6 AM count as the night before."""
+    """Local datetime -> (weekday, hour 6..29). Best shifts are worked out hour by hour;
+    hours before 6 AM count as the night before (1 AM Saturday is Friday night, hour 25)."""
     h = t.hour
     if h < 6:
         t = t - dt.timedelta(days=1)
-        return t.weekday(), len(SHIFT_BLOCKS) - 1
-    for i, (_n, a, b) in enumerate(SHIFT_BLOCKS):
-        if a <= h < b:
-            return t.weekday(), i
-    return t.weekday(), len(SHIFT_BLOCKS) - 1
+        h += 24
+    return t.weekday(), h
+
+def _hour_span(h):
+    return "%s to %s" % (_hr12(h), _hr12(h + 1))
+
+# Custom shift hours for Drivers needed by shift, per region (owner set). Hours run 6..30,
+# where 24..30 are after midnight (2 AM = 26), the same way the hourly counts work.
+def shift_blocks(rid=0):
+    rid = stats_root(rid)
+    try:
+        r = db().execute("SELECT value FROM settings WHERE key=?", ("shift_blocks_%d" % int(rid or 0),)).fetchone()
+        raw = json.loads(r["value"]) if r and r["value"] else None
+    except Exception:
+        raw = None
+    if raw:
+        try:
+            out = [(str(x[0])[:30], int(x[1]), int(x[2])) for x in raw]
+            if out and all(6 <= a < b <= 30 for _n, a, b in out):
+                return out
+        except Exception:
+            pass
+    return list(SHIFT_BLOCKS)
+
+def shift_blocks_custom(rid=0):
+    return shift_blocks(rid) != list(SHIFT_BLOCKS)
+
+def _norm_block(name, start, end):
+    """Clock hours (0-23) -> (name, a, b) on the 6..30 scale, or an error string."""
+    name = re.sub(r"\s+", " ", str(name or "")).strip()[:30]
+    if not name:
+        return "Give every shift a name."
+    try:
+        a, b = int(start), int(end)
+    except (TypeError, ValueError):
+        return "Pick a start and end time for " + name + "."
+    if not (0 <= a <= 23 and 0 <= b <= 23):
+        return "Pick a start and end time for " + name + "."
+    if a < 6:
+        a += 24
+    if b < 6:
+        b += 24
+    if b <= a:
+        b += 24
+    if b > 30:
+        return name + " can't run past 6 AM."
+    return (name, a, b)
 
 def shift_stats(rid, weeks=8):
     """Best shifts for one region (rid 0 = every order). Cached 10 minutes."""
@@ -16602,8 +16645,9 @@ def shift_stats(rid, weeks=8):
             cur = nxt
     rows = []
     for (wd, bi), v in slots.items():
-        name, a, b = SHIFT_BLOCKS[bi]
-        blen = b - a
+        a, b = bi, bi + 1
+        name = _hr12(a)
+        blen = 1
         n = v["orders"]
         avg = v["pay"] / n if n else 0
         per_hr = v["pay"] / v["dh"] if v["dh"] >= 1 else None
@@ -16614,7 +16658,7 @@ def shift_stats(rid, weeks=8):
                      "avg_pay": money(int(avg)), "avg_tip": money(int(v["tips"] / n)) if n else money(0),
                      "per_hr_cents": int(est), "per_hr": money(int(est)),
                      "driver_hours": round(v["dh"], 1), "measured": per_hr is not None,
-                     "enough": n >= 3})
+                     "enough": n >= 2})
     best = sorted([r for r in rows if r["enough"]], key=lambda r: -r["per_hr_cents"])
     out = {"region_id": int(rid or 0), "weeks": weeks, "orders": len(orders),
            "best": best[:6], "worst": list(reversed(best[-3:])) if len(best) > 6 else [],
@@ -16625,7 +16669,7 @@ def shift_stats(rid, weeks=8):
 def shift_summary(st, rname, n=4):
     if not st["best"]:
         return ""
-    parts = ["%s %s (%s): about %s/hr, %s orders a shift" % (r["day"][:3], r["block"].lower(), r["hours"], r["per_hr"], r["per_shift"])
+    parts = ["%s %s: about %s/hr, %s orders a week" % (r["day"][:3], r["hours"], r["per_hr"], r["per_shift"])
              for r in st["best"][:n]]
     return "Best shifts in %s, last %d weeks: " % (rname, st["weeks"]) + "; ".join(parts) + "."
 
@@ -16711,6 +16755,7 @@ def staffing_plan(rid, ws, weeks=8):
     rid = stats_root(rid)
     grp = stats_group(rid)
     rate = staff_rate()
+    blocks_def = shift_blocks(rid)
     con = db()
     nowdt = dt.datetime.now().replace(microsecond=0)
     start = (nowdt - dt.timedelta(days=7 * weeks)).isoformat(timespec="seconds")
@@ -16776,7 +16821,7 @@ def staffing_plan(rid, ws, weeks=8):
     for wd in range(7):
         date = ws + dt.timedelta(days=wd)
         blocks = []
-        for bi, (bname, a, b) in enumerate(SHIFT_BLOCKS):
+        for bi, (bname, a, b) in enumerate(blocks_def):
             hrs = []
             for h in range(a, b):
                 avg = hourly.get((wd, h), 0) / float(weeks)
@@ -16819,6 +16864,10 @@ def staffing_plan(rid, ws, weeks=8):
     short.sort(key=lambda x: (-x["gap"], x["date"]))
     return {"region_id": int(rid or 0), "week_start": ws.isoformat(), "weeks": weeks,
             "rate": rate, "days": days, "short": short,
+            "blocks": [x[0] for x in blocks_def],
+            "block_defs": [{"name": n_, "start": a_ % 24, "end": b_ % 24, "hours": "%s to %s" % (_hr12(a_), _hr12(b_))}
+                           for n_, a_, b_ in blocks_def],
+            "custom": blocks_def != list(SHIFT_BLOCKS),
             "has_history": bool(hourly)}
 
 @app.get("/api/dispatch/staffing")
@@ -16840,8 +16889,63 @@ def api_dispatch_staffing():
     ws = parse_week(request.args.get("week"))
     out = staffing_plan(rid, ws, weeks)
     out.update({"ok": True, "regions": [{"id": i, "name": n} for i, n in regs],
-                "region_name": dict(regs).get(rid, "All areas"), "blocks": [b[0] for b in SHIFT_BLOCKS]})
+                "region_name": dict(regs).get(rid, "All areas"),
+                "owner": is_owner(), "share_driver": staffing_shared()})
     return jsonify(out)
+
+def staffing_shared():
+    try:
+        r = db().execute("SELECT value FROM settings WHERE key='share_staffing_driver'").fetchone()
+        return bool(r and str(r["value"]) == "1")
+    except Exception:
+        return False
+
+def _set_kv(key, value):
+    db().execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                 (key, value))
+
+@app.post("/api/dispatch/shift-blocks")
+def api_dispatch_shift_blocks():
+    """Owner sets a region's shift hours for Drivers needed by shift (empty list = back to the standard shifts)."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    if not is_owner():
+        return jsonify({"ok": False, "error": "Only an owner can change shift hours."}), 403
+    b = request.get_json(force=True) or {}
+    rid = stats_root(b.get("region") or 0)
+    rows = b.get("blocks") or []
+    if not rows:
+        db().execute("DELETE FROM settings WHERE key=?", ("shift_blocks_%d" % rid,))
+        db().commit()
+        log("shift_blocks", "Shift hours for region %d set back to standard by %s" % (rid, session.get("dispatcher_name") or "dispatch"))
+        return jsonify({"ok": True})
+    if len(rows) > 8:
+        return jsonify({"ok": False, "error": "Use 8 shifts or fewer."}), 400
+    out = []
+    for x in rows:
+        nb = _norm_block(x.get("name"), x.get("start"), x.get("end"))
+        if isinstance(nb, str):
+            return jsonify({"ok": False, "error": nb}), 400
+        out.append(nb)
+    out.sort(key=lambda x: x[1])
+    _set_kv("shift_blocks_%d" % rid, json.dumps(out))
+    db().commit()
+    log("shift_blocks", "Shift hours for region %d set to %s by %s" % (rid, "; ".join("%s %s-%s" % (n, _hr12(a), _hr12(b_)) for n, a, b_ in out),
+                                                                   session.get("dispatcher_name") or "dispatch"))
+    return jsonify({"ok": True})
+
+@app.post("/api/dispatch/staffing-share")
+def api_dispatch_staffing_share():
+    """Owner turns on or off showing Drivers needed by shift in the driver app."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    if not is_owner():
+        return jsonify({"ok": False, "error": "Only an owner can change this."}), 403
+    on = bool((request.get_json(force=True) or {}).get("on"))
+    _set_kv("share_staffing_driver", "1" if on else "0")
+    db().commit()
+    log("shift_blocks", "Drivers needed by shift %s the driver app by %s" % ("shared with" if on else "hidden from", session.get("dispatcher_name") or "dispatch"))
+    return jsonify({"ok": True, "on": on})
 
 @app.get("/dispatch/shift-stats")
 def dispatch_shift_stats():
@@ -16856,8 +16960,9 @@ def dispatch_shift_stats():
     rid = stats_root(rid) or rid
     rname = dict(regs).get(rid, "All areas")
     st = shift_stats(rid, weeks)
+    hours_seen = sorted({r["bi"] for r in st["grid"] if r["orders"]})
     return render_template("dispatch_shift_stats.html", regs=regs, rid=rid, rname=rname, st=st,
-                           blocks=SHIFT_BLOCKS, days=WEEKDAYS, summary=shift_summary(st, rname),
+                           hours=[(h, _hour_span(h)) for h in hours_seen], days=WEEKDAYS, summary=shift_summary(st, rname),
                            sent=request.args.get("sent"))
 
 @app.post("/dispatch/shift-stats/send")
@@ -16902,8 +17007,20 @@ def api_driver_shift_stats():
         if rid and mine and not (stats_group(rid) & set(mine)):
             continue
         st = shift_stats(rid, 8)
-        out.append({"region": rname, "best": st["best"][:5], "worst": st["worst"], "orders": st["orders"], "weeks": st["weeks"]})
-    return jsonify({"ok": True, "regions": out})
+        g_ = {"region": rname, "best": st["best"][:5], "worst": st["worst"], "orders": st["orders"], "weeks": st["weeks"]}
+        if staffing_shared():
+            # Drivers needed by shift, without anyone's names: just where more drivers are needed
+            sp = staffing_plan(rid, open_week_start(), 8)
+            g_["needed"] = {"week_label": "%s to %s" % (sp["days"][0]["date_label"], sp["days"][-1]["date_label"]),
+                            "has_history": sp["has_history"],
+                            "short": [{"day": x["day"], "date_label": x["date_label"], "block": x["block"], "hours": x["hours"],
+                                       "gap": x["gap"], "gap_at": x["gap_at"]} for x in sp["short"]],
+                            "days": [{"day": d["day"], "date_label": d["date_label"],
+                                      "blocks": [{"block": k["block"], "hours": k["hours"], "need": k["need"],
+                                                  "have": k["have"], "status": k["status"]} for k in d["blocks"]]}
+                                     for d in sp["days"]]}
+        out.append(g_)
+    return jsonify({"ok": True, "regions": out, "share_driver": staffing_shared()})
 
 @app.get("/dispatch/reviews")
 def dispatch_reviews():
