@@ -17632,17 +17632,52 @@ def _phone3(f, key):
                         or f.get(key, ""))
 
 def _region_choices():
-    return [{"id": g["id"], "name": g["name"]} for g in all_regions()]
+    """Area picks on the Drive with us and Partner with us pages. On a brand's site only that
+    brand's regions show, and regions combined for drivers (Auburn + Downtown Auburn) show once.
+    The value carries every region id in the group, comma separated."""
+    rows = all_regions()
+    try:
+        site = current_site()
+    except Exception:
+        site = None
+    if site is not None:
+        mine = site_region_ids(site["id"])
+        rows = [r for r in rows if r["id"] in mine]
+    names = {r["id"]: r["name"] for r in rows}
+    out, seen = [], set()
+    for r in rows:
+        if r["id"] in seen:
+            continue
+        grp = [x["id"] for x in rows if x["id"] in drive_group(r["id"])] or [r["id"]]
+        seen.update(grp)
+        out.append({"id": ",".join(str(i) for i in grp), "name": " + ".join(names[i] for i in grp)})
+    return out
+
+def _picked_region_ids(values):
+    """Region ids from the area picks, kept only when they are on this page's list."""
+    allowed = set()
+    for c in _region_choices():
+        allowed.update(int(x) for x in c["id"].split(","))
+    ids = []
+    for v in values:
+        for x in str(v or "").split(","):
+            x = x.strip()
+            if x.isdigit() and int(x) in allowed and int(x) not in ids:
+                ids.append(int(x))
+    return ids
+
+def _force_page_brand():
+    try:
+        _ds = faq_target()[1]
+        if _ds is not None:
+            g._site_forced = _ds   # a picked brand's page names and shows only that brand
+    except Exception:
+        pass
 
 @app.route("/drive", methods=["GET", "POST"])
 def drive_apply():
     f, errs, done = request.form, [], False
-    try:
-        _ds = faq_target()[1]
-        if _ds is not None:
-            g._site_forced = _ds   # a picked brand's Drive page names and shows only that brand
-    except Exception:
-        pass
+    _force_page_brand()
     if request.method == "POST":
         if f.get("website"):
             return render_template("drive.html", done=True, errs=[], f={}, regions=_region_choices(), makes=CAR_MAKES, all_contacts=faq_brand_contacts())
@@ -17679,7 +17714,8 @@ def drive_apply():
         if not errs and not _apply_rate_ok():
             errs.append("Too many applications from this device. Try again later.")
         if not errs:
-            rids = "any" if ("any" in regs or not regs) else ",".join(str(int(x)) for x in regs if x.isdigit())
+            _ids = _picked_region_ids(regs)
+            rids = "any" if ("any" in regs or not _ids) else ",".join(str(i) for i in _ids)
             data = {k: (f.get(k) or "").strip()[:120] for k in ("first_name", "last_name", "dob", "address", "email",
                                                                    "car_color", "car_year", "car_make", "car_model", "note")}
             db().execute("""INSERT INTO applications (kind, name, phone, email, region_ids, data, created_at)
@@ -17692,6 +17728,7 @@ def drive_apply():
 @app.route("/partner", methods=["GET", "POST"])
 def partner_apply():
     f, errs, done = request.form, [], False
+    _force_page_brand()
     if request.method == "POST":
         if f.get("website"):
             return render_template("partner.html", done=True, errs=[], f={}, regions=_region_choices(), states=US_STATES, all_contacts=faq_brand_contacts())
@@ -17718,7 +17755,8 @@ def partner_apply():
             errs.append("Too many applications from this device. Try again later.")
         if not errs:
             reg = f.get("region")
-            rids = str(int(reg)) if reg.isdigit() else "any"
+            _ids = _picked_region_ids([reg])
+            rids = ",".join(str(i) for i in _ids) if _ids else "any"
             data = {k: (f.get(k) or "").strip()[:160] for k in ("rest_name", "rest_address", "rest_city", "rest_state",
                                                                    "first_name", "last_name", "email", "note")}
             data.update({"rest_zip": zp, "fax": fax})
