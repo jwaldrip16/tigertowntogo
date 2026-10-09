@@ -3650,8 +3650,9 @@ def api_quote():
         if zc["zip"]:
             return jsonify({"ok": False, "error": "We could not verify that address or find ZIP %s. "
                                                   "Check the ZIP code or call dispatch." % zc["zip"]})
-        return jsonify({"ok": False, "error": "We could not verify that address. Add the 5-digit ZIP code "
-                                              "so we can check it's in our delivery area."})
+        return jsonify({"ok": False, "need_zip": True,
+                        "error": "We couldn't find that street. Add your 5-digit ZIP code and you can still "
+                                 "place the order; dispatch will confirm the exact address."})
     miles, fee = quote(r, g1["lat"], g1["lng"])
     _typed = data.get("address", "") or ""
     if miles > 60 and re.match(r"\s*\d+\s+\S", _typed) and re.search(r"\b\d{5}\b", _typed):
@@ -5483,8 +5484,9 @@ def checkout():
         rules = delivery_rules(r)
         if not address_ok:
             if not _zc["found"]:
-                return jsonify({"ok": False, "error":
-                                "We could not verify that address. Add the 5-digit ZIP code or call dispatch."}), 400
+                return jsonify({"ok": False, "need_zip": True, "error":
+                                "We couldn't find that street. Add your 5-digit ZIP code to the address and "
+                                "you can still place the order."}), 400
             if not _zc["within"]:
                 return jsonify({"ok": False, "out_of_range": True, "error":
                                 "ZIP %s is about %.1f mi from %s. %s delivers up to %g mi."

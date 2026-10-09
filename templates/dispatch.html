@@ -1111,18 +1111,26 @@ function byRegion(list, card){
     ' <span class="muted small">(' + groups[k].length + ')</span></h3>' + groups[k].map(card).join('') + '</div>').join('');
 }
 function milesLabel(o){ return (o.miles===null||o.miles===undefined) ? 'distance TBC' : o.miles+' mi'; }
-async function approveAddress(id, addr){
+async function approveAddress(id, addr, fee){
   const a = prompt('Confirm or correct the delivery address for this order:', addr);
   if(a===null) return;
-  const res = await jpost('/api/order/approve-address', {order_id:id, address:a});
+  const f = prompt('Delivery fee for this address, in dollars.\nThe customer was quoted '+(fee||'the ZIP code price')+
+    ' from the ZIP code. Leave blank to price it from the map.', String(fee||'').replace(/[^0-9.]/g,''));
+  if(f===null) return;
+  const body = {order_id:id, address:a};
+  if(f.trim() !== ''){
+    const d = parseFloat(f.replace(/[^0-9.]/g,''));
+    if(!(d >= 0) || d > 200){ alert('Type the fee in dollars, like 4.99.'); return; }
+    body.fee_cents = Math.round(d*100);
+  }
+  const res = await jpost('/api/order/approve-address', body);
   if(!res.ok){ alert(res.error||'Could not approve that address.'); return; }
   const where = res.waiting_on_payment
     ? '\nStill waiting on payment. The kitchen gets it as soon as the order is marked paid.'
     : (res.sent_to_kitchen ? '\nThe order is now with the kitchen.' : '');
   alert(res.verified
     ? ('Approved: '+res.address+'\n'+res.miles+' mi, delivery '+res.fee+', new total '+res.total+where)
-    : ('Approved as typed: '+res.address+'\nWe still could not place it on the map, so the fee stayed at '+
-       res.fee+'. Use Change fee to adjust it.'+where));
+    : ('Approved as typed: '+res.address+'\nDelivery '+res.fee+', new total '+res.total+'. We still could not place it on the map.'+where));
   board(true);
 }
 function payPill(o){
@@ -1455,7 +1463,7 @@ function orderCard(o, opts, drivers){
       etaPill(o)+kitchenGo(o)+
       manualButtons(o)+
       (o.needs_address_approval ? '<button class="btn tiny primary" onclick="approveAddress('+o.id+
-        ',\''+o.address.replace(/'/g,"\\'")+'\')">Approve address</button>' : '')+
+        ',\''+o.address.replace(/'/g,"\\'")+'\',\''+String(o.fee||'').replace(/'/g,'')+'\')">Approve address</button>' : '')+
       '<button class="btn tiny" onclick="nudge('+o.id+',-5)">-5</button>'+
       '<input class="mins" id="m'+o.id+'" type="number" value="'+(o.prep_minutes||15)+
       '" min="1" max="180" onchange="setTimer('+o.id+')">'+

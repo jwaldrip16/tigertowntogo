@@ -307,6 +307,14 @@ function farBlock(msg){
   document.querySelectorAll('.item button, .additem, button[onclick^="add"]').forEach(x=>{ x.disabled = !!msg; });
   const pl = document.getElementById('place'); if(pl && msg) pl.disabled = true;
 }
+function esc0(s){ return String(s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
+function addZip(){
+  const z = (document.getElementById('zipFix').value||'').replace(/\D/g,'');
+  if(z.length !== 5){ alert('Type the 5-digit ZIP code.'); return; }
+  const a = document.getElementById('address');
+  a.value = a.value.trim().replace(/[\s,]*\b\d{5}(-\d{4})?\s*$/, '') + ' ' + z;
+  validate();
+}
 async function validate(){
   const addr = document.getElementById('address').value.trim();
   const q = document.getElementById('quote');
@@ -318,8 +326,16 @@ async function validate(){
   if(!res.ok && res.zip_ok){
     geo = {unverified:true}; feeCents = res.fee_cents; miles = res.miles;
     q.className='quote';
-    q.textContent = res.error + ' You can place the order. Delivery is about '+res.fee+'; dispatch will confirm your exact address.';
+    q.textContent = res.error + ' You can place the order. Delivery is about '+res.fee+' for now. Dispatch will confirm your address and set the final delivery fee.';
     totals(); return; }
+  if(!res.ok && res.need_zip){
+    geo=null; q.className='quote bad'; totals();
+    q.innerHTML = esc0(res.error) + '<div style="margin-top:8px;display:flex;gap:8px;align-items:center">'+
+      '<input id="zipFix" inputmode="numeric" maxlength="5" placeholder="ZIP code" style="max-width:120px">'+
+      '<button class="btn" type="button" onclick="addZip()">Add ZIP</button></div>';
+    const z = document.getElementById('zipFix'); z.focus();
+    z.addEventListener('keydown', e=>{ if(e.key==='Enter'){ e.preventDefault(); addZip(); } });
+    return; }
   if(!res.ok){ geo=null; q.className='quote bad'; q.textContent = res.error; totals();
     if(res.out_of_range && !CUSTOM){ farBlock(res.error); }
     return; }
