@@ -12247,14 +12247,18 @@ def google_tile_session(site_url):
         return None
 
 
+ESRI_TILES = "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}"
+ESRI_ATTR = "Tiles &copy; Esri, HERE, Garmin, USGS, OpenStreetMap contributors"
+
+
 @app.get("/api/map-tiles")
 def api_map_tiles():
-    """Which map pictures to draw: Google when a key is set, OpenStreetMap otherwise."""
+    """Which map pictures to draw: Google when a key is set, the Esri street map otherwise."""
     ses = google_tile_session(request.host_url)
     if not ses:
-        return jsonify({"ok": True, "provider": "osm",
-                        "url": "https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",
-                        "attribution": "&copy; OpenStreetMap", "max_zoom": 19, "tile_size": 256})
+        # Esri street map: US house numbers and street names show up close in (from HERE/TomTom data)
+        return jsonify({"ok": True, "provider": "esri",
+                        "url": ESRI_TILES, "attribution": ESRI_ATTR, "max_zoom": 20, "tile_size": 256})
     return jsonify({"ok": True, "provider": "google",
                     "url": "https://tile.googleapis.com/v1/2dtiles/{z}/{x}/{y}?session=%s&key=%s"
                            % (ses["session"], urllib.parse.quote(GOOGLE_TILE_KEY)),
