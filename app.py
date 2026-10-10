@@ -13609,13 +13609,22 @@ def company_look(c):
     return {"brand": brand, "logo": logo, "bs": bs}
 
 
+def old_own_railway_hosts():
+    """Railway addresses THIS app used before it was renamed. Only these get moved to the current
+    address; another company's own railway.app instance is left alone. Add more old names with the
+    Railway variable PREVIOUS_RAILWAY_DOMAINS (comma separated)."""
+    extra = re.split(r"[\s,]+", os.environ.get("PREVIOUS_RAILWAY_DOMAINS") or "")
+    return {d for d in (_norm_host(x) for x in ["tigertowntogo.up.railway.app"] + extra) if d}
+
+
 def live_company_url(u):
-    """A company saved with an old Railway address (the app's railway.app name was changed) opens on
-    the address this app runs on now, so the shared driver and restaurant apps keep working."""
+    """A company saved with this app's OLD Railway address (the app's railway.app name was changed) opens
+    on the address this app runs on now, so the shared driver and restaurant apps keep working. A second
+    company running its own instance on a different railway.app address keeps its own address."""
     try:
         h = _norm_host(u)
         now_h = _norm_host(os.environ.get("RAILWAY_PUBLIC_DOMAIN") or (request.host if has_request_context() else ""))
-        if h and now_h and h != now_h and h.endswith(".up.railway.app") and now_h.endswith(".up.railway.app"):
+        if h and now_h and h != now_h and h in old_own_railway_hosts() and now_h.endswith(".up.railway.app"):
             return "https://" + now_h
     except Exception:
         pass
@@ -13645,7 +13654,7 @@ def fix_old_railway_company_urls():
         con = dbx.connect(DB_PATH)
         for r in con.execute("SELECT id, url FROM companies").fetchall():
             h = _norm_host(r[1])
-            if h.endswith(".up.railway.app") and h != cur:
+            if h in old_own_railway_hosts() and h != cur:
                 con.execute("UPDATE companies SET url=? WHERE id=?", ("https://" + cur, r[0]))
         con.commit()
         con.close()
