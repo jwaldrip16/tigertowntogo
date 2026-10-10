@@ -156,6 +156,11 @@ async function setLogo(inp){
   <div class="muted small">Auto pay sends the trip's suggested pay by PayPal, Venmo or Branch once the customer's payment is settled. Drivers paid by check, drivers with auto pay off, drivers with nothing on file, and failed payments are left for you on the order.</div>
   <label>Share of the tip the driver gets (%)</label>
   <input name="driver_pay_tip_pct" type="number" min="0" max="100" value="{{ s['driver_pay_tip_pct'] if s['driver_pay_tip_pct'] is not none else 100 }}">
+  <label>Driver pay for the base delivery fee ($, blank to use the share above)</label>
+  <input name="driver_pay_base" inputmode="decimal" value="{{ '%.2f' % ((s['driver_pay_base_cents']|int) / 100) if s['driver_pay_base_cents'] is defined and (s['driver_pay_base_cents']|string).strip() else '' }}" placeholder="4.74">
+  <label>Driver pay per extra mile ($, blank to use the share above)</label>
+  <input name="driver_pay_mile" inputmode="decimal" value="{{ '%.2f' % ((s['driver_pay_mile_cents']|int) / 100) if s['driver_pay_mile_cents'] is defined and (s['driver_pay_mile_cents']|string).strip() else '' }}" placeholder="0.90">
+  <div class="muted small">Example: customers pay $4.99 plus $1 a mile past the first miles, the driver gets $4.74 plus $0.90 a mile.</div>
   <label>Flat amount added per trip ($)</label>
   <input name="driver_pay_flat" type="number" step="0.01" min="0" max="500" value="{{ '%.2f' % ((s['driver_pay_flat_cents'] or 0)|int / 100) }}">
   {% if owner_view or dev_view %}
@@ -225,6 +230,9 @@ async function setLogo(inp){
   <input name="tax_pct" inputmode="decimal" value="{{ '%g' % ((s['tax_rate_bp']|int) / 100) }}" placeholder="9">
   <label>Service fee (% of the food subtotal, 0 for none)</label>
   <input name="service_pct" inputmode="decimal" value="{{ '%g' % (((s['service_fee_bp'] or 0)|int) / 100) }}" placeholder="0">
+  <label>Service fee for non-partner restaurants (%, blank = same as above)</label>
+  <input name="service_np_pct" inputmode="decimal" value="{{ '%g' % ((s['service_fee_np_bp']|int) / 100) if s['service_fee_np_bp'] is defined and (s['service_fee_np_bp']|string).strip() else '' }}" placeholder="20">
+  <div class="muted small">Mark a restaurant non-partner on the Regions page (Restaurants list). Partners pay the service fee above.</div>
   <div class="muted small">Both apply to the food subtotal on new orders and on orders you edit. Orders already placed keep what they were charged.</div>
   <label>Auto assign to drivers (1 on, 0 off)</label>
   <input name="auto_assign" value="{{ s['auto_assign'] }}">

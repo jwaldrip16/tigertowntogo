@@ -350,8 +350,10 @@ function feeTyped(){
   totals();
 }
 function tipPctLabel(sub){ const c = tipCents(); return (c && sub) ? ' ('+Math.round(c*100/sub)+'% of food)' : ''; }
+const SVC_BP = {{ svc_map|tojson }};
+function svcBp(){ const el = document.getElementById('rest'); const v = el ? SVC_BP[el.value] : undefined; return (v === undefined || v === null) ? {{ service_bp }} : v; }
 function totals(){
-  const sub = subtotal(), tax = Math.round(sub*{{ tax_bp }}/10000), svc = Math.round(sub*{{ service_bp }}/10000), t = document.getElementById('totals');
+  const sub = subtotal(), tax = Math.round(sub*{{ tax_bp }}/10000), svc = Math.round(sub*svcBp()/10000), t = document.getElementById('totals');
   if(TIP_PCT !== null) document.getElementById('tip').value = TIP_PCT ? (Math.round(sub*TIP_PCT/100)/100).toFixed(2) : '0.00';
   drawTipBtns();
   if(!sub){ t.innerHTML=''; document.getElementById('place').disabled = true; placeHint(); return; }

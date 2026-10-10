@@ -559,6 +559,9 @@ def init_db():
     ensure_column(con, "regions", "drive_with", "INTEGER DEFAULT 0")   # drivers treat this region and another as one area   # count this region's statistics with another region
     ensure_column(con, "regions", "auto_kitchen", "INTEGER DEFAULT 0")   # 1 = Send to kitchen happens on its own             # blank = the business FAQ
     ensure_column(con, "restaurants", "min_order_cents", "INTEGER")  # blank = use the region's
+    ensure_column(con, "restaurants", "partner", "INTEGER NOT NULL DEFAULT 1")  # 0 = non-partner service fee
+    for _k in ("service_fee_np_bp", "driver_pay_base_cents", "driver_pay_mile_cents"):
+        con.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?, '')", (_k,))
     ensure_column(con, "restaurants", "max_miles", "REAL")           # blank = use the region's
     ensure_column(con, "drivers", "active", "INTEGER DEFAULT 1")
     ensure_column(con, "orders", "region_id", "INTEGER")
@@ -1438,6 +1441,22 @@ def fee_for_miles(miles, region_id=None):
     if miles <= base_miles:
         return base_fee
     return base_fee + int(math.ceil(miles - base_miles)) * per_mile
+
+def service_bp_for(r):
+    """Service fee (basis points of food) for a restaurant: the business rate for partners,
+    the non-partner rate (Settings > Delivery fees) for a restaurant marked non-partner."""
+    try:
+        bp = int(setting("service_fee_bp") or 0)
+    except (TypeError, ValueError):
+        bp = 0
+    if r is not None and str(_rv(r, "partner")) == "0":
+        raw = str(setting("service_fee_np_bp", str) or "").strip()
+        if raw:
+            try:
+                bp = int(raw)
+            except ValueError:
+                pass
+    return bp
 
 def _rv(row, key):
     try:
@@ -3613,7 +3632,7 @@ def menu(slug):
     items = db().execute("SELECT * FROM menu_items WHERE restaurant_id=? AND active=1", (r["id"],)).fetchall()
     biz = business_is_open() and business_in_hours(rid=r["region_id"])
     open_now = biz and (any_rest_open() if r["slug"] == "oneoff" else is_open(r))
-    return render_template("menu.html", r=r, rules=delivery_rules(r), items=items, open=open_now, biz_open=biz,
+    return render_template("menu.html", r=r, rules=delivery_rules(r), service_bp=service_bp_for(r), items=items, open=open_now, biz_open=biz,
                            hours=hours_label(r), custom=(r["slug"] == "oneoff"),
                            base_fee=money(fee_rules(r["region_id"])["base_fee"]),
                            base_miles="%g" % float(fee_rules(r["region_id"])["base_miles"] or 0),
@@ -5497,7 +5516,7 @@ def checkout():
                             "That address is %.1f mi from %s. %s delivers up to %g mi."
                             % (miles, r["name"], r["name"], rules["max_miles"])}), 400
     tax = int(round(subtotal * setting("tax_rate_bp") / 10000.0))
-    service = int(round(subtotal * setting("service_fee_bp") / 10000.0))
+    service = int(round(subtotal * service_bp_for(r) / 10000.0))
     try:
         tip = int(round(float(payload.get("tip_cents", 0) or 0)))
     except Exception:
@@ -6094,13 +6113,46 @@ def drv_pay_rule():
         flat = int(setting("driver_pay_flat_cents", str) or 0)
     except (TypeError, ValueError):
         flat = 0
+    def _c(k):
+        raw = str(setting(k, str) or "").strip()
+        try:
+            return max(0, min(50000, int(raw))) if raw != "" else None
+        except ValueError:
+            return None
     return {"fee_pct": _pct_setting("driver_pay_fee_pct", 100),
             "tip_pct": _pct_setting("driver_pay_tip_pct", 100),
-            "flat_cents": max(0, min(50000, flat))}
+            "flat_cents": max(0, min(50000, flat)),
+            "base_cents": _c("driver_pay_base_cents"), "mile_cents": _c("driver_pay_mile_cents")}
+
+def drv_fee_pay(o, r=None):
+    """Driver's part of the delivery fee. With a set driver base pay (Settings > Driver pay),
+    the driver gets that for the base fee and the per-mile pay for each extra mile billed;
+    otherwise the share of the fee in percent."""
+    r = r or drv_pay_rule()
+    fee = int(o["fee_cents"] or 0)
+    if r.get("base_cents") is None:
+        return fee * r["fee_pct"] // 100
+    rid = None
+    try:
+        rid = _rv(o, "region_id") or _rv(db().execute("SELECT region_id FROM restaurants WHERE id=?",
+                                                      (o["restaurant_id"],)).fetchone(), "region_id")
+    except Exception:
+        rid = None
+    fr = fee_rules(rid or None)
+    bf, pm = int(fr["base_fee"] or 0), int(fr["per_mile"] or 0)
+    base_part = min(fee, bf) if bf else fee
+    pay = int(round(r["base_cents"] * (base_part / float(bf)))) if bf else min(fee, r["base_cents"])
+    extra = fee - base_part
+    if extra > 0:
+        if pm and r.get("mile_cents") is not None:
+            pay += int(round(extra * r["mile_cents"] / float(pm)))
+        else:
+            pay += extra * r["fee_pct"] // 100
+    return pay
 
 def drv_pay_suggest(o):
     r = drv_pay_rule()
-    return (r["flat_cents"] + int(o["fee_cents"] or 0) * r["fee_pct"] // 100
+    return (r["flat_cents"] + drv_fee_pay(o, r)
             + int(o["tip_cents"] or 0) * r["tip_pct"] // 100)
 
 def driver_payout_target(d):
@@ -7496,7 +7548,8 @@ def api_order_edit():
     if fee < 0 or tip < 0:
         return jsonify({"ok": False, "error": "The delivery fee and tip can't be negative."}), 400
     tax = int(round(subtotal * setting("tax_rate_bp") / 10000.0))
-    service = int(round(subtotal * setting("service_fee_bp") / 10000.0))
+    service = int(round(subtotal * service_bp_for(db().execute(
+        "SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()) / 10000.0))
     disc = min(order_discount(o), subtotal + fee + ifee + tax + service)
     total = subtotal + fee + ifee + tax + service + tip - disc
     db().execute("""UPDATE orders SET items=?, subtotal_cents=?, fee_cents=?, item_fee_cents=?,
@@ -7665,6 +7718,7 @@ def dispatch_new_order():
     return render_template("dispatch_new_order.html", rest_groups=rest_groups, locked_out=locked_out, rest_region=rest_region,
                            locked_brands=locked_brands,
                            restaurants=[dict(r) for r in shown],
+                           svc_map={str(r["id"]): service_bp_for(r) for r in shown},
                            menus=menus, has_menu=has_menu, src=src, multi_src=multi_src, multi_policy=MULTI_POLICY, oneoff=oneoff, tokens=token_list(),
                            reasons=[{"key": k, "label": v} for k, v in REDO_REASONS.items()])
 
@@ -9862,6 +9916,7 @@ def regions_payload():
             "restaurants": [{"id": r["id"], "name": r["name"], "address": r["address"] or "",
                              "region_id": r["region_id"] or 0,
                              "min_order_cents": r["min_order_cents"], "max_miles": r["max_miles"],
+                             "partner": 0 if str(_rv(r, "partner")) == "0" else 1,
                              "rules": delivery_rules(r)}
                             for r in con.execute("SELECT * FROM restaurants WHERE slug!='oneoff' ORDER BY name").fetchall()],
             "drivers": [{"id": d["id"], "name": d["name"], "regions": sorted(driver_region_ids(d["id"]))}
@@ -10557,6 +10612,29 @@ def api_region_fees():
         reg["name"], " and ".join(what), session.get("dispatcher_name") or "dispatch",
         money(fr["base_fee"]), float(fr["base_miles"] or 0), money(fr["per_mile"]), fr["from"]))
     return jsonify({"ok": True, "fees": fr})
+
+
+@app.post("/api/dispatch/restaurant-partner")
+def api_restaurant_partner():
+    """Partner restaurants pay the business service fee; non-partners the non-partner rate."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(silent=True) or {}
+    try:
+        oid = int(b.get("id") or 0)
+    except Exception:
+        oid = 0
+    r = db().execute("SELECT id, name, region_id FROM restaurants WHERE id=?", (oid,)).fetchone()
+    if not r:
+        return jsonify({"ok": False, "error": "Restaurant not found."}), 404
+    if not _can_edit_region(r["region_id"] or 0):
+        return jsonify({"ok": False, "error": "You can only change restaurants in your regions."}), 403
+    on = 1 if b.get("partner") in (1, True, "1", "true") else 0
+    db().execute("UPDATE restaurants SET partner=? WHERE id=?", (on, oid))
+    db().commit()
+    log("partner", "%s: %s by %s" % (r["name"], "partner" if on else "non-partner",
+                                    session.get("dispatcher_name") or "dispatch"))
+    return jsonify({"ok": True, "partner": on})
 
 
 @app.post("/api/dispatch/delivery-rules")
@@ -11311,6 +11389,18 @@ def dispatch_settings():
                     _v = -1
                 if 0 <= _v <= 100:
                     db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, str(_v)))
+        for _f, _k in (("driver_pay_base", "driver_pay_base_cents"), ("driver_pay_mile", "driver_pay_mile_cents")):
+            if _f in request.form:
+                _raw = (request.form[_f] or "").replace("$", "").strip()
+                if _raw == "":
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?, '')", (_k,))
+                else:
+                    try:
+                        _v = int(round(float(_raw) * 100))
+                    except ValueError:
+                        _v = -1
+                    if 0 <= _v <= 50000:
+                        db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_k, str(_v)))
         if "driver_pay_flat" in request.form:
             try:
                 _v = int(round(float((request.form["driver_pay_flat"] or "0").replace("$", "")) * 100))
@@ -11449,6 +11539,20 @@ def dispatch_settings():
                 db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('order_keep_days',?)", (str(kd),))
             else:
                 errs.append("Keep orders for 0 (forever) or %d to %d days." % (ORDER_KEEP_MIN, ORDER_KEEP_MAX))
+        if "service_np_pct" in request.form:
+            _raw = request.form["service_np_pct"].replace("%", "").strip()
+            if _raw == "":
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('service_fee_np_bp', '')")
+            else:
+                try:
+                    _pct = float(_raw)
+                except ValueError:
+                    _pct = -1
+                if 0 <= _pct <= 30:
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('service_fee_np_bp',?)",
+                                 (str(int(round(_pct * 100))),))
+                else:
+                    errs.append("Non-partner service fee needs to be a percent between 0 and 30, or blank.")
         for field, key, label in (("tax_pct", "tax_rate_bp", "Tax"), ("service_pct", "service_fee_bp", "Service fee")):
             if field in request.form:
                 raw = request.form[field].replace("%", "").strip() or "0"

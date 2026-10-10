@@ -417,7 +417,8 @@ function drawRests(){
                                      (only === '' || String(r.region_id) === only));
   document.getElementById('rsTable').innerHTML = list.map(r=>
     '<tr><td><strong>'+e(r.name)+'</strong><div class="muted small">'+e(r.address)+'</div>'+
-    '<div class="muted small">'+rulesLabel(r)+' <button class="btn tiny" onclick="rulesEdit(\'restaurant\','+r.id+')">Minimum &amp; radius</button></div></td><td>'+
+    '<div class="muted small">'+rulesLabel(r)+' <button class="btn tiny" onclick="rulesEdit(\'restaurant\','+r.id+')">Minimum &amp; radius</button></div>'+
+    '<label class="muted small"><input type="checkbox" '+(r.partner!==0?'checked':'')+' onchange="setPartner('+r.id+', this.checked)"> Partner (unchecked = non-partner service fee)</label></td><td>'+
     '<select onchange="setRest('+r.id+', this.value)"><option value="0">No region</option>'+
     RG.regions.map(g=>'<option value="'+g.id+'"'+(g.id===r.region_id?' selected':'')+'>'+e(g.name)+'</option>').join('')+
     '</select></td></tr>').join('') || '<tr><td class="muted small">No restaurants match.</td></tr>';
@@ -434,6 +435,11 @@ function renRegion(id){
 function delRegion(id){
   const r = RG.regions.find(x=>x.id===id);
   if(confirm('Delete '+r.name+'? Its restaurants go to No region, and drivers and dispatchers lose it.')) send({op:'delete_region', id:id});
+}
+async function setPartner(id, on){
+  const res = await jpost('/api/dispatch/restaurant-partner', {id:id, partner:on?1:0});
+  if (!res.ok){ alert(res.error || 'That did not save.'); }
+  load();
 }
 function setRest(id, rg){ send({op:'set_restaurant', restaurant_id:id, region_id:+rg}); }
 function setPerson(kind, id){
