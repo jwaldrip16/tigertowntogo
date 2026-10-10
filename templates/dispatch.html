@@ -1438,46 +1438,6 @@ function setToken(oid){
   jpost('/api/order/edit', {order_id: oid, token: v}).then(()=>board(true));
 }
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
-let LINKS = {links: [], send: []};
-async function loadLinks(){
-  try{ const j = await (await fetch('/api/dispatch/sharing/lite')).json(); if(j.ok) LINKS = j; }catch(e){}
-}
-loadLinks(); setInterval(loadLinks, 60000);
-function linkButtons(o){
-  const st = o.link_out_status || '';
-  const esc_ = s => String(s||'').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-  if(st && !['declined','cancelled'].includes(st)){
-    const lbl = {offered:'offered', accepted:'taken', assigned:'driver on it', picked_up:'picked up', delivered:'delivered'}[st] || st;
-    return '<span class="pill blue" title="'+esc_(o.link_out_note)+'">linked: '+lbl+'</span>'+
-      (['offered','accepted','assigned'].includes(st) ? '<button class="btn tiny" onclick="takeBackOrder('+o.id+')">Take back</button>' : '');
-  }
-  if(!LINKS.links.length || !LINKS.send.includes(o.brand_id || 0) || o.driver_id ||
-     ['delivered','cancelled'].includes(o.dispatch_status)) return '';
-  return (st==='declined' ? '<span class="pill grey">linked: turned down</span>' : '')+
-    '<button class="btn tiny" onclick="shareOrder('+o.id+')">Send to linked platform</button>';
-}
-async function shareOrder(id){
-  let link = LINKS.links[0];
-  if(LINKS.links.length > 1){
-    const pick = prompt('Send to which platform?\n'+LINKS.links.map((l,i)=>(i+1)+'. '+l.name).join('\n'), '1');
-    if(pick===null) return;
-    link = LINKS.links[parseInt(pick,10)-1];
-    if(!link){ alert('Pick a number from the list.'); return; }
-  } else if(!confirm('Offer this order to '+link.name+'?')) return;
-  const r = await fetch('/api/dispatch/order-share',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({order_id:id, link_id:link.id})});
-  const j = await r.json();
-  if(!j.ok){ alert(j.error || 'Could not send it.'); return; }
-  loadLinks(); if(typeof refreshAll==='function') refreshAll();
-}
-async function takeBackOrder(id){
-  if(!confirm('Take this order back from the linked platform?')) return;
-  const r = await fetch('/api/dispatch/order-share-cancel',{method:'POST',headers:{'Content-Type':'application/json'},
-    body:JSON.stringify({order_id:id})});
-  const j = await r.json();
-  if(!j.ok){ alert(j.error || 'Could not take it back.'); return; }
-  loadLinks(); if(typeof refreshAll==='function') refreshAll();
-}
 function orderCard(o, opts, drivers){
   const timer = (o.timer_seconds!==null && o.kitchen_status==='preparing')
     ? '<span class="pill amber">'+Math.max(0,Math.ceil(o.timer_seconds/60))+' min</span>' : '';
@@ -1503,7 +1463,6 @@ function orderCard(o, opts, drivers){
       payButtons(o)+
       etaPill(o)+kitchenGo(o)+
       manualButtons(o)+
-      linkButtons(o)+
       (o.needs_address_approval ? '<button class="btn tiny primary" onclick="approveAddress('+o.id+
         ',\''+o.address.replace(/'/g,"\\'")+'\',\''+String(o.fee||'').replace(/'/g,'')+'\')">Approve address</button>' : '')+
       '<button class="btn tiny" onclick="nudge('+o.id+',-5)">-5</button>'+

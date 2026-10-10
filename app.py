@@ -3467,9 +3467,6 @@ def order_dict(o):
         "reorder_ok": not reorder_closed(o),
         "queue_position": queue_position(o["id"]),
         "uses_app": bool(r["uses_app"]) if r is not None and "uses_app" in r.keys() else True,
-        "link_out_status": (o["link_out_status"] or "") if ("link_out_status" in o.keys() and o["link_out_id"]) else "",
-        "link_out_note": (o["link_out_note"] or "") if "link_out_note" in o.keys() else "",
-        "brand_id": order_brand_id(o),
         "order_method": order_method(r),
         "order_url": ((r["order_url"] or "") if r is not None and "order_url" in r.keys() else ""),
         "manual_state": (o["manual_state"] or "") if "manual_state" in o.keys() else "",
@@ -8196,18 +8193,6 @@ def api_sharing_test():
     if not l:
         return jsonify({"ok": False, "error": "Link not found."}), 404
     return jsonify(link_call(l, "/api/link/hello"))
-
-
-@app.get("/api/dispatch/sharing/lite")
-def api_sharing_lite():
-    """For the dispatch board: linked platforms and which brands send overflow orders."""
-    if not dispatcher_required():
-        return jsonify({"ok": False}), 403
-    link_schema()
-    links = [{"id": l["id"], "name": l["name"]} for l in
-             db().execute("SELECT id, name FROM platform_links WHERE active=1 ORDER BY id").fetchall()]
-    return jsonify({"ok": True, "links": links,
-                    "send": [b["id"] for b in brands_for_share() if brand_share(b["id"])["send"]]})
 
 
 @app.get("/api/dispatch/sharing/drivers")
