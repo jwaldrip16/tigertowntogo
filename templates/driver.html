@@ -352,7 +352,10 @@ let GATED = '';
 function gateCheck(res, d){
   // closed business: closed screen only. Unscheduled: notice plus dispatch chat so they can still reach dispatch.
   let mode = '';
-  if (res.business_open === false) mode = 'closed';
+  // a driver who still has orders always sees their run, even after dispatch sets them off or the business closes
+  const hasOrders = (res.stack || []).length > 0;
+  if (hasOrders) mode = '';
+  else if (res.business_open === false) mode = 'closed';
   else if (res.scheduled === false && d.status === 'offline') mode = 'unscheduled';
   const name = BRAND_NAME || res.business_name || 'Dispatch';   // the company the driver signed in under
   const show = function(id, on){ const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !on); };

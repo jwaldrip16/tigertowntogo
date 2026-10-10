@@ -11998,10 +11998,8 @@ def set_driver_status(driver_id, status, reply):
     db().execute("INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                  (driver_id, "dispatch", reply, now()))
     db().commit()
-    if status != "online":
-        db().execute("""UPDATE orders SET driver_id=NULL, stack_seq=NULL, dispatch_status='queued'
-                        WHERE driver_id=? AND dispatch_status='assigned'""", (driver_id,))
-        db().commit()
+    # Going on break or offline never takes orders away: every order the driver already has
+    # (accepted or not) stays on their run until dispatch reassigns it by hand.
     auto_assign()
 
 # ---------------------------------------------------------------- driver app
@@ -16507,19 +16505,13 @@ def api_driver_call_911():
     reason = " ".join(str(data.get("reason") or "").split())[:200]
     if reason:
         note += " Reason: " + reason + ("" if reason.endswith((".", "!", "?")) else ".")
-    # food already picked up (en route) stays with the driver; anything not picked up goes back in the queue
-    keep = [r for r in live if r["dispatch_status"] == "enroute"]
-    moved = [r for r in live if r["dispatch_status"] != "enroute"]
+    # every order stays with the driver; dispatch reassigns by hand if needed
     if live:
         top = [r for r in live if r["id"] == oid][0]
         note += " They were " + stage_words.get(top["dispatch_status"], top["dispatch_status"]) + "."
         note += " They are on break now."
-        if keep:
-            note += " %s stayed with them (not reassigned)." % (
-                "The order they picked up" if len(keep) == 1 else "The %d orders they picked up" % len(keep))
-        if moved:
-            note += " %s back in the queue for another driver." % (
-                "1 order not picked up yet went" if len(moved) == 1 else "%d orders not picked up yet went" % len(moved))
+        note += " %s still assigned to them (not reassigned). Reassign from the board if needed." % (
+            "Their order is" if len(live) == 1 else "Their %d orders are" % len(live))
     else:
         note += " They were not on an order. They are on break now."
     db().execute("""INSERT INTO call_alerts(who,driver_id,order_id,name,phone,note,created_at,kind,lat,lng)
@@ -16537,18 +16529,10 @@ def api_driver_call_911():
                   (" I was on order " + _code + "." if _code else "") +
                   (" Reason: " + reason if reason else ""), now()))
     db().commit()
-    # hand every live order back to the queue so another driver gets it
-    if moved:
-        db().execute("""UPDATE orders SET driver_id=NULL, stack_seq=NULL, dispatch_status='queued'
-                        WHERE driver_id=? AND dispatch_status IN ('assigned','received','at_restaurant')""", (did,))
-        db().commit()
-        for r in moved:
-            log("order", "order id %s taken off %s (driver called 911) and put back in the queue" % (r["id"], d["name"] or "driver"))
-    # on break so nothing new comes to them; set_driver_status also reassigns the queue (en route orders stay)
+    # on break so nothing new comes to them; their orders stay on their run
     set_driver_status(did, "break", "You hit Call 911, so you are on break" +
-                      (". The order you picked up is still yours" if keep else "") +
-                      (" and your order that wasn't picked up went to another driver" if moved and keep else
-                       " and your order went to another driver" if moved else "") + ". Dispatch will check on you.")
+                      (". Your order is still yours" if len(live) == 1 else
+                       ". Your orders are still yours" if live else "") + ". Dispatch will check on you.")
     return jsonify({"ok": True})
 
 @app.post("/api/restaurant/call-dispatch")
