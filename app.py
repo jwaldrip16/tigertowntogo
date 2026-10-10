@@ -16505,13 +16505,19 @@ def api_driver_call_911():
     reason = " ".join(str(data.get("reason") or "").split())[:200]
     if reason:
         note += " Reason: " + reason + ("" if reason.endswith((".", "!", "?")) else ".")
-    # every order stays with the driver; dispatch reassigns by hand if needed
+    # food already picked up (en route to the customer) stays with the driver; anything else goes back in the queue
+    keep = [r for r in live if r["dispatch_status"] == "enroute"]
+    moved = [r for r in live if r["dispatch_status"] != "enroute"]
     if live:
         top = [r for r in live if r["id"] == oid][0]
         note += " They were " + stage_words.get(top["dispatch_status"], top["dispatch_status"]) + "."
         note += " They are on break now."
-        note += " %s still assigned to them (not reassigned). Reassign from the board if needed." % (
-            "Their order is" if len(live) == 1 else "Their %d orders are" % len(live))
+        if keep:
+            note += " %s stayed with them (not reassigned)." % (
+                "The order they picked up" if len(keep) == 1 else "The %d orders they picked up" % len(keep))
+        if moved:
+            note += " %s back in the queue for another driver." % (
+                "1 order not picked up yet went" if len(moved) == 1 else "%d orders not picked up yet went" % len(moved))
     else:
         note += " They were not on an order. They are on break now."
     db().execute("""INSERT INTO call_alerts(who,driver_id,order_id,name,phone,note,created_at,kind,lat,lng)
@@ -16529,10 +16535,20 @@ def api_driver_call_911():
                   (" I was on order " + _code + "." if _code else "") +
                   (" Reason: " + reason if reason else ""), now()))
     db().commit()
-    # on break so nothing new comes to them; their orders stay on their run
+    # orders not picked up yet go back in the queue so another driver gets them
+    if moved:
+        db().execute("""UPDATE orders SET driver_id=NULL, stack_seq=NULL, dispatch_status='queued'
+                        WHERE driver_id=? AND dispatch_status IN ('assigned','received','at_restaurant')""", (did,))
+        db().commit()
+        for r in moved:
+            log("order", "order id %s taken off %s (driver called 911) and put back in the queue" % (r["id"], d["name"] or "driver"))
+    # on break so nothing new comes to them; an order already picked up stays theirs
     set_driver_status(did, "break", "You hit Call 911, so you are on break" +
-                      (". Your order is still yours" if len(live) == 1 else
-                       ". Your orders are still yours" if live else "") + ". Dispatch will check on you.")
+                      (". The order you picked up is still yours" if len(keep) == 1 else
+                       ". The orders you picked up are still yours" if keep else "") +
+                      (" and your order that wasn't picked up went to another driver" if moved and keep else
+                       ". Your order went to another driver" if len(moved) == 1 else
+                       ". Your orders went to another driver" if moved else "") + ". Dispatch will check on you.")
     return jsonify({"ok": True})
 
 @app.post("/api/restaurant/call-dispatch")

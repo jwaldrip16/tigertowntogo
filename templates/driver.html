@@ -33,7 +33,7 @@ if("serviceWorker" in navigator){navigator.serviceWorker.register("/sw.js",{scop
 {% endblock %}
 {% block body %}
 <div class="head"><h1>{{ driver_name }}</h1>
-  <div class="headbtns"><button class="btn small primary" onclick="openNavPick()">Navigate</button>
+  <div class="headbtns"><button class="btn small primary hidden" id="navBtn" onclick="openNavPick()">Navigate</button>
   <a class="btn small" href="/driver/logout">Sign out</a></div></div>
 <div id="lateBar" class="latebar hidden"></div>
 <div id="gate" class="panel hidden" style="text-align:center;padding:28px 16px">
@@ -360,6 +360,8 @@ function gateCheck(res, d){
   const name = BRAND_NAME || res.business_name || 'Dispatch';   // the company the driver signed in under
   const show = function(id, on){ const el = document.getElementById(id); if (el) el.classList.toggle('hidden', !on); };
   const tabbar = document.querySelector('.tabbar');
+  // Navigate only for drivers who are scheduled and on shift (online or on break)
+  show('navBtn', !mode && res.scheduled !== false && (d.status === 'online' || d.status === 'break'));
   if (!mode){
     if (GATED){ GATED = ''; show('gate', false); show('status', true); show('sosRow', true); if (tabbar) tabbar.classList.remove('hidden'); dtab('run'); }
     return false;
@@ -373,10 +375,10 @@ function gateCheck(res, d){
   show('gate', true); show('status', false);
   if (tabbar) tabbar.classList.add('hidden');
   ['paneRun','paneSched','paneDone'].forEach(function(id){ show(id, false); });
-  // closed: the notice only (no Call 911, Call dispatch or chat). Unscheduled: notice, call and chat.
+  // closed: the notice only. Unscheduled: the notice, Call dispatch and the dispatch chat only.
   const closed = mode === 'closed';
   show('gateCall', !closed);
-  show('sosRow', !closed);
+  show('sosRow', false);
   show('paneChat', !closed);
   if (GATED !== mode && !closed){ DTAB = 'chat'; chat(); }
   GATED = mode;
