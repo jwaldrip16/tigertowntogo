@@ -666,6 +666,8 @@ ul.ordlines{margin:4px 0}
 .ovpanel{max-width:640px;width:94%;font-size:17px;line-height:1.45;margin:auto}
 .ovhead{display:flex;justify-content:space-between;align-items:flex-start;gap:10px;border-bottom:1px solid #e5e7eb;padding-bottom:10px;margin-bottom:6px}
 .ovnum{font-size:22px;font-weight:800}
+.ovrest{font-size:17px;margin:2px 0}
+.drvrest{font-size:17px;font-weight:700;margin:4px 0 6px}
 .ovrow{display:grid;grid-template-columns:120px 1fr;gap:10px;padding:9px 0;border-bottom:1px solid #f1f5f9}
 .ovlbl{color:#6b7280;font-size:14px;font-weight:600;text-transform:uppercase;letter-spacing:.02em;padding-top:2px}
 .ovval a{font-weight:600}

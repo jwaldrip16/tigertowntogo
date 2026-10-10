@@ -393,6 +393,7 @@ function renderDone(list){
     return '<div class="panel slim"><div class="row between"><div><strong>' + ordMain(o) + '</strong> ' + (ordSub(o) ? '<span class="muted small">' + ordSub(o) + '</span> ' : '') +
       '<span class="pill ' + (o.dispatch_status === 'delivered' ? 'green' : 'grey') + '">' + o.dispatch_status + '</span></div>' +
       '<span class="muted small">' + (o.delivered_time || (o.delivered_at || '').slice(11, 16)) + '</span></div>' +
+      (o.restaurant ? '<div class="drvrest">' + hEsc(o.restaurant) + (o.customer ? ' <span class="muted small">&rarr; ' + hEsc(o.customer) + '</span>' : '') + '</div>' : '') +
       '<div class="row" style="gap:6px;flex-wrap:wrap;margin-top:6px">' +
         OrderView.btn(o) +
         (o.phone ? '<a class="btn tiny" href="tel:' + ph + '">Call customer</a><a class="btn tiny" href="sms:' + ph + '">Text customer</a>' : '') +
@@ -507,6 +508,7 @@ function renderRun(stack, total){
     '<span class="pill '+(o.kitchen_status==='ready'?'green':'amber')+'">'+kitchenLabel(o)+'</span> '+
     '<span class="pill blue">'+o.dispatch_status.replace('_',' ')+'</span>'+
     (o.drop_label ? ' <span class="pill '+(o.drop_style==='door'?'grey':'amber')+'">'+o.drop_label+'</span>' : '')+'</div>'+
+    (o.restaurant ? '<div class="drvrest">'+hEsc(o.restaurant)+(o.customer ? ' <span class="muted small">&rarr; '+hEsc(o.customer)+'</span>' : '')+'</div>' : '')+
     '<div class="order-actions">'+
     OrderView.btn(o)+
     '<button class="btn tiny primary" onclick="navStop('+ix+',\'r\')">Navigate to restaurant</button>'+

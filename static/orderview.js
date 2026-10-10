@@ -50,17 +50,18 @@
               money('Tip'+((o.tip_pct!==null && o.tip_pct!==undefined && o.tip_cents) ? ' ('+o.tip_pct+'% of food)' : ''), o.tip) + (o.discount_note ? '<div class="ovmoney"><span>Discount</span><span>'+esc(o.discount_note)+'</span></div>' : '') +
               '<div class="ovmoney ovtotal"><span>Total</span><span>'+esc(o.total||'')+'</span></div>';
     return '<div class="ovhead"><div><div class="ovnum">Order '+esc(num)+(o.ref?' <span class="pill grey">#'+esc(o.ref)+'</span>':'')+'</div>'+
+        (o.restaurant ? '<div class="ovrest"><b>'+esc(o.restaurant)+'</b></div>' : '')+
         (sub ? '<div class="muted small">'+esc(sub)+'</div>' : '')+
         (status ? '<div class="small">'+status+'</div>' : '')+'</div>'+
         '<button type="button" class="btn" onclick="OrderView.close()" aria-label="Close">Close</button></div>'+
       '<div class="ovbody">'+
+      row('Restaurant', '<b>'+esc(o.restaurant||'')+'</b>'+(o.restaurant_address ? '<br>'+esc(o.restaurant_address) : '')+(rph ? '<br>'+rph : ''))+
       row('Brand', o.site_name ? esc(o.site_name) : '')+
       row('House account', o.house ? '<b>'+esc(o.house_name || 'No business name')+'</b>' : '')+
       row('Scheduled for', o.scheduled_label ? '<b>'+esc(o.scheduled_label)+'</b>' : '')+
       row('Items'+(o.item_count ? ' ('+o.item_count+')' : ''), '<ul class="lines ovitems">'+lines(o)+'</ul>')+
       row('Customer', '<b>'+esc(o.customer||'')+'</b>'+(ph ? '<br>'+ph : ''))+
       row('Deliver to', esc(o.address||'')+(o.note ? '<div class="ovnote">'+esc(o.note)+'</div>' : ''))+
-      row('Restaurant', '<b>'+esc(o.restaurant||'')+'</b>'+(o.restaurant_address ? '<br>'+esc(o.restaurant_address) : '')+(rph ? '<br>'+rph : ''))+
       row('Driver', o.driver ? esc(o.driver) : '')+
       row('Dispatch note', o.dispatch_note ? '<div class="ovnote">'+esc(o.dispatch_note)+'</div>' : '')+
       row('Hand-off', o.drop_label ? '<b>'+esc(o.drop_label)+'</b>' : '')+

@@ -842,8 +842,10 @@ function renderCompleted(res){
     '<div class="order"><div class="order-head"><strong>'+esc(ordMain(o))+'</strong>'+(ordSub(o) ? ' <span class="muted small">'+esc(ordSub(o))+'</span>' : '')+' '+refPill(o)+tokenPill(o)+'<span class="pill '+
     (o.dispatch_status==='delivered'?'green':'grey')+'">'+o.dispatch_status+'</span> '+
     '<span class="muted small">'+(o.delivered_time || (o.delivered_at||'').replace('T',' '))+'</span></div>'+
+    restLine(o)+
     '<div class="order-actions">'+
       OrderView.btn(o)+
+      reopenButtons(o)+
       (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
       (!o.driver_id && o.dispatch_status!=='cancelled' ? '<select class="sendsel" id="sd'+o.id+'">'+
         '<option value="">Next up</option>'+ (res.drivers||[]).filter(d=>d.status==='online')
@@ -1455,6 +1457,7 @@ function orderCard(o, opts, drivers){
     payPill(o)+
     (o.tip_cents ? ' <span class="pill grey">tip '+o.tip+(o.tip_pct!==null && o.tip_pct!==undefined ? ' ('+o.tip_pct+'%)' : '')+'</span>' : '')+
     (o.placed_by!=='customer' ? ' <span class="pill grey">by '+o.placed_by+'</span>' : '')+'</div>'+
+    restLine(o)+
     (o.needs_address_approval ? '<div class="issuebar">Address not verified &middot; pending dispatch '+
       'approval. The kitchen has not seen this order yet.</div>' : '')+
     '<div class="order-actions">'+
@@ -1648,11 +1651,22 @@ function regionPickFor(d, st){
   };
 }
 async function reopen(id, code, keep){
-  if (ownerLocked(id)) return;
   if(!confirm('Reopen '+code+'? It goes back on the live board'+
-              (keep?' with the same driver.':' and into the queue for assignment.'))) return;
-  await jpost('/api/order/reopen', {order_id:id, keep_driver:keep});
+              (keep?' with the same driver. Their app pages them again and they tap Received.':' and into the queue for assignment.'))) return;
+  const res = await jpost('/api/order/reopen', {order_id:id, keep_driver:keep});
+  if(!res || res.ok===false){ alert((res && res.error) || 'Could not reopen that order.'); return; }
   tab('live'); board(true);
+}
+function reopenButtons(o){
+  if (o.dispatch_status==='cancelled' && !IS_OWNER) return '';
+  if (['delivered','cancelled'].indexOf(o.dispatch_status) < 0) return '';
+  const c = String(o.code||'').replace(/'/g,'');
+  return (o.driver_id ? '<button class="btn tiny primary" onclick="reopen('+o.id+',\''+c+'\',true)" title="Marked complete by mistake? Send it back to the same driver">Reopen to '+esc(o.driver||'driver')+'</button>' : '')+
+    '<button class="btn tiny" onclick="reopen('+o.id+',\''+c+'\',false)" title="Put it back in the queue for any driver">Reopen to queue</button>';
+}
+function restLine(o){
+  return o.restaurant ? '<div class="small" style="margin:2px 0 4px"><span class="muted">Restaurant:</span> <b>'+esc(o.restaurant)+'</b>'+
+    (o.customer ? ' <span class="muted">&rarr; '+esc(o.customer)+'</span>' : '')+'</div>' : '';
 }
 async function loadChat(){
   const sel = document.getElementById('chatDriver');

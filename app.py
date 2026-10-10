@@ -11261,10 +11261,20 @@ def api_reopen():
     data = request.get_json(force=True)
     o = db().execute("SELECT * FROM orders WHERE id=?", (data["order_id"],)).fetchone()
     if not o:
-        return jsonify({"ok": False}), 404
-    lk = delivered_lock(o)
-    if lk:
-        return lk
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    # Any dispatcher can reopen a delivered order (a driver tapping Complete by mistake).
+    # Cancelled orders can carry refunds, so those still need an owner.
+    if o["dispatch_status"] == "cancelled" and not is_owner():
+        return jsonify({"ok": False, "error": "Only an owner can reopen a cancelled order."}), 403
+    if o["dispatch_status"] not in ("delivered", "cancelled"):
+        return jsonify({"ok": False, "error": "That order is still open."}), 400
+    # a cash order is marked paid the moment it is completed; undo that when the
+    # completion was the mistake (paid in the same minute it was marked delivered)
+    if (o["dispatch_status"] == "delivered" and is_cash(o) and o["payment_status"] == "paid"
+            and (o["paid_at"] or "")[:16] and (o["paid_at"] or "")[:16] == (o["delivered_at"] or "")[:16]):
+        db().execute("""UPDATE orders SET payment_status='unpaid', paid_at=NULL, paid_cents=0
+                        WHERE id=?""", (o["id"],))
+    db().execute("UPDATE orders SET auto_pay_note=NULL WHERE id=?", (o["id"],))
     keep = bool(data.get("keep_driver")) and o["driver_id"]
     if keep:
         seq = db().execute("""SELECT COALESCE(MAX(stack_seq),0)+1 s FROM orders WHERE driver_id=?
@@ -11281,7 +11291,7 @@ def api_reopen():
         db().execute("""UPDATE orders SET dispatch_status='queued', delivered_at=NULL, driver_id=NULL,
                         stack_seq=NULL, hold_reason=NULL WHERE id=?""", (o["id"],))
     db().commit()
-    log("reopen", o["code"])
+    log("reopen", o["code"] + " by " + (session.get("dispatcher_name") or "Dispatch"))
     if keep:
         log_driver(o["driver_id"], "Dispatch reopened " + o["code"] + " and re-paged the driver")
     auto_assign()
