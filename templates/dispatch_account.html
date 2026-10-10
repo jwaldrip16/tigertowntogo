@@ -83,6 +83,23 @@
       </div>
       <div class="small" id="freshMsg"></div>
     </div>
+    <div class="panel mt" id="movePanel" style="display:none">
+      <h2>Move a brand to its own platform</h2>
+      <div id="moveOut">
+        <p class="muted small">Download a brand as one file: its website and design, regions, restaurants and menus,
+        drivers, dispatchers, customers and order history. Bring it in on another Railway copy. Move each brand to its own
+        copy, or bring two brands into the same copy. PayPal and Branch keys are not in the file, so enter them again there.
+        The brand stays here until you remove it.</p>
+        <div id="moveList" class="small"></div>
+      </div>
+      <div id="moveIn" style="display:none">
+        <p class="muted small">Bring in a brand file downloaded from the main platform (Developer access, Move a brand).
+        You can bring in more than one brand. Drivers and dispatchers already on this copy are matched by phone and username.</p>
+        <input type="file" id="moveFile" accept=".zip">
+        <button class="btn small" onclick="brandUpload()">Bring in brand</button>
+      </div>
+      <div class="small" id="moveMsg"></div>
+    </div>
     <div class="panel mt">
       <h2>Dispatcher room</h2>
       <p class="muted small" id="roomNote">Private thread between dispatchers. Drivers never see this.</p>
@@ -137,6 +154,32 @@ async function startFresh(){
   document.getElementById('freshForm').style.display='none';
 }
 loadFresh();
+async function loadMove(){
+  const r = await fetch('/api/dispatch/brand-move'); if(!r.ok) return;
+  const j = await r.json(); if(!j.ok) return;
+  document.getElementById('movePanel').style.display='';
+  const sep = j.role==='separate';
+  document.getElementById('moveIn').style.display = sep ? '' : 'none';
+  document.getElementById('moveOut').style.display = (sep && !(j.brands||[]).length) ? 'none' : '';
+  document.getElementById('moveList').innerHTML = (j.brands||[]).length ? j.brands.map(b=>
+    '<div class="row between" style="margin:4px 0"><span><b>'+b.name.replace(/</g,'&lt;')+'</b> <span class="muted">'+b.regions+' region'+(b.regions===1?'':'s')+', '+
+    b.restaurants+' restaurant'+(b.restaurants===1?'':'s')+'</span></span>'+
+    '<a class="btn small" href="/api/dispatch/brand-export?site_id='+b.id+'">Download brand file</a></div>').join('')
+    : '<span class="muted">No brands on this copy yet.</span>';
+}
+async function brandUpload(){
+  const f = document.getElementById('moveFile').files[0], m = document.getElementById('moveMsg');
+  if(!f){ m.className='small bad'; m.textContent='Pick the brand file first.'; return; }
+  m.className='small'; m.textContent='Bringing it in\u2026';
+  const fd = new FormData(); fd.append('file', f);
+  const j = await (await fetch('/api/dispatch/brand-import',{method:'POST',body:fd})).json();
+  if(!j.ok){ m.className='small bad'; m.textContent=j.error||'Could not bring it in.'; return; }
+  const c=j.counts||{};
+  m.className='small good'; m.textContent='Done: '+(c.restaurants||0)+' restaurants, '+(c.menu_items||0)+' menu items, '+
+    (c.drivers||0)+' new drivers, '+(c.customers||0)+' customers and '+(c.orders||0)+' past orders added. Enter this brand\'s PayPal and Branch keys in Settings.';
+  loadMove(); loadFresh();
+}
+loadMove();
 async function loadUsers(){
   const res = await jget('/api/dispatch/users');
   if(!res.ok) return;

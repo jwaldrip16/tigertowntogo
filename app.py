@@ -7978,6 +7978,239 @@ def api_platform_set():
     return jsonify({"ok": True, "role": platform_role(), "host": platform_host()})
 
 
+# ---------------------------------------------------------------- move a brand to its own platform
+# A brand (its website, regions, restaurants and menus, drivers, dispatchers, customers and
+# order history) is downloaded as one file on this platform and brought in on a company's own
+# copy. PayPal and Branch keys are never put in the file: enter them again on the new copy.
+BRAND_FILE_VERSION = 1
+_MEDIA_RE = re.compile(r"[\w.-]+\.(?:png|jpe?g|webp|gif|svg|ico|mp3|mp4|pdf)", re.I)
+
+
+def _rows(sql, params=()):
+    return [dict(r) for r in db().execute(sql, params).fetchall()]
+
+
+def _in(ids):
+    ids = [int(i) for i in ids if i is not None]
+    return (",".join("?" * len(ids)) or "NULL"), ids
+
+
+def brand_package(site_id):
+    con = db()
+    site = con.execute("SELECT * FROM sites WHERE id=?", (site_id,)).fetchone()
+    if not site:
+        return None
+    out = {"version": BRAND_FILE_VERSION, "from": platform_host(), "made_at": dt.datetime.now().isoformat(timespec="seconds"),
+           "sites": [dict(site)]}
+    out["regions"] = _rows("SELECT * FROM regions WHERE site_id=?", (site_id,))
+    q, rg = _in([r["id"] for r in out["regions"]])
+    out["restaurants"] = _rows("SELECT * FROM restaurants WHERE region_id IN (%s)" % q, rg) if rg else []
+    q, rs = _in([r["id"] for r in out["restaurants"]])
+    out["menu_items"] = _rows("SELECT * FROM menu_items WHERE restaurant_id IN (%s)" % q, rs) if rs else []
+    out["closures"] = _rows("SELECT * FROM closures WHERE restaurant_id IN (%s)" % q, rs) if rs else []
+    q2, its = _in([r["id"] for r in out["menu_items"]])
+    out["option_groups"] = _rows("SELECT * FROM option_groups WHERE item_id IN (%s)" % q2, its) if its else []
+    q3, gs = _in([r["id"] for r in out["option_groups"]])
+    out["options"] = _rows("SELECT * FROM options WHERE group_id IN (%s)" % q3, gs) if gs else []
+    q, rg = _in(rg)
+    out["driver_regions"] = _rows("SELECT * FROM driver_regions WHERE region_id IN (%s)" % q, rg) if rg else []
+    qd, ds = _in(sorted({r["driver_id"] for r in out["driver_regions"]}))
+    out["drivers"] = _rows("SELECT * FROM drivers WHERE id IN (%s)" % qd, ds) if ds else []
+    out["dispatcher_regions"] = _rows("SELECT * FROM dispatcher_regions WHERE region_id IN (%s)" % q, rg) if rg else []
+    qp, ps = _in(sorted({r["dispatcher_id"] for r in out["dispatcher_regions"]}))
+    out["dispatchers"] = _rows("SELECT * FROM dispatchers WHERE id IN (%s) AND COALESCE(is_dev,0)=0" % qp, ps) if ps else []
+    out["orders"] = _rows("SELECT * FROM orders WHERE region_id IN (%s) OR restaurant_id IN (%s)"
+                          % (q, _in(rs)[0]), rg + rs) if rg else []
+    qc, cs = _in(sorted({o["customer_id"] for o in out["orders"] if o.get("customer_id")}))
+    out["customers"] = _rows("SELECT * FROM customers WHERE id IN (%s)" % qc, cs) if cs else []
+    for o in out["orders"]:          # card and payment-processor references stay behind
+        for k in list(o):
+            if k.startswith(("pp_vault", "stripe_")) or k in ("save_card", "tip_sig_data"):
+                o[k] = None
+    for c in out["customers"]:
+        c["pp_customer_id"] = None
+    for d in out["drivers"]:
+        d["branch_account_id"] = None
+        d["payout_branch_id"] = None
+        d["payout_branch_ids"] = None
+    files = set()
+    for t, rows in out.items():
+        if isinstance(rows, list):
+            for r in rows:
+                for v in r.values():
+                    if isinstance(v, str):
+                        for m in _MEDIA_RE.findall(v):
+                            if os.path.isfile(os.path.join(UPLOAD_DIR, os.path.basename(m))):
+                                files.add(os.path.basename(m))
+    out["files"] = sorted(files)
+    return out
+
+
+@app.get("/api/dispatch/brand-move")
+def api_brand_move_info():
+    if not dispatcher_required() or not is_dev():
+        return jsonify({"ok": False}), 403
+    brands = []
+    for st_ in db().execute("SELECT id, name FROM sites ORDER BY sort, id").fetchall():
+        regs = db().execute("SELECT id FROM regions WHERE site_id=?", (st_["id"],)).fetchall()
+        q, rg = _in([r["id"] for r in regs])
+        n = db().execute("SELECT COUNT(*) c FROM restaurants WHERE region_id IN (%s)" % q, rg).fetchone()["c"] if rg else 0
+        brands.append({"id": st_["id"], "name": st_["name"], "regions": len(regs), "restaurants": n})
+    return jsonify({"ok": True, "role": platform_role(), "brands": brands})
+
+
+@app.get("/api/dispatch/brand-export")
+def api_brand_export():
+    """Download one brand as a file to bring in on its own Railway copy."""
+    if not dispatcher_required() or not is_dev():
+        return jsonify({"ok": False, "error": "Only a developer can do this."}), 403
+    try:
+        sid = int(request.args.get("site_id") or 0)
+    except ValueError:
+        sid = 0
+    pkg = brand_package(sid)
+    if not pkg:
+        return jsonify({"ok": False, "error": "Brand not found."}), 404
+    import io, zipfile
+    from flask import send_file
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("brand.json", json.dumps(pkg, default=str))
+        for f in pkg["files"]:
+            try:
+                z.write(os.path.join(UPLOAD_DIR, f), "media/" + f)
+            except OSError:
+                pass
+    buf.seek(0)
+    name = re.sub(r"[^A-Za-z0-9]+", "-", pkg["sites"][0]["name"] or "brand").strip("-") or "brand"
+    log("brand_move", "%s downloaded %s to move it to its own platform" %
+        (session.get("dispatcher_name") or "developer", pkg["sites"][0]["name"]))
+    return send_file(buf, as_attachment=True, mimetype="application/zip", download_name=name + "-brand.zip")
+
+
+def _insert_row(table, row, cols_cache):
+    cols = cols_cache.get(table)
+    if cols is None:
+        cols = cols_cache[table] = [c for c in dbx.columns(db(), table)]
+    use = [c for c in row if c in cols and c != "id"]
+    cur = db().execute("INSERT INTO %s (%s) VALUES (%s)" % (table, ",".join(use), ",".join("?" * len(use))),
+                       [row[c] for c in use])
+    return cur.lastrowid
+
+
+def brand_bring_in(pkg, media):
+    """Add a brand file's data to this copy with new ids. Returns counts."""
+    if int(pkg.get("version") or 0) != BRAND_FILE_VERSION:
+        raise ValueError("That file is from a different version of the app. Update both copies and download it again.")
+    con, cc, n = db(), {}, {}
+    mp = {t: {} for t in ("sites", "regions", "restaurants", "menu_items", "option_groups", "drivers",
+                          "dispatchers", "customers", "orders")}
+    def add(t, r):
+        n[t] = n.get(t, 0) + 1
+        return _insert_row(t, r, cc)
+    for r in pkg.get("sites", []):
+        mp["sites"][r["id"]] = add("sites", r)
+    for r in pkg.get("regions", []):
+        r = dict(r); r["site_id"] = mp["sites"].get(r.get("site_id"))
+        if con.execute("SELECT 1 FROM regions WHERE name=?", (r["name"],)).fetchone():
+            r["name"] = r["name"] + " (moved)"
+        mp["regions"][r["id"]] = add("regions", r)
+    for r in pkg.get("restaurants", []):
+        r = dict(r); r["region_id"] = mp["regions"].get(r.get("region_id"))
+        base, k = r["slug"], 2
+        while con.execute("SELECT 1 FROM restaurants WHERE slug=?", (r["slug"],)).fetchone():
+            r["slug"] = "%s-%d" % (base, k); k += 1
+        mp["restaurants"][r["id"]] = add("restaurants", r)
+    for r in pkg.get("menu_items", []):
+        r = dict(r); r["restaurant_id"] = mp["restaurants"].get(r["restaurant_id"])
+        mp["menu_items"][r["id"]] = add("menu_items", r)
+    for r in pkg.get("option_groups", []):
+        r = dict(r); r["item_id"] = mp["menu_items"].get(r["item_id"])
+        mp["option_groups"][r["id"]] = add("option_groups", r)
+    for r in pkg.get("options", []):
+        r = dict(r); r["group_id"] = mp["option_groups"].get(r["group_id"])
+        add("options", r)
+    for r in pkg.get("closures", []):
+        r = dict(r); r["restaurant_id"] = mp["restaurants"].get(r["restaurant_id"])
+        if not con.execute("SELECT 1 FROM closures WHERE restaurant_id=? AND day=?", (r["restaurant_id"], r["day"])).fetchone():
+            add("closures", r)
+    for r in pkg.get("drivers", []):
+        ex = con.execute("SELECT id FROM drivers WHERE phone=?", (r["phone"],)).fetchone()
+        mp["drivers"][r["id"]] = ex["id"] if ex else add("drivers", dict(r, status="offline"))
+    for r in pkg.get("driver_regions", []):
+        d, g_ = mp["drivers"].get(r["driver_id"]), mp["regions"].get(r["region_id"])
+        if d and g_ and not con.execute("SELECT 1 FROM driver_regions WHERE driver_id=? AND region_id=?", (d, g_)).fetchone():
+            con.execute("INSERT INTO driver_regions(driver_id, region_id) VALUES(?,?)", (d, g_))
+    for r in pkg.get("dispatchers", []):
+        ex = con.execute("SELECT id FROM dispatchers WHERE username=?", (r["username"],)).fetchone()
+        mp["dispatchers"][r["id"]] = ex["id"] if ex else add("dispatchers", dict(r, is_dev=0))
+    for r in pkg.get("dispatcher_regions", []):
+        d, g_ = mp["dispatchers"].get(r["dispatcher_id"]), mp["regions"].get(r["region_id"])
+        if d and g_ and not con.execute("SELECT 1 FROM dispatcher_regions WHERE dispatcher_id=? AND region_id=?", (d, g_)).fetchone():
+            con.execute("INSERT INTO dispatcher_regions(dispatcher_id, region_id) VALUES(?,?)", (d, g_))
+    for r in pkg.get("customers", []):
+        ex = con.execute("SELECT id FROM customers WHERE phone=?", (r["phone"],)).fetchone() if r.get("phone") else None
+        mp["customers"][r["id"]] = ex["id"] if ex else add("customers", r)
+    for r in sorted(pkg.get("orders", []), key=lambda o: o["id"]):
+        r = dict(r)
+        r["restaurant_id"] = mp["restaurants"].get(r.get("restaurant_id"))
+        if not r["restaurant_id"]:
+            continue
+        r["region_id"] = mp["regions"].get(r.get("region_id"))
+        r["driver_id"] = mp["drivers"].get(r.get("driver_id"))
+        r["redo_driver_id"] = mp["drivers"].get(r.get("redo_driver_id"))
+        r["customer_id"] = mp["customers"].get(r.get("customer_id"))
+        for k in ("rest_invoice_id", "gift_card_id", "cloned_from", "multi_with"):
+            if k in r:
+                r[k] = None
+        if r.get("code") and con.execute("SELECT 1 FROM orders WHERE code=?", (r["code"],)).fetchone():
+            continue
+        mp["orders"][r["id"]] = add("orders", r)
+    for name, data in media.items():
+        dst = os.path.join(UPLOAD_DIR, os.path.basename(name))
+        if not os.path.exists(dst):
+            with open(dst, "wb") as fh:
+                fh.write(data)
+            n["files"] = n.get("files", 0) + 1
+    con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('fresh_start','1')")
+    return n
+
+
+@app.post("/api/dispatch/brand-import")
+def api_brand_import():
+    """On a company's own copy: bring in a brand file downloaded from the main platform."""
+    if not dispatcher_required() or not is_dev():
+        return jsonify({"ok": False, "error": "Only a developer can do this."}), 403
+    if platform_role() != "separate":
+        return jsonify({"ok": False, "error": "Mark this copy as a separate company platform first "
+                                             "(This platform, above)."}), 400
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"ok": False, "error": "Pick the brand file you downloaded."}), 400
+    import io, zipfile
+    try:
+        z = zipfile.ZipFile(io.BytesIO(f.read()))
+        pkg = json.loads(z.read("brand.json").decode("utf-8"))
+        media = {n_[6:]: z.read(n_) for n_ in z.namelist()
+                 if n_.startswith("media/") and len(n_) > 6 and z.getinfo(n_).file_size <= 25 * 1024 * 1024}
+    except Exception:
+        return jsonify({"ok": False, "error": "That isn't a brand file from Developer access."}), 400
+    try:
+        counts = brand_bring_in(pkg, media)
+        db().commit()
+    except ValueError as e:
+        db().rollback()
+        return jsonify({"ok": False, "error": str(e)}), 400
+    except Exception as e:
+        db().rollback()
+        return jsonify({"ok": False, "error": "Nothing was added. The file could not be read in: " + str(e)[:200]}), 400
+    log("brand_move", "%s brought in %s from %s" % (session.get("dispatcher_name") or "developer",
+                                                     (pkg.get("sites") or [{}])[0].get("name", "a brand"),
+                                                     pkg.get("from") or "another platform"))
+    db().commit()
+    return jsonify({"ok": True, "counts": counts})
+
+
 @app.get("/api/dispatch/start-fresh")
 def api_start_fresh_info():
     if not dispatcher_required() or not (is_dev() or is_owner()):
