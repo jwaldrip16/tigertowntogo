@@ -150,7 +150,7 @@ function drawSites(){
     (s.logo ? '<img src="'+e(s.logo)+'" alt="" style="width:44px;height:44px;object-fit:contain;border-radius:8px;background:#fff">' : '') +
     '<span><strong>'+e(s.name)+'</strong>' +
     '<div class="muted small">Phone: '+e(s.phone || 'business number')+'</div>' +
-    '<div class="muted small">Web address: '+e(s.domains || 'none yet')+(s.home ? ' &middot; also shown on the Railway address' : '')+'</div>' +
+    '<div class="muted small">Web address: '+e(s.domains || 'none yet')+(s.home ? (s.rail_off ? ' &middot; on the Railway address, marked unavailable' : ' &middot; also shown on the Railway address') : '')+'</div>' +
     '<div class="muted small">Design: '+designLine(s)+'</div>' +
     '<div class="muted small">Regions: '+e(RG.regions.filter(r=>r.site_id===s.id).map(r=>r.name).join(', ') || 'none yet')+'</div></span></span>' +
     (RG.owner ? '<span><button class="btn tiny" onclick="siteForm('+s.id+')">Edit</button>' +
@@ -172,7 +172,11 @@ function siteForm(id){
     '<div class="row mt"><input id="stPhone" maxlength="20" placeholder="Phone, like (334) 555-0100" value="'+e(s.phone)+'"></div>' +
     '<div class="row mt"><input id="stDomains" placeholder="Web address, like tigertowntogo.com" value="'+e(s.domains)+'" style="min-width:280px"></div>' +
     '<div class="muted small">Add more than one web address with commas. www. is covered automatically. In Railway, open the service, Settings, Networking, Custom Domain, add the same address, then add the CNAME record Railway shows at your domain company (Cloudflare: DNS only, grey cloud).</div>' +
-    '<label class="small mt" style="display:block"><input type="checkbox" id="stHome"'+(s.home?' checked':'')+'> Show this brand on the Railway address and any address that is not set up for a brand</label>' +
+    '<div class="small mt"><strong>On the Railway address</strong> (and any address not set up for a brand)</div>' +
+    '<label class="small" style="display:block"><input type="radio" name="stRail" value="none"'+(!s.home?' checked':'')+'> Not hosted there</label>' +
+    '<label class="small" style="display:block"><input type="radio" name="stRail" value="host"'+(s.home&&!s.rail_off?' checked':'')+'> Host this brand there, open for orders</label>' +
+    '<label class="small" style="display:block"><input type="radio" name="stRail" value="unavailable"'+(s.home&&s.rail_off?' checked':'')+'> Host this brand there, marked unavailable (customers are sent to its own web address)</label>' +
+    '<div class="muted small">Only one brand is hosted on the Railway address. Picking this brand replaces the one there now. Signed-in staff can still see it.</div>' +
     '<div class="row mt"><button class="btn primary small" onclick="saveSite('+id+')">Save site</button>' +
     '<button class="btn small" onclick="document.getElementById(\'stForm\').innerHTML=\'\';drawSites()">Cancel</button></div></div>';
   document.getElementById('stName').focus();
@@ -180,7 +184,7 @@ function siteForm(id){
 async function saveSite(id){
   const b = {op: id ? 'edit_site' : 'add_site', id: id, name: document.getElementById('stName').value,
              phone: document.getElementById('stPhone').value, domains: document.getElementById('stDomains').value,
-             home: document.getElementById('stHome').checked ? 1 : 0};
+             rail: (document.querySelector('input[name=stRail]:checked')||{}).value || 'none'};
   const r = await jpost('/api/dispatch/regions', b);
   if(!r.ok){ alert(r.error || 'That did not save.'); return; }
   document.getElementById('stForm').innerHTML = ''; RG = r; draw();

@@ -2057,6 +2057,74 @@ def suspend_guard():
 app.before_request_funcs.setdefault(None, []).insert(0, suspend_guard)
 
 
+# --- a brand hosted on the Railway address but marked unavailable there --------------------
+# Regions page > Brand sites > Edit > "On the Railway address": the brand shown on the Railway
+# address (and any address set up for no brand) can be marked unavailable. Customers on that
+# address then see an "unavailable here" page that points to the brand's own web address.
+# The brand's own web addresses, staff pages, the shared apps and signed-in staff are not touched.
+
+def rail_off(sid):
+    try:
+        return str(setting("rail_off_%d" % int(sid), str) or "") == "1"
+    except Exception:
+        return False
+
+
+RAIL_OPEN_PREFIXES = SUSPEND_OPEN_PREFIXES + _STAFF_PREFIXES
+
+
+def rail_guard():
+    try:
+        if not brands_on():
+            return None
+        path = request.path or "/"
+        if path in SUSPEND_OPEN_PATHS or path.startswith(RAIL_OPEN_PREFIXES):
+            return None
+        if session.get("dispatcher_id"):
+            return None   # staff can still look at it
+        host = _norm_host(request.host)
+        rows = db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall()
+        if any(host in site_domains(r) for r in rows):
+            return None   # a brand's own web address
+        h = home_brand_site()
+        if h is None or not rail_off(h["id"]):
+            return None
+        name = (h["name"] or "").strip() or "This brand"
+        doms = [d for d in site_domains(h) if not d.endswith(".up.railway.app")]
+        msg = name + " isn't available at this web address."
+        if doms:
+            msg += " Please order at " + doms[0] + "."
+        if path.startswith("/api/") or request.is_json or "application/json" in (request.headers.get("Accept") or ""):
+            resp = jsonify({"ok": False, "unavailable": True, "error": msg})
+        else:
+            lg = (h["logo"] or "").strip()
+            logo = media_url(lg) if lg and os.path.exists(os.path.join(UPLOAD_DIR, os.path.basename(lg))) else ""
+            e = lambda x: (x or "").replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+            link = ('<p style="margin-top:18px"><a href="https://' + e(doms[0]) + '" style="display:inline-block;'
+                    'background:#222;color:#fff;padding:12px 22px;border-radius:10px;text-decoration:none;font-weight:600">'
+                    'Go to ' + e(doms[0]) + '</a></p>') if doms else ""
+            html = ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                    '<meta name="viewport" content="width=device-width,initial-scale=1">'
+                    '<meta name="robots" content="noindex"><title>' + e(name) + ' - unavailable here</title>'
+                    '<style>body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;'
+                    'font-family:-apple-system,Segoe UI,Roboto,Arial,sans-serif;background:#f5f6f8;color:#222}'
+                    '.card{background:#fff;max-width:440px;margin:24px;padding:36px 28px;border-radius:16px;'
+                    'box-shadow:0 4px 20px rgba(0,0,0,.08);text-align:center}'
+                    'img{width:96px;height:96px;object-fit:contain;margin-bottom:12px}'
+                    'h1{font-size:22px;margin:0 0 10px}p{font-size:16px;line-height:1.5;color:#555;margin:0}</style>'
+                    '</head><body><div class="card">' + ('<img src="' + e(logo) + '" alt="">' if logo else '') +
+                    '<h1>' + e(name) + '</h1><p>' + e(msg) + '</p>' + link + '</div></body></html>')
+            resp = app.response_class(html, mimetype="text/html")
+        resp.status_code = 503
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    except Exception:
+        return None
+
+
+app.before_request_funcs[None].insert(1, rail_guard)
+
+
 def covers(region_ids, order_region):
     """Does someone covering these regions see an order in this region? No regions = all."""
     return not region_ids or not order_region or order_region in region_ids
@@ -9901,6 +9969,7 @@ def sites_payload():
                     "regions": sorted(site_region_ids(s["id"])),
                     "home": bool(_home is not None and _home["id"] == s["id"]),
                     "locked": site_locked(s["id"]),
+                    "rail_off": rail_off(s["id"]),
                     "design": _design_payload(s)})
     return out
 
@@ -9991,10 +10060,19 @@ def sites_edit(b, con, who):
         else:
             con.execute("UPDATE sites SET name=?, phone=?, domains=? WHERE id=?", (name, ph, ",".join(doms), sid))
             log("site", who + " changed brand site " + name)
-        if str(b.get("home") or "").lower() in ("1", "true", "on", "yes"):
+        rail = str(b.get("rail") or "").strip().lower()
+        if rail not in ("host", "unavailable", "none"):
+            rail = "host" if str(b.get("home") or "").lower() in ("1", "true", "on", "yes") else "none"
+        if rail in ("host", "unavailable"):
             con.execute("DELETE FROM settings WHERE key='home_site_id'")
             con.execute("INSERT INTO settings(key,value) VALUES('home_site_id',?)", (str(sid),))
+        con.execute("DELETE FROM settings WHERE key=?", ("rail_off_%d" % int(sid),))
+        if rail == "unavailable":
+            con.execute("INSERT INTO settings(key,value) VALUES(?,?)", ("rail_off_%d" % int(sid), "1"))
+        if rail == "host":
             log("site", who + " made " + name + " the brand on the Railway address")
+        elif rail == "unavailable":
+            log("site", who + " put " + name + " on the Railway address, marked unavailable there")
         con.commit()
         return jsonify({"ok": True, "id": sid, **regions_payload()})
     if op == "site_design":
