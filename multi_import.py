@@ -170,14 +170,17 @@ def dd_parse(base, vid, url, p):
     for sec in re.split(r'<section class="dd_menu-section"', p)[1:]:
         st_ = re.search(r'dd_menu-section-header-title">(.*?)</h3>', sec, re.S)
         sname = clean(st_.group(1)) if st_ else "Menu"
-        for im in re.finditer(r'Lzip\((\d+),.*?<div class="dd_menu-item">(.*?)</div>\s*</a>', sec, re.S):
+        # older sites call Lzip(id, ...), newer ones L2(id, '0', event)
+        for im in re.finditer(r'(?:Lzip|L2)\((\d+),.*?<div class="dd_menu-item">(.*?)</div>\s*</a>', sec, re.S):
             body = im.group(2)
             t = re.search(r'dd_menu-item-title">(.*?)</div>', body, re.S)
             pr = re.search(r'dd_menu-item-price">(.*?)</p>', body, re.S)
             ds = re.search(r'dd_menu-item-description">(.*?)</p>', body, re.S)
             if not t: continue
             sort += 1
-            items.append({"name": clean(t.group(1)), "description": clean(ds.group(1)) if ds else "",
+            nm = re.sub(r"^\*+\s*|\s*\*+$", "", clean(t.group(1))).strip()   # some sites wrap names in **
+            if not nm: continue
+            items.append({"name": nm, "description": clean(ds.group(1)) if ds else "",
                           "price_cents": cents(clean(pr.group(1))) if pr else 0, "section": sname, "tab": "",
                           "image": "", "sort": sort, "groups": [], "zid": int(im.group(1))})
     return {"zid": "dd" + vid, "name": name, "cuisine": g("data-dd_vendorcuisine"), "address": addr,
