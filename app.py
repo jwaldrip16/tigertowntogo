@@ -65,10 +65,12 @@ def tz_shift(naive, src, dst):
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(APP_DIR, "delivery.db"))
-GOOGLE_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "")
+# Google maps are off: address checks use the free US Census geocoder (then OpenStreetMap),
+# routes use OSRM and map pictures use OpenStreetMap. Set USE_GOOGLE_MAPS=1 in Railway to turn Google back on.
+GOOGLE_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "") if os.environ.get("USE_GOOGLE_MAPS") == "1" else ""
 # Optional second key for the map pictures the browser loads. Lock it to your website in
 # Google Cloud. Falls back to GOOGLE_MAPS_API_KEY when it is not set.
-GOOGLE_TILE_KEY = os.environ.get("GOOGLE_MAPS_BROWSER_KEY", "") or GOOGLE_KEY
+GOOGLE_TILE_KEY = (os.environ.get("GOOGLE_MAPS_BROWSER_KEY", "") or GOOGLE_KEY) if GOOGLE_KEY else ""
 
 app = Flask(__name__)
 app.config["MAX_CONTENT_LENGTH"] = 16 * 1024 * 1024
@@ -1315,6 +1317,42 @@ def _geo_trouble():
     _GEO_DOWN_UNTIL[0] = time.time() + 60
 
 
+# service area center (Opelika / Auburn), used to pick the nearest match when a street name is in several towns
+_HOME_LL = (32.6099, -85.4808)
+
+
+def census_lookup(raw, limit=6):
+    """US street addresses from the free US Census geocoder (no key). When the typed address has no
+    town or ZIP, it also tries it with Alabama added and keeps the matches closest to the service area."""
+    def ask(text):
+        url = ("https://geocoding.geo.census.gov/geocoder/locations/onelineaddress?benchmark=Public_AR_Current"
+               "&format=json&address=" + urllib.parse.quote(text))
+        req = urllib.request.Request(url, headers={"User-Agent": "fleetdelivery/1.0"})
+        data = json.loads(urllib.request.urlopen(req, timeout=GEO_TIMEOUT).read())
+        out = []
+        for m in (data.get("result") or {}).get("addressMatches") or []:
+            c = m.get("coordinates") or {}
+            if c.get("y") is None or c.get("x") is None:
+                continue
+            out.append({"formatted": _census_nice(m.get("matchedAddress") or ""),
+                        "lat": float(c["y"]), "lng": float(c["x"])})
+        return out
+    hits = ask(raw)
+    if not hits and not re.search(r"\b(al|alabama)\b", raw.lower()):
+        hits = ask(raw + ", AL")
+    hits.sort(key=lambda h: haversine_miles(_HOME_LL[0], _HOME_LL[1], h["lat"], h["lng"]))
+    return hits[:limit]
+
+
+def _census_nice(a):
+    """'3440 LAKESHORE DR, OPELIKA, AL, 36804' -> '3440 Lakeshore Dr, Opelika, AL 36804'"""
+    parts = [x.strip() for x in a.split(",")]
+    if len(parts) >= 4:
+        street, city, st, z = parts[0], parts[1], parts[2], parts[3]
+        return "%s, %s, %s %s" % (street.title(), city.title(), st.upper(), z)
+    return a.title()
+
+
 def geocode(raw):
     """Validate + normalise a customer address. Returns dict(ok, formatted, lat, lng, source)."""
     q = " ".join(raw.lower().split())
@@ -1344,7 +1382,11 @@ def geocode(raw):
                 loc = top["geometry"]["location"]
                 res = {"ok": True, "formatted": top["formatted_address"],
                        "lat": loc["lat"], "lng": loc["lng"], "source": "google"}
-        else:
+        if res is None and not GOOGLE_KEY:
+            hits = census_lookup(raw, 1)
+            if hits:
+                res = dict(hits[0], ok=True, source="census")
+        if res is None and not GOOGLE_KEY:
             url = ("https://nominatim.openstreetmap.org/search?format=json&limit=1&q="
                    + urllib.parse.quote(raw))
             req = urllib.request.Request(url, headers={"User-Agent": "fleetdelivery/1.0"})
@@ -3803,10 +3845,18 @@ def api_address_suggest():
                     out.append({"formatted": h["formatted_address"],
                                 "lat": loc["lat"], "lng": loc["lng"]})
         else:
+            if re.match(r"\d", q):
+                for h in census_lookup(q):
+                    if h["formatted"] not in seen:
+                        seen.add(h["formatted"])
+                        out.append(h)
             url = ("https://nominatim.openstreetmap.org/search?format=json&limit=6"
                    "&countrycodes=us&viewbox=-85.75,32.95,-85.05,32.40&q=" + urllib.parse.quote(q))
             req = urllib.request.Request(url, headers={"User-Agent": "fleetdelivery/1.0"})
             for h in json.loads(urllib.request.urlopen(req, timeout=3).read()):
+                # keep type-ahead to places near the service area (no Colorado or Michigan matches)
+                if haversine_miles(_HOME_LL[0], _HOME_LL[1], float(h["lat"]), float(h["lon"])) > 80:
+                    continue
                 if h["display_name"] not in seen:
                     seen.add(h["display_name"])
                     out.append({"formatted": h["display_name"],
@@ -15713,7 +15763,7 @@ def api_dispatch_restaurant_google():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     if not GOOGLE_KEY:
-        return jsonify({"ok": False, "error": "Add GOOGLE_MAPS_API_KEY in Railway first."}), 400
+        return jsonify({"ok": False, "error": "Google lookups are turned off. Type the restaurant's phone and address by hand."}), 400
     try:
         rid = int((request.get_json(force=True, silent=True) or {}).get("restaurant_id") or 0)
     except (TypeError, ValueError):
