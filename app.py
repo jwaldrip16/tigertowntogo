@@ -65,9 +65,10 @@ def tz_shift(naive, src, dst):
 
 APP_DIR = os.path.dirname(os.path.abspath(__file__))
 DB_PATH = os.environ.get("DB_PATH", os.path.join(APP_DIR, "delivery.db"))
-# Google maps are off: address checks use the free US Census geocoder (then OpenStreetMap),
-# routes use OSRM and map pictures use OpenStreetMap. Set USE_GOOGLE_MAPS=1 in Railway to turn Google back on.
-GOOGLE_KEY = os.environ.get("GOOGLE_MAPS_API_KEY", "") if os.environ.get("USE_GOOGLE_MAPS") == "1" else ""
+# Google maps and address search are on whenever GOOGLE_MAPS_API_KEY is set in Railway.
+# If Google can't answer an address, the free US Census geocoder (then OpenStreetMap) is tried,
+# and map pictures fall back to the Esri street map. Set USE_GOOGLE_MAPS=0 to turn Google off.
+GOOGLE_KEY = "" if os.environ.get("USE_GOOGLE_MAPS") == "0" else os.environ.get("GOOGLE_MAPS_API_KEY", "").strip()
 # Optional second key for the map pictures the browser loads. Lock it to your website in
 # Google Cloud. Falls back to GOOGLE_MAPS_API_KEY when it is not set.
 GOOGLE_TILE_KEY = (os.environ.get("GOOGLE_MAPS_BROWSER_KEY", "") or GOOGLE_KEY) if GOOGLE_KEY else ""
@@ -1372,21 +1373,27 @@ def geocode(raw):
             return cached
         return {"ok": False, "formatted": None, "lat": None, "lng": None, "source": "none"}
     res = None
-    try:
-        if GOOGLE_KEY:
+    if GOOGLE_KEY:
+        try:
             url = ("https://maps.googleapis.com/maps/api/geocode/json?address="
-                   + urllib.parse.quote(raw) + "&key=" + GOOGLE_KEY)
+                   + urllib.parse.quote(raw) + "&components=country:US&key=" + GOOGLE_KEY)
             data = json.loads(urllib.request.urlopen(url, timeout=GEO_TIMEOUT).read())
             if data.get("status") == "OK":
                 top = data["results"][0]
                 loc = top["geometry"]["location"]
                 res = {"ok": True, "formatted": top["formatted_address"],
                        "lat": loc["lat"], "lng": loc["lng"], "source": "google"}
-        if res is None and not GOOGLE_KEY:
+            elif data.get("status") not in ("ZERO_RESULTS",):
+                print("google geocode:", data.get("status"), data.get("error_message", ""), flush=True)
+        except Exception as e:
+            print("google geocode failed:", e, flush=True)
+    try:
+        # Google had nothing (or isn't set up): try the US Census, then OpenStreetMap
+        if res is None:
             hits = census_lookup(raw, 1)
             if hits:
                 res = dict(hits[0], ok=True, source="census")
-        if res is None and not GOOGLE_KEY:
+        if res is None:
             url = ("https://nominatim.openstreetmap.org/search?format=json&limit=1&q="
                    + urllib.parse.quote(raw))
             req = urllib.request.Request(url, headers={"User-Agent": "fleetdelivery/1.0"})
@@ -3833,18 +3840,25 @@ def api_address_suggest():
     try:
         if len(out) >= 6 or _geo_down():
             raise LookupError("enough saved suggestions, or the lookup service isn't answering")
+        got_google = False
         if GOOGLE_KEY:
-            url = ("https://maps.googleapis.com/maps/api/geocode/json?address="
-                   + urllib.parse.quote(q) + "&components=country:US&key=" + GOOGLE_KEY)
-            data = json.loads(urllib.request.urlopen(url, timeout=3).read())
-            hits = data.get("results", []) if data.get("status") == "OK" else []
-            for h in hits[:6]:
-                loc = h["geometry"]["location"]
-                if h["formatted_address"] not in seen:
-                    seen.add(h["formatted_address"])
-                    out.append({"formatted": h["formatted_address"],
-                                "lat": loc["lat"], "lng": loc["lng"]})
-        else:
+            try:
+                url = ("https://maps.googleapis.com/maps/api/geocode/json?address="
+                       + urllib.parse.quote(q) + "&components=country:US"
+                       + "&bounds=32.40,-85.75|32.95,-85.05&key=" + GOOGLE_KEY)
+                data = json.loads(urllib.request.urlopen(url, timeout=3).read())
+                hits = data.get("results", []) if data.get("status") == "OK" else []
+                for h in hits[:6]:
+                    loc = h["geometry"]["location"]
+                    if h["formatted_address"] not in seen:
+                        seen.add(h["formatted_address"])
+                        out.append({"formatted": h["formatted_address"],
+                                    "lat": loc["lat"], "lng": loc["lng"]})
+                        got_google = True
+            except Exception as e:
+                print("google suggest failed:", e, flush=True)
+        if not got_google:
+            gsrc = "census"
             if re.match(r"\d", q):
                 for h in census_lookup(q):
                     if h["formatted"] not in seen:
@@ -12253,7 +12267,7 @@ ESRI_ATTR = "Tiles &copy; Esri, HERE, Garmin, USGS, OpenStreetMap contributors"
 
 @app.get("/api/map-tiles")
 def api_map_tiles():
-    """Which map pictures to draw: Google when a key is set, the Esri street map otherwise."""
+    """Which map pictures to draw: Google when a key is set (Esri street map if Google fails)."""
     ses = google_tile_session(request.host_url)
     if not ses:
         # Esri street map: US house numbers and street names show up close in (from HERE/TomTom data)
@@ -15767,7 +15781,7 @@ def api_dispatch_restaurant_google():
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     if not GOOGLE_KEY:
-        return jsonify({"ok": False, "error": "Google lookups are turned off. Type the restaurant's phone and address by hand."}), 400
+        return jsonify({"ok": False, "error": "Add GOOGLE_MAPS_API_KEY in Railway first, or type the restaurant's phone and address by hand."}), 400
     try:
         rid = int((request.get_json(force=True, silent=True) or {}).get("restaurant_id") or 0)
     except (TypeError, ValueError):
