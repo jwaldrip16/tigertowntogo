@@ -2,12 +2,13 @@
 <div class="panel">
   <h1>Companies in the shared apps</h1>
   <p class="muted">These are the companies workers can pick in the Fleet Foot Driver and Fleet Foot Kitchen apps. The code is what you give their drivers and restaurants. Turn off "Show in list" to make a company reachable by code only. Only developer accounts see this page.</p>
+  <p class="muted">To add a <b>separate company</b>, deploy its own copy of the app on Railway (its own database), then add it here with its own web address. It shows as "Separate platform": its dispatchers, drivers and restaurants sign in on its own site and can't see or reach any other company. A brand's address on this app (like Bulldawg Food or Crimson To Go) shows as "This platform" and shares this dispatch. Listed companies also appear on the main dispatch sign-in page so dispatchers can pick the company they work for.</p>
   <form id="coForm" class="card" style="margin:14px 0;padding:14px">
     <input type="hidden" name="id" value="0">
     <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px">
       <input name="name" placeholder="Company name (Tiger Town To Go)">
       <input name="code" placeholder="Code (tigertown)">
-      <input name="url" placeholder="Web address (tigertowntogo.com)">
+      <input name="url" placeholder="Web address (their own Railway address, or a brand domain on this app)">
     </div>
     <div style="margin-top:8px"><label class="small" for="coSite">Brand (logo and name shown in the apps)</label>
       <select name="site_id" id="coSite"><option value="0">Match by web address or name</option>{% for b in sites %}<option value="{{ b.id }}">{{ b.name }}</option>{% endfor %}</select></div>
@@ -18,7 +19,7 @@
       <span class="bad" id="coErr"></span></div>
   </form>
   <table class="tbl" style="width:100%">
-    <thead><tr><th>In the apps</th><th>Company</th><th>Code</th><th>Web address</th><th>Status</th><th></th></tr></thead>
+    <thead><tr><th>In the apps</th><th>Company</th><th>Code</th><th>Web address</th><th>Platform</th><th>Status</th><th></th></tr></thead>
     <tbody id="coRows"></tbody>
   </table>
   <p class="muted small" style="margin-top:14px">App links: <code>{{ request.host_url }}go/driver</code> and <code>{{ request.host_url }}go/kitchen</code></p>
@@ -28,10 +29,10 @@ var COS = {{ companies|tojson }};
 function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
 function draw(){
   var tb=document.getElementById('coRows'); tb.innerHTML='';
-  if(!COS.length){tb.innerHTML='<tr><td colspan="6" class="muted">No companies yet.</td></tr>';return;}
+  if(!COS.length){tb.innerHTML='<tr><td colspan="7" class="muted">No companies yet.</td></tr>';return;}
   COS.forEach(function(c){
     var tr=document.createElement('tr');
-    tr.innerHTML='<td style="white-space:nowrap"><img src="'+esc(c.logo)+'" alt="" style="width:32px;height:32px;object-fit:contain;vertical-align:middle;margin-right:6px">'+esc(c.brand)+(c.bs?'':' <span class="muted small">(no brand matched)</span>')+'</td><td>'+esc(c.name)+'</td><td>'+esc(c.code)+'</td><td>'+esc(c.url.replace(/^https?:\/\//,''))+'</td><td>'+
+    tr.innerHTML='<td style="white-space:nowrap"><img src="'+esc(c.logo)+'" alt="" style="width:32px;height:32px;object-fit:contain;vertical-align:middle;margin-right:6px">'+esc(c.brand)+(c.bs?'':' <span class="muted small">(no brand matched)</span>')+'</td><td>'+esc(c.name)+'</td><td>'+esc(c.code)+'</td><td>'+esc(c.url.replace(/^https?:\/\//,''))+'</td><td>'+(c.here?'This platform':'<b>Separate platform</b>')+'</td><td>'+
       (c.active?'Active':'Off')+(c.listed?'':' (code only)')+'</td><td style="white-space:nowrap"><button class="btn small" data-e="'+c.id+'">Edit</button> <button class="btn small" data-d="'+c.id+'">Delete</button></td>';
     tb.appendChild(tr);
   });

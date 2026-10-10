@@ -6007,7 +6007,27 @@ def dispatch_login():
             session["dispatcher_name"] = row["name"]
             return redirect(url_for("dispatch"))
         err = "Wrong username or password."
-    return render_template("dispatch_login.html", err=err)
+    try:
+        picks = dispatch_pick_companies()
+    except Exception:
+        picks = []
+    here_names = [c["brand"] or c["name"] for c in picks if c["here"]]
+    return render_template("dispatch_login.html", err=err, picks=picks, here_names=here_names)
+
+
+@app.get("/dispatch-company")
+def dispatch_company_code():
+    """A dispatcher types their company code on the main dispatch sign-in page. A company on a separate
+    platform opens its own dispatch sign-in; a brand on this platform stays here. Sign-ins never carry
+    over: a separate company's accounts only work on its own platform."""
+    code = (request.args.get("code") or "").strip().lower()
+    r = db().execute("SELECT * FROM companies WHERE code=? AND COALESCE(active,1)=1", (code,)).fetchone() if code else None
+    if not r or company_locked(dict(r)):
+        return redirect("/dispatch/login?nocode=1")
+    r = dict(r)
+    if company_here(r):
+        return redirect("/dispatch/login")
+    return redirect(live_company_url(r["url"]).rstrip("/") + "/dispatch/login")
 
 @app.route("/dispatch/logout")
 def dispatch_logout():
@@ -13533,8 +13553,43 @@ def clean_site_url(u):
     return pr.scheme + "://" + pr.netloc.lower()
 
 
+def this_platform_hosts():
+    """Every web address this copy of the app answers on: its Railway address, the address in use
+    right now, each brand's own domains and this app's old Railway names."""
+    hosts = set(old_own_railway_hosts())
+    for h in (os.environ.get("RAILWAY_PUBLIC_DOMAIN"), request.host if has_request_context() else ""):
+        h = _norm_host(h)
+        if h:
+            hosts.add(h)
+    try:
+        for r in db().execute("SELECT * FROM sites").fetchall():
+            hosts.update(site_domains(r))
+    except Exception:
+        pass
+    return hosts
+
+
+def company_here(c):
+    """True when the company runs on THIS platform (one of this app's brands, like Tiger Town To Go,
+    Bulldawg Food and Crimson To Go, sharing one dispatch). False for a separate company running its
+    own copy of the app at its own address, with its own database and its own sign-ins."""
+    return _norm_host(c.get("url")) in this_platform_hosts()
+
+
 def companies_with_look():
-    return [dict(r, **company_look(r)) for r in company_rows(False)]
+    return [dict(r, here=company_here(r), **company_look(r)) for r in company_rows(False)]
+
+
+def dispatch_pick_companies():
+    """Companies a dispatcher can pick on this platform's dispatch sign-in page. Only listed, active,
+    unlocked companies. Empty when every company is on this platform (nothing to pick)."""
+    rows = []
+    for r in company_rows():
+        if not (r.get("listed") if r.get("listed") is not None else 1) or company_locked(r):
+            continue
+        rows.append(dict(name=r["name"], code=r["code"], here=company_here(r),
+                         go=live_company_url(r["url"]).rstrip("/") + "/dispatch/login", **company_look(r)))
+    return rows if any(not c["here"] for c in rows) else []
 
 
 def company_rows(only_active=True):

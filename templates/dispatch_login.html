@@ -1,10 +1,29 @@
 {% extends "base.html" %}{% block body %}
 <div class="panel narrow">
+  {% if picks %}
+  <h1>Which company do you work for?</h1>
+  <p class="muted small">Each company signs in on its own platform. Brands on the same platform share one dispatch.</p>
+  {% if request.args.get('nocode') %}<p class="bad">No company with that code. Check with your manager.</p>{% endif %}
+  <div style="display:flex;flex-direction:column;gap:8px;margin:10px 0 14px">
+    {% for c in picks %}
+      <a class="btn" style="display:flex;align-items:center;gap:10px;text-align:left"
+         href="{{ '#signin' if c.here else c.go }}"{% if c.here %} onclick="document.getElementById('signinUser').focus()"{% endif %}>
+        <img src="{{ c.logo }}" alt="" style="width:32px;height:32px;object-fit:contain">
+        <span>{{ c.brand or c.name }}{% if c.here %} <span class="muted small">(sign in below)</span>{% endif %}</span></a>
+    {% endfor %}
+  </div>
+  <form method="get" action="/dispatch-company" class="row" style="gap:6px;margin-bottom:16px">
+    <input name="code" placeholder="Or enter your company code" autocomplete="off">
+    <button class="btn">Go</button>
+  </form>
+  <h2 id="signin">Sign in{% if here_names %} to {{ here_names|join(', ') }}{% endif %}</h2>
+  {% else %}
   <h1>Dispatcher sign in</h1>
+  {% endif %}
   {% if request.args.get('reset') %}<p class="good">Saved. Sign in with your new password.</p>{% endif %}
   {% if err %}<p class="bad">{{ err }}</p>{% endif %}
   <form method="post">
-    <input name="username" placeholder="Username" autofocus>
+    <input name="username" id="signinUser" placeholder="Username"{% if not picks %} autofocus{% endif %}>
     <input name="password" type="password" placeholder="Password">
     <button class="btn primary">Sign in</button>
   </form>
