@@ -10488,7 +10488,11 @@ def sites_edit(b, con, who):
             if not d:
                 continue
             if not re.fullmatch(r"[a-z0-9-]+(\.[a-z0-9-]+)+", d):
-                return jsonify({"ok": False, "error": d + " is not a web address. Use something like tigertowntogo.com."}), 400
+                hint = " Railway addresses use dashes, not underscores or spaces." if ("_" in d or " " in d) else ""
+                return jsonify({"ok": False, "error": d + " is not a web address. Use something like tigertowntogo.com." + hint}), 400
+            if d == platform_host() or d in old_own_railway_hosts():
+                return jsonify({"ok": False, "error": d + " is this platform's own Railway address. Leave it out and tick "
+                                "\"Show this brand on the Railway address\" instead."}), 400
             if d not in doms:
                 doms.append(d)
         sid = int(b.get("id") or 0) if op == "edit_site" else 0
@@ -10497,7 +10501,9 @@ def sites_edit(b, con, who):
         for s in con.execute("SELECT * FROM sites WHERE id IS NOT ?", (sid or None,)).fetchall():
             if s["name"].lower() == name.lower():
                 return jsonify({"ok": False, "error": "There is already a site called " + name + "."}), 400
-            both = set(doms) & set(site_domains(s))
+            # another platform's Railway address never reaches this copy, so two brands moved to the
+            # same Railway copy can both list it
+            both = {d for d in set(doms) & set(site_domains(s)) if not d.endswith(".up.railway.app")}
             if both:
                 return jsonify({"ok": False, "error": sorted(both)[0] + " already belongs to " + s["name"] + "."}), 400
         if op == "add_site":
