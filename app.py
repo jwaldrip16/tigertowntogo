@@ -329,8 +329,9 @@ def init_db():
         url TEXT NOT NULL, listed INTEGER DEFAULT 1, active INTEGER DEFAULT 1, created_at TEXT)""")
     ensure_column(con, "companies", "site_id", "INTEGER DEFAULT 0")   # brand shown in the shared apps (0 = match by web address)
     cur = con.execute("SELECT COUNT(*) c FROM restaurants")
-    if cur.fetchone()["c"] == 0:
-        seed(con)
+    _fresh = con.execute("SELECT value FROM settings WHERE key='fresh_start'").fetchone()
+    if cur.fetchone()["c"] == 0 and not (_fresh and _fresh[0] == "1"):
+        seed(con)   # a copy that was wiped with Start fresh stays empty
     topup_restaurants(con)
     for k, v in [("base_fee_cents", "399"), ("base_miles", "3"), ("per_mile_cents", "100"),
                  ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("kitchen_hold", "1"), ("keep_awake_driver", "1"), ("keep_awake_kitchen", "1"), ("auto_driver_pay", "1"), ("auto_pay_cap_cents", "2500"), ("auto_pay_delay_min", "15"), ("max_stack_default", "3"), ("sched_lead_min", "60"), ("stack_by_location", "1"), ("stack_pickup_mi", "0.5"), ("stack_detour_mi", "2"),
@@ -7846,6 +7847,105 @@ def api_dev_all_brands():
         " the developer All brands test view")
     db().commit()
     return jsonify({"ok": True, "on": bool(on)})
+
+# --- Start fresh: a new company wipes its own copy -------------------------
+# A separate company's copy of the app starts with this app's sample stores, menus and settings.
+# A developer or the owner can wipe everything on THEIR copy and start empty. Dispatcher sign-ins
+# for developers and the person doing it are kept so nobody gets locked out. Never allowed on the
+# main platform (the copy that lists separate companies, this app's own railway.app address, or a
+# copy with the Railway variable PROTECT_DATA=1).
+FRESH_KEEP_TABLES = {"dispatchers", "settings"}
+FRESH_TABLES = ["active_time", "applications", "availability", "blocked_customers", "branch_accounts",
+                "broadcasts", "call_alerts", "card_vault", "closures", "companies", "customers", "day_picks",
+                "dispatcher_availability", "dispatcher_regions", "driver_log", "driver_payouts", "driver_regions",
+                "drivers", "events", "geocache", "gift_cards", "gift_txns", "menu_items", "messages",
+                "option_groups", "options", "orders", "points_log", "regions", "rest_invoices", "rest_messages",
+                "restaurants", "revgeo", "reviews", "saved_cards", "sites", "staff_resets", "status_log",
+                "time_off", "week_submissions"]
+# settings kept through a wipe: sign-in security and the developer test switch
+FRESH_KEEP_SETTINGS = ("auto_secret_key", "dev_all_brands", "dev_perm")
+
+
+def start_fresh_blocked():
+    """Why this copy can't be wiped, or '' when it can."""
+    if (os.environ.get("PROTECT_DATA") or "").strip() == "1":
+        return "This copy is protected (PROTECT_DATA is on in Railway)."
+    if _norm_host(os.environ.get("RAILWAY_PUBLIC_DOMAIN")) in old_own_railway_hosts():
+        return "This is the main Fleet Foot platform. Start fresh only works on a new company's own copy."
+    try:
+        if any(not company_here(c) for c in company_rows(False)):
+            return "This is the main Fleet Foot platform (it lists other companies). Start fresh only works on a new company's own copy."
+    except Exception:
+        pass
+    return ""
+
+
+@app.get("/api/dispatch/start-fresh")
+def api_start_fresh_info():
+    if not dispatcher_required() or not (is_dev() or is_owner()):
+        return jsonify({"ok": False}), 403
+    counts = {}
+    for t in ("orders", "restaurants", "drivers", "customers", "regions", "sites"):
+        try:
+            counts[t] = db().execute("SELECT COUNT(*) c FROM " + t).fetchone()[0]
+        except Exception:
+            counts[t] = 0
+    return jsonify({"ok": True, "blocked": start_fresh_blocked(), "counts": counts})
+
+
+@app.post("/api/dispatch/start-fresh")
+def api_start_fresh():
+    if not dispatcher_required() or not (is_dev() or is_owner()):
+        return jsonify({"ok": False, "error": "Only a developer or the owner can do this."}), 403
+    why = start_fresh_blocked()
+    if why:
+        return jsonify({"ok": False, "error": why}), 403
+    f = request.get_json(silent=True) or {}
+    if (f.get("confirm") or "").strip() != "DELETE EVERYTHING":
+        return jsonify({"ok": False, "error": "Type DELETE EVERYTHING to confirm."}), 400
+    me = session.get("dispatcher_id")
+    row = db().execute("SELECT password FROM dispatchers WHERE id=?", (me,)).fetchone()
+    if not row or (f.get("password") or "") != row[0]:
+        return jsonify({"ok": False, "error": "That password is not right."}), 400
+    new_name = (f.get("business_name") or "").strip()[:80]
+    con = db()
+    for t in FRESH_TABLES:
+        try:
+            con.execute("DELETE FROM " + t)
+        except Exception as e:
+            print("start fresh skipped", t, e)
+    keep = ",".join("?" for _ in FRESH_KEEP_SETTINGS)
+    con.execute("DELETE FROM settings WHERE key NOT IN (" + keep + ")", FRESH_KEEP_SETTINGS)
+    # keep developers and the person doing this, so the copy can still be signed in to
+    con.execute("DELETE FROM dispatchers WHERE COALESCE(is_dev,0)=0 AND id<>?", (me,))
+    for k, v in (("fresh_start", "1"), ("store_list_loaded", "1"), ("biz_default_closed_v1", "1"),
+                 ("business_open", "0"), ("dispatch_phone", ""), ("business_address", ""),
+                 ("business_name", new_name or "New company")):
+        con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, v))
+    con.commit()
+    # uploaded photos and logos on this copy
+    removed = 0
+    try:
+        for fn in os.listdir(UPLOAD_DIR):
+            fp = os.path.join(UPLOAD_DIR, fn)
+            if os.path.isfile(fp):
+                os.remove(fp)
+                removed += 1
+    except Exception as e:
+        print("start fresh photos skipped:", e)
+    # put back the default settings (fees, timers, rewards) without the sample stores
+    try:
+        init_db()
+        con = dbx.connect(DB_PATH)
+        for k, v in (("dispatch_phone", ""), ("business_address", ""), ("business_name", new_name or "New company")):
+            con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (k, v))
+        con.commit()
+        con.close()
+    except Exception as e:
+        print("start fresh defaults skipped:", e)
+    print("START FRESH by dispatcher", me, "photos removed", removed)
+    return jsonify({"ok": True})
+
 
 @app.post("/api/dispatch/user-delete")
 def api_dispatch_user_delete():

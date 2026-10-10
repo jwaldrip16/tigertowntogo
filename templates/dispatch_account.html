@@ -59,6 +59,19 @@
         <a class="btn small" href="/dispatch/companies">Add or edit companies</a>
       </div>
     </div>
+    <div class="panel mt" id="freshPanel" style="display:none">
+      <h2>Start fresh (new company)</h2>
+      <p class="muted small" id="freshInfo">For a new company's own copy of the app. Deletes every order, restaurant, menu,
+      driver, customer, region, brand, gift card, chat, invoice, photo and setting on this copy, so the company starts empty.
+      Developer sign-ins and yours are kept. This can't be undone.</p>
+      <div id="freshForm">
+        <input id="freshName" placeholder="New company name (optional)">
+        <input id="freshConfirm" placeholder="Type DELETE EVERYTHING" autocomplete="off">
+        <input id="freshPw" type="password" placeholder="Your password">
+        <button class="btn small danger" onclick="startFresh()">Delete everything</button>
+      </div>
+      <div class="small" id="freshMsg"></div>
+    </div>
     <div class="panel mt">
       <h2>Dispatcher room</h2>
       <p class="muted small" id="roomNote">Private thread between dispatchers. Drivers never see this.</p>
@@ -75,6 +88,27 @@ async function jget(u){ const r = await fetch(u); return r.json(); }
 async function jpost(u,b){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(b)}); return r.json(); }
 
+async function loadFresh(){
+  const r = await fetch('/api/dispatch/start-fresh'); if(!r.ok) return;
+  const j = await r.json(); if(!j.ok) return;
+  document.getElementById('freshPanel').style.display='';
+  const c=j.counts||{};
+  document.getElementById('freshMsg').textContent = 'On this copy now: '+(c.orders||0)+' orders, '+(c.restaurants||0)+' restaurants, '+
+    (c.drivers||0)+' drivers, '+(c.customers||0)+' customers, '+(c.regions||0)+' regions, '+(c.sites||0)+' brands.';
+  if(j.blocked){ document.getElementById('freshForm').style.display='none';
+    document.getElementById('freshMsg').textContent = j.blocked; }
+}
+async function startFresh(){
+  if(document.getElementById('freshConfirm').value.trim()!=='DELETE EVERYTHING'){ alert('Type DELETE EVERYTHING to confirm.'); return; }
+  if(!confirm('Delete everything on this copy? This cannot be undone.')) return;
+  const j = await jpost('/api/dispatch/start-fresh',{confirm:document.getElementById('freshConfirm').value,
+    password:document.getElementById('freshPw').value, business_name:document.getElementById('freshName').value});
+  const m=document.getElementById('freshMsg');
+  if(!j.ok){ m.className='small bad'; m.textContent=j.error||'Could not delete.'; return; }
+  m.className='small good'; m.textContent='Done. This copy is empty. Add your brand, regions, restaurants and drivers next.';
+  document.getElementById('freshForm').style.display='none';
+}
+loadFresh();
 async function loadUsers(){
   const res = await jget('/api/dispatch/users');
   if(!res.ok) return;
