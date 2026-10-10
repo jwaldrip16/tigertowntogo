@@ -1,0 +1,102 @@
+{% extends "base.html" %}{% block title %}Sharing{% endblock %}{% block body %}
+<div class="panel">
+  <h1>Sharing with linked platforms</h1>
+  <p class="muted">Link this platform with another company's Railway address, then choose for each brand what it shares.
+  Every switch starts off, so nothing is shared until you turn it on. A linked platform never sees your other brands, drivers' PINs, menus or reports.</p>
+  <div id="msg" class="small"></div>
+</div>
+
+<div class="panel mt" id="brandPanel">
+  <h2>What each brand shares</h2>
+  <table class="tbl" style="width:100%"><thead><tr><th>Brand</th><th>Send overflow orders</th><th>Take overflow orders</th><th>Show online drivers</th></tr></thead>
+  <tbody id="brandRows"></tbody></table>
+  <p class="muted small">Send: dispatch can offer this brand's orders to a linked platform. Take: offers can be accepted into this brand's regions.
+  Show drivers: linked platforms see this brand's online drivers' first names, regions and how busy they are.</p>
+</div>
+
+<div class="panel mt">
+  <h2>Linked platforms</h2>
+  <div id="linkRows" class="small"></div>
+  <form id="linkForm" class="card" style="margin-top:10px;padding:12px" onsubmit="saveLink(event)">
+    <input type="hidden" id="lId" value="0">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px">
+      <input id="lName" placeholder="Company name (Macon2Go)">
+      <input id="lUrl" placeholder="Their web address (macon2go.up.railway.app)">
+      <input id="lKey" placeholder="Link key (leave blank to make one)" autocomplete="off">
+    </div>
+    <p class="muted small">Add the link on one platform with the key blank, copy the key it makes, then add this platform's address
+    (<b>{{ request.host }}</b>) on the other platform and paste the same key there.</p>
+    <button class="btn primary small" type="submit">Save link</button>
+  </form>
+</div>
+
+<div class="panel mt">
+  <h2>Offers to us</h2>
+  <div id="offerRows" class="small"></div>
+</div>
+
+<div class="panel mt">
+  <h2>Send an order</h2>
+  <div class="row"><input id="sCode" placeholder="Order code"><select id="sLink"></select>
+    <button class="btn small" onclick="sendOrder()">Offer it</button></div>
+  <div id="sentRows" class="small" style="margin-top:8px"></div>
+</div>
+
+<div class="panel mt">
+  <h2>Linked drivers online</h2>
+  <button class="btn small" onclick="loadDrivers()">Check now</button>
+  <div id="drvRows" class="small" style="margin-top:8px"></div>
+</div>
+
+<script>
+function esc(s){return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];});}
+function money(c){return '$'+((c||0)/100).toFixed(2);}
+async function jpost(u,b){const r=await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});return r.json();}
+function say(t,bad){const m=document.getElementById('msg');m.className='small '+(bad?'bad':'good');m.textContent=t;window.scrollTo(0,0);}
+let S={};
+async function load(){
+  const j=await (await fetch('/api/dispatch/sharing')).json(); if(!j.ok) return; S=j;
+  const dis=j.admin?'':' disabled';
+  document.getElementById('brandRows').innerHTML=j.brands.map(b=>'<tr><td><b>'+esc(b.name)+'</b></td>'+
+    ['send','take','drivers'].map(k=>'<td><input type="checkbox"'+(b[k]?' checked':'')+dis+' onchange="setShare('+b.id+',\''+k+'\',this.checked)"></td>').join('')+'</tr>').join('');
+  document.getElementById('linkForm').style.display=j.admin?'':'none';
+  document.getElementById('linkRows').innerHTML=j.links.length?j.links.map(l=>'<div class="row between" style="margin:4px 0"><span><b>'+esc(l.name)+'</b> '+
+    esc(l.url)+' <span class="muted">key ends '+esc(l.key_end)+(l.active?'':', paused')+'</span></span><span>'+
+    '<button class="btn small" onclick="testLink('+l.id+')">Test</button>'+(j.admin?
+    ' <button class="btn small" onclick="pauseLink('+l.id+','+(l.active?0:1)+')">'+(l.active?'Pause':'Turn on')+'</button>'+
+    ' <button class="btn small danger" onclick="removeLink('+l.id+')">Remove</button>':'')+'</span></div>').join(''):'<span class="muted">No linked platforms yet.</span>';
+  document.getElementById('sLink').innerHTML=j.links.filter(l=>l.active).map(l=>'<option value="'+l.id+'">'+esc(l.name)+'</option>').join('');
+  const regs=j.take_regions.map(r=>'<option value="'+r.id+'">'+esc(r.name)+'</option>').join('');
+  document.getElementById('offerRows').innerHTML=j.offers.length?j.offers.map(o=>'<div class="card" style="padding:8px;margin:6px 0"><b>'+
+    esc(o.from)+'</b> '+esc(o.brand||'')+' order '+esc(o.code)+'<br>Pickup: '+esc(o.pickup)+', '+esc(o.pickup_address)+'<br>Drop-off: '+esc(o.address)+
+    '<br>'+(o.miles?esc(o.miles)+' mi, ':'')+'delivery fee '+money(o.fee_cents)+', tip '+money(o.tip_cents)+(o.collect_cents?', collect '+money(o.collect_cents)+' cash':'')+
+    (o.status==='open'?(regs?'<div class="row" style="margin-top:6px"><select id="oReg'+o.id+'">'+regs+'</select><button class="btn small primary" onclick="answer('+o.id+',1)">Take it</button>'+
+      ' <button class="btn small" onclick="answer('+o.id+',0)">Turn down</button></div>':'<div class="muted">None of your regions take overflow orders. <button class="btn small" onclick="answer('+o.id+',0)">Turn down</button></div>')
+     :'<div class="good">Taken as '+esc(o.local_code)+' ('+esc(o.local_status)+')</div>')+'</div>').join(''):'<span class="muted">No offers right now.</span>';
+  document.getElementById('sentRows').innerHTML=j.sent.map(o=>'<div class="row between" style="margin:4px 0"><span><b>'+esc(o.code)+'</b> to '+esc(o.link_name)+': '+
+    esc((o.link_out_status||'').replace('_',' '))+(o.link_out_note?' <span class="muted">'+esc(o.link_out_note)+'</span>':'')+'</span>'+
+    (o.link_out_status!=='picked_up'?'<button class="btn small" onclick="takeBack('+o.id+')">Take back</button>':'')+'</div>').join('');
+}
+async function setShare(id,k,on){const b={site_id:id};b[k]=on;const j=await jpost('/api/dispatch/sharing/brand',b);if(!j.ok)say(j.error||'Could not save.',1);load();}
+async function saveLink(e){e.preventDefault();
+  const j=await jpost('/api/dispatch/sharing/link',{id:lId.value,name:lName.value,url:lUrl.value,key:lKey.value});
+  if(!j.ok){say(j.error,1);return;}
+  if(j.key){prompt('Link saved. Copy this key and paste it on the other platform (it is only shown once):',j.key);}
+  lName.value=lUrl.value=lKey.value='';say('Link saved.');load();}
+async function testLink(id){const j=await jpost('/api/dispatch/sharing/test',{id:id});
+  say(j.ok?('Connected to '+j.name+(j.takes_overflow?'. They take overflow orders.':'. They are not taking overflow orders right now.')):(j.error||'Not connected.'),!j.ok);}
+async function pauseLink(id,on){await jpost('/api/dispatch/sharing/link-off',{id:id,active:on});load();}
+async function removeLink(id){if(!confirm('Remove this link? Sharing with them stops.'))return;await jpost('/api/dispatch/sharing/link-off',{id:id,remove:1});load();}
+async function answer(id,acc){const b={id:id,accept:acc};if(acc)b.region_id=document.getElementById('oReg'+id).value;
+  const j=await jpost('/api/dispatch/link-offer',b);say(j.ok?(acc?'Taken as '+j.code+'. It is on your board now.':'Turned down.'):(j.error||'Could not save.'),!j.ok);load();}
+async function sendOrder(){const j=await jpost('/api/dispatch/order-share',{code:sCode.value,link_id:sLink.value});
+  say(j.ok?'Offered. You will see here when they take it.':(j.error||'Could not send.'),!j.ok);if(j.ok)sCode.value='';load();}
+async function takeBack(id){if(!confirm('Take this order back?'))return;const j=await jpost('/api/dispatch/order-share-cancel',{order_id:id});
+  say(j.ok?'Taken back.':(j.error||'Could not take it back.'),!j.ok);load();}
+async function loadDrivers(){const j=await (await fetch('/api/dispatch/sharing/drivers')).json();
+  document.getElementById('drvRows').innerHTML=(j.platforms||[]).map(p=>'<div><b>'+esc(p.link)+'</b>: '+(p.ok?(p.drivers.length?p.drivers.map(d=>esc(d.name)+
+    ' <span class="muted">('+esc(d.regions.join(', '))+(d.busy?', on '+d.busy+' order'+(d.busy>1?'s':''):', free')+')</span>').join(', '):'<span class="muted">none shown</span>'):
+    '<span class="bad">'+esc(p.error||'not reachable')+'</span>')+'</div>').join('')||'<span class="muted">No linked platforms.</span>';}
+load(); setInterval(load,20000);
+</script>
+{% endblock %}
