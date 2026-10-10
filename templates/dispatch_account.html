@@ -52,7 +52,18 @@
         <a href="/" target="_blank">Open the website</a></p>
         <div class="muted small" id="devAllMsg"></div>
       </div>
-      <div style="margin-top:12px">
+      <div style="margin-top:12px" id="platBox">
+        <b>This platform</b>
+        <p class="small" id="platNow">Checking&hellip;</p>
+        <div id="platBtns">
+          <button class="btn small" onclick="setPlatform('main')">Main Fleet Foot platform</button>
+          <button class="btn small" onclick="setPlatform('separate')">Separate company platform</button>
+        </div>
+        <p class="muted small">Main lists the other companies on its dispatch sign-in and in the shared driver and restaurant apps.
+        A separate company's copy only has its own brands and can't see or reach other companies. Set this once on each copy.</p>
+        <div class="small" id="platMsg"></div>
+      </div>
+      <div style="margin-top:12px" id="coBox">
         <b>Companies</b>
         <p class="muted small">Add a separate company that runs on its own platform (its own Railway copy and database),
         or connect this app's brands to the shared driver and restaurant apps. A separate company can't reach any other company.</p>
@@ -88,6 +99,23 @@ async function jget(u){ const r = await fetch(u); return r.json(); }
 async function jpost(u,b){ const r = await fetch(u,{method:'POST',headers:{'Content-Type':'application/json'},
   body:JSON.stringify(b)}); return r.json(); }
 
+async function loadPlatform(){
+  const r = await fetch('/api/dispatch/platform'); if(!r.ok) return;
+  const j = await r.json(); if(!j.ok) return;
+  const name = {main:'Main Fleet Foot platform', separate:'Separate company platform'}[j.role];
+  document.getElementById('platNow').innerHTML = 'Running at <b>'+(j.host||'this address')+'</b>. This copy is: <b>'+
+    (name || 'not set yet')+'</b>'+(j.protected?' (protected)':'');
+  document.getElementById('platBtns').style.display = j.protected ? 'none' : '';
+  document.getElementById('coBox').style.display = j.role==='separate' ? 'none' : '';
+}
+async function setPlatform(role){
+  if(role==='separate' && !confirm('Mark this copy as a separate company platform? It will stop listing other companies.')) return;
+  const j = await jpost('/api/dispatch/platform',{role:role});
+  const m=document.getElementById('platMsg');
+  if(!j.ok){ m.className='small bad'; m.textContent=j.error||'Could not save.'; return; }
+  m.className='small good'; m.textContent='Saved.'; loadPlatform(); loadFresh();
+}
+loadPlatform();
 async function loadFresh(){
   const r = await fetch('/api/dispatch/start-fresh'); if(!r.ok) return;
   const j = await r.json(); if(!j.ok) return;

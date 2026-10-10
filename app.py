@@ -7863,21 +7863,65 @@ FRESH_TABLES = ["active_time", "applications", "availability", "blocked_customer
                 "restaurants", "revgeo", "reviews", "saved_cards", "sites", "staff_resets", "status_log",
                 "time_off", "week_submissions"]
 # settings kept through a wipe: sign-in security and the developer test switch
-FRESH_KEEP_SETTINGS = ("auto_secret_key", "dev_all_brands", "dev_perm")
+FRESH_KEEP_SETTINGS = ("auto_secret_key", "dev_all_brands", "dev_perm", "platform_role")
+
+
+def platform_host():
+    return _norm_host(os.environ.get("RAILWAY_PUBLIC_DOMAIN") or (request.host if has_request_context() else ""))
+
+
+def platform_role():
+    """'main' (the Fleet Foot platform that lists the other companies), 'separate' (a company's own
+    copy) or '' when a developer hasn't said yet. The choice is saved with the web address it was made
+    on, so a copy whose database came from another copy shows 'not set' instead of the other copy's role."""
+    if (os.environ.get("PROTECT_DATA") or "").strip() == "1":
+        return "main"
+    raw = str(setting("platform_role", str) or "")
+    role, _, host = raw.partition("|")
+    if role in ("main", "separate") and host and host == platform_host():
+        return role
+    return ""
 
 
 def start_fresh_blocked():
     """Why this copy can't be wiped, or '' when it can."""
     if (os.environ.get("PROTECT_DATA") or "").strip() == "1":
         return "This copy is protected (PROTECT_DATA is on in Railway)."
-    if _norm_host(os.environ.get("RAILWAY_PUBLIC_DOMAIN")) in old_own_railway_hosts():
+    if platform_host() in old_own_railway_hosts():
         return "This is the main Fleet Foot platform. Start fresh only works on a new company's own copy."
-    try:
-        if any(not company_here(c) for c in company_rows(False)):
-            return "This is the main Fleet Foot platform (it lists other companies). Start fresh only works on a new company's own copy."
-    except Exception:
-        pass
+    role = platform_role()
+    if role == "main":
+        return "This copy is marked as the main Fleet Foot platform. Start fresh only works on a separate company's copy."
+    if role != "separate":
+        return "First mark this copy as a separate company platform under Developer access, This platform."
     return ""
+
+
+@app.get("/api/dispatch/platform")
+def api_platform_info():
+    if not dispatcher_required() or not (is_dev() or is_owner()):
+        return jsonify({"ok": False}), 403
+    return jsonify({"ok": True, "role": platform_role(), "host": platform_host(),
+                    "protected": (os.environ.get("PROTECT_DATA") or "").strip() == "1",
+                    "name": setting("business_name", str) or ""})
+
+
+@app.post("/api/dispatch/platform")
+def api_platform_set():
+    if not dispatcher_required() or not is_dev():
+        return jsonify({"ok": False, "error": "Only a developer can change this."}), 403
+    if (os.environ.get("PROTECT_DATA") or "").strip() == "1":
+        return jsonify({"ok": False, "error": "This copy is protected (PROTECT_DATA is on), so it stays the main platform."}), 400
+    role = ((request.get_json(silent=True) or {}).get("role") or "").strip()
+    if role not in ("main", "separate"):
+        return jsonify({"ok": False, "error": "Pick main or separate."}), 400
+    if role == "separate" and platform_host() in old_own_railway_hosts():
+        return jsonify({"ok": False, "error": "This is the main Fleet Foot address, so it can't be a separate company."}), 400
+    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('platform_role',?)", (role + "|" + platform_host(),))
+    log("dispatcher", (session.get("dispatcher_name") or "developer") + " marked this copy as the " +
+        ("main Fleet Foot platform" if role == "main" else "separate company platform"))
+    db().commit()
+    return jsonify({"ok": True, "role": platform_role(), "host": platform_host()})
 
 
 @app.get("/api/dispatch/start-fresh")
@@ -13682,7 +13726,10 @@ def companies_with_look():
 
 def dispatch_pick_companies():
     """Companies a dispatcher can pick on this platform's dispatch sign-in page. Only listed, active,
-    unlocked companies. Empty when every company is on this platform (nothing to pick)."""
+    unlocked companies. Empty when every company is on this platform (nothing to pick), and always
+    empty on a separate company's copy, which never shows or reaches other companies."""
+    if platform_role() == "separate":
+        return []
     rows = []
     for r in company_rows():
         if not (r.get("listed") if r.get("listed") is not None else 1) or company_locked(r):
