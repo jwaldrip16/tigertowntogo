@@ -2243,7 +2243,10 @@ def rail_off(sid):
 
 
 RAIL_OPEN_PREFIXES = (SUSPEND_OPEN_PREFIXES + _STAFF_PREFIXES +
-                  ("/companies", "/api/chat/", "/api/push/", "/api/order/", "/api/regions"))
+                  ("/companies", "/api/chat/", "/api/push/", "/api/order/", "/api/regions",
+                   # Noonlight Panic relay endpoints: the panic button has to work
+                   # even while a brand is marked unavailable.
+                   "/webhook", "/api/poll", "/api/report", "/api/state", "/panic"))
 
 
 def rail_guard():
@@ -21031,6 +21034,137 @@ def staff_reset(kind):
             return redirect(cfg["login"] + "?reset=1")
     return render_template("staff_reset.html", kind=kind, cfg=cfg, step=step, who=who, msg=msg, err=err,
                            texting=texting_on())
+
+# ------------------------------------------------------------------
+# Noonlight Panic relay: webhook endpoint for the Noonlight Panic Mac app.
+# Queues commands for the app (police / fire / medical / cancel / status),
+# records what it reports back, and shows a private dashboard at /panic.
+# Gated by the PANIC_LINK_TOKEN environment variable (fail closed: with no
+# token set everything answers 401). Nothing here is linked from or shown
+# in the dispatch portal.
+# ------------------------------------------------------------------
+
+_PANIC_TOKEN = os.environ.get("PANIC_LINK_TOKEN", "")
+_PANIC_MAX_EVENTS = 200
+_panic_lock = _threading.Lock()
+_panic_queue = []   # commands waiting for the Mac app
+_panic_events = []  # newest first, capped
+_panic_state = {"last_seen": None, "state": {}}
+
+
+def _panic_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
+def _panic_authed():
+    given = request.args.get("token") or request.headers.get("x-webhook-token") or ""
+    return bool(_PANIC_TOKEN) and given == _PANIC_TOKEN
+
+
+@app.route("/webhook", methods=["GET", "POST"])
+def panic_webhook():
+    """Queue a command for the Mac app. Same action shape as its local webhook."""
+    if not _panic_authed():
+        return jsonify({"ok": False, "error": "bad token"}), 401
+    body = request.get_json(silent=True) if request.method == "POST" else None
+    if not isinstance(body, dict):
+        body = {k: v for k, v in request.args.items() if k != "token"}
+    if not body.get("action"):
+        return jsonify({"ok": False, "error": "missing action (police, fire, medical, cancel or status)"}), 400
+    cid = "c%d" % int(time.time() * 1000)
+    cmd = {"id": cid, "ts": _panic_now(), "params": body}
+    with _panic_lock:
+        _panic_queue.append(cmd)
+        _panic_events.insert(0, {"ts": _panic_now(), "event": "command_received",
+                                 "action": body["action"], "id": cid})
+        del _panic_events[_PANIC_MAX_EVENTS:]
+    return jsonify({"ok": True, "queued": cid,
+                    "note": "the Mac app picks this up within a few seconds and posts its reply back"})
+
+
+@app.get("/api/poll")
+def panic_poll():
+    if not _panic_authed():
+        return jsonify({"ok": False, "error": "bad token"}), 401
+    with _panic_lock:
+        cmds = list(_panic_queue)
+        _panic_queue.clear()
+    return jsonify({"ok": True, "commands": cmds})
+
+
+@app.post("/api/report")
+def panic_report():
+    if not _panic_authed():
+        return jsonify({"ok": False, "error": "bad token"}), 401
+    p = request.get_json(silent=True) or {}
+    if p.get("event") == "heartbeat":
+        with _panic_lock:
+            _panic_state["last_seen"] = _panic_now()
+            _panic_state["state"] = p.get("state") or {}
+        return jsonify({"ok": True})
+    ev = {"ts": _panic_now()}
+    ev.update(p)
+    with _panic_lock:
+        _panic_events.insert(0, ev)
+        del _panic_events[_PANIC_MAX_EVENTS:]
+    return jsonify({"ok": True})
+
+
+@app.get("/api/state")
+def panic_state_json():
+    if not _panic_authed():
+        return jsonify({"ok": False, "error": "bad token"}), 401
+    with _panic_lock:
+        return jsonify({"ok": True, "last_seen": _panic_state["last_seen"],
+                        "state": _panic_state["state"], "queued": len(_panic_queue),
+                        "events": _panic_events[:50]})
+
+
+def _panic_human_state(st):
+    if st.get("countdown"):
+        cd = st["countdown"]
+        return "Countdown running: %s alarm in %s seconds" % (cd.get("service", "?"), cd.get("seconds_left", "?"))
+    if st.get("alarm_id"):
+        return "Alarm live: %s (Noonlight status: %s)" % (st.get("alarm_id"), st.get("alarm_status", "active"))
+    return st.get("state", "idle")
+
+
+@app.get("/panic")
+def panic_dashboard():
+    """Private dashboard for the panic relay. Never linked from the dispatch portal."""
+    if not _panic_authed():
+        return ("Panic relay is running. Add ?token=YOUR_SECRET to the address to open the dashboard.\n",
+                401, {"Content-Type": "text/plain"})
+    import html as _html
+    with _panic_lock:
+        seen, st, evs = _panic_state["last_seen"], dict(_panic_state["state"]), list(_panic_events[:30])
+        queued = len(_panic_queue)
+    rows = []
+    for e in evs:
+        line = e.get("event", "?")
+        if line == "webhook_result":
+            r = e.get("result") or {}
+            line = "reply to %s: %s" % ((e.get("command") or {}).get("action", "?"),
+                                        r.get("result") or r.get("error") or "ok")
+        elif "alarm_id" in e:
+            line = "%s (alarm %s)" % (line, e["alarm_id"])
+        elif e.get("action"):
+            line = "%s (%s)" % (line, e["action"])
+        rows.append("<li><b>%s</b> %s</li>" % (_html.escape(e.get("ts", "")), _html.escape(line)))
+    ago = "never" if not seen else "%s UTC" % seen
+    page = """<!doctype html><html><head><meta charset="utf-8">
+<title>Panic relay</title><meta http-equiv="refresh" content="5">
+<style>body{background:#111;color:#eee;font-family:-apple-system,Helvetica,sans-serif;max-width:720px;margin:24px auto;padding:0 16px}
+h1{color:#e53935;margin:0 0 4px} .card{background:#1b1b1b;border:1px solid #333;border-radius:10px;padding:12px 16px;margin:10px 0}
+.muted{color:#999} ul{list-style:none;padding:0} li{padding:5px 0;border-bottom:1px solid #262626;font-size:14px}
+</style></head><body><h1>Panic relay</h1>
+<div class="card">Mac app last heard from: <b>%s</b><br>Live state: <b>%s</b><br>
+<span class="muted">Commands waiting: %d &middot; this page refreshes every 5 seconds</span></div>
+<div class="card"><b>Recent events</b><ul>%s</ul></div>
+</body></html>""" % (_html.escape(ago), _html.escape(_panic_human_state(st)), queued,
+                     "".join(rows) or "<li class='muted'>nothing yet</li>")
+    return page
+
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)
