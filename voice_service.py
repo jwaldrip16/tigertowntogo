@@ -170,6 +170,12 @@ def run_tool(name, args, ctx):
     return {"ok": False, "error": "Unknown action."}
 
 
+def dispatch_number_for(to_number):
+    """One dispatch line per Twilio number, DISPATCH_NUMBER as the fallback."""
+    digits = "".join(ch for ch in (to_number or "") if ch.isdigit())
+    return (os.environ.get("DISPATCH_NUMBER_" + digits) or DISPATCH_NUMBER or "").strip()
+
+
 def brand_for(to_number):
     digits = "".join(ch for ch in (to_number or "") if ch.isdigit())
     return (os.environ.get("VOICE_BRAND_" + digits)
@@ -215,8 +221,9 @@ def twilio_after():
     """Runs when the AI session ends. A marked call dials dispatch; anything else hangs up."""
     sid = request.values.get("CallSid", "")
     state = CALLS.pop(sid, None)
-    if state and state.get("transfer") and DISPATCH_NUMBER:
-        return Response('<Response><Dial>' + DISPATCH_NUMBER + '</Dial></Response>',
+    target = dispatch_number_for(request.values.get("To", ""))
+    if state and state.get("transfer") and target:
+        return Response('<Response><Dial>' + target + '</Dial></Response>',
                         mimetype="text/xml")
     return Response('<Response><Hangup/></Response>', mimetype="text/xml")
 
