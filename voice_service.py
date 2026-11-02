@@ -30,6 +30,8 @@ TOKEN = (os.environ.get("FLEETFOOT_VOICE_TOKEN") or "").strip()
 PUBLIC_URL = (os.environ.get("PUBLIC_URL") or "").rstrip("/")
 MODEL = os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
 DISPATCH_TEXT = os.environ.get("DISPATCH_TEXT") or "(334) 555-0100"
+DISPATCH_NUMBER = (os.environ.get("DISPATCH_NUMBER") or "").strip()   # E.164, e.g. +13345550100
+CALLS = {}   # callSid -> {"transfer": bool}; survives only this process
 _client = OpenAI()   # uses OPENAI_API_KEY
 
 
@@ -107,8 +109,9 @@ DRV_REQ_TOOL = _tool("driver_request",
 
 HANDOFF_TOOL = _tool("handoff_to_dispatch",
     "The caller is angry, confused, or asking for something no tool covers. "
-    "Tells dispatch to call them back.",
-    {"note": {"type": "string"}}, ["note"])
+    "With transfer true the caller is dialed through to dispatch right now; "
+    "with transfer false dispatch is told to call them back.",
+    {"note": {"type": "string"}, "transfer": {"type": "boolean"}}, ["note", "transfer"])
 
 TOOLS = [MENU_TOOL, ADDRESS_TOOL, FIND_TOOL, PLACE_TOOL, CANCEL_TOOL, MODIFY_TOOL,
          ISSUE_TOOL, DRV_ORDERS_TOOL, DRV_MSG_TOOL, DRV_REQ_TOOL, HANDOFF_TOOL]
@@ -156,6 +159,11 @@ def run_tool(name, args, ctx):
     if name == "driver_request":
         return ff_call("/api/voice/driver_request", {"phone": caller, "request": args.get("request")})
     if name == "handoff_to_dispatch":
+        if args.get("transfer") and ctx.get("sid"):
+            CALLS[ctx["sid"]] = {"transfer": True}
+            return {"ok": True, "end_call": True,
+                    "say": "I understand, and I am sorry. Connecting you with dispatch now, "
+                           "one moment."}
         return {"ok": True,
                 "say": "I understand, and I am sorry. Dispatch will call you back at "
                        "this number shortly. Is there anything else while you wait?"}
@@ -174,7 +182,7 @@ def twilio_voice():
     brand = brand_for(to)
     ws = PUBLIC_URL + "/media?brand=" + brand.replace(" ", "%20")
     greeting = "Thank you for calling " + brand + ". How can I help you today?"
-    twiml = ('<Response><Connect><ConversationRelay url="' + ws + '" '
+    twiml = ('<Response><Connect action="/twilio/after"><ConversationRelay url="' + ws + '" '
              'welcomeGreeting="' + greeting + '" '
              'ttsLanguage="en-US" voice="rime.jorah" '
              'transcriptionLanguage="en-US"/></Connect></Response>')
@@ -202,6 +210,17 @@ def system_prompt(brand):
     ) % (brand, DISPATCH_TEXT)
 
 
+@app.route("/twilio/after", methods=["POST"])
+def twilio_after():
+    """Runs when the AI session ends. A marked call dials dispatch; anything else hangs up."""
+    sid = request.values.get("CallSid", "")
+    state = CALLS.pop(sid, None)
+    if state and state.get("transfer") and DISPATCH_NUMBER:
+        return Response('<Response><Dial>' + DISPATCH_NUMBER + '</Dial></Response>',
+                        mimetype="text/xml")
+    return Response('<Response><Hangup/></Response>', mimetype="text/xml")
+
+
 @sock.route("/media")
 def media(ws):
     brand = request.args.get("brand") or os.environ.get("VOICE_DEFAULT_BRAND") or "Fleet Foot Delivery"
@@ -221,6 +240,8 @@ def media(ws):
         mtype = msg.get("type")
         if mtype == "setup":
             ctx["caller"] = msg.get("from") or msg.get("caller") or ""
+            ctx["sid"] = msg.get("callSid") or msg.get("callSID") or msg.get("sid") or ""
+            CALLS[ctx["sid"]] = {"transfer": False}
         elif mtype == "prompt":
             voice_prompt = msg.get("voicePrompt") or msg.get("utterance") or ""
             if not voice_prompt.strip():
@@ -249,6 +270,10 @@ def media(ws):
                 reply = choice.message.content or ""
                 history.append({"role": "assistant", "content": reply})
                 _say(ws, reply)
+                if any(isinstance(h, dict) and h.get("end_call")
+                       for h in history[-3:]):
+                    CALLS.pop(ctx.get("sid"), None)
+                    return   # closing the stream makes Twilio run the action URL
                 break
         elif mtype == "interrupt":
             pass   # the caller talked over us; their next prompt replaces the tail
