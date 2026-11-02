@@ -176,7 +176,22 @@ def run_tool(name, args, ctx):
         args = dict(args)
         args["site"] = site
         args.setdefault("customer_phone", caller)
-        return ff_call("/api/voice/place_order", args)
+        out = ff_call("/api/voice/place_order", args)
+        if out.get("ok"):
+            # A new order: hand the caller straight to dispatch, who takes the
+            # card and the tip. Remakes and changes to an existing order never
+            # reach here, so they never transfer.
+            if ctx.get("sid"):
+                CALLS[ctx["sid"]] = {"transfer": True}
+            code = str(out.get("code") or "").replace(" ", "")
+            spoken = " ".join(code) if code else ""
+            out["end_call"] = True
+            out["say"] = ("Perfect, your order is in, number " + spoken +
+                          ". I am connecting you with dispatch now to take "
+                          "your payment and tip.") if spoken else \
+                         ("Perfect, your order is in. I am connecting you "
+                          "with dispatch now to take your payment and tip.")
+        return out
     if name == "cancel_order":
         return ff_call("/api/voice/cancel_order", {"code": args.get("code"), "phone": caller})
     if name == "modify_order":
@@ -254,7 +269,7 @@ def system_prompt(brand):
         "Rules:\n"
         "- Call get_menu first so you only offer real menu items and prices. Never invent items.\n"
         "- Before placing an order: confirm the items and the delivery address back to the caller, then read the total back and get a clear yes.\n"
-        "- Payment is taken by dispatch over the phone or on delivery, so never ask for card numbers.\n"
+        "- Payment and the tip are taken by dispatch, so never ask for card numbers or a tip. The moment a new order is placed, the call transfers to dispatch automatically so they can take the card and the tip; just tell the caller dispatch is picking up. Remakes and changes to an existing order do not transfer.\n"
         "- Only offer a remake, a credit, or a refund if a tool says it is allowed. The API, not you, decides what is allowed.\n"
         "- If a tool refuses (for example the order is already with the kitchen), explain that simply and offer to send a message to dispatch with report_issue.\n"
         "- If the caller is a driver, use the driver tools; status changes go to dispatch for approval.\n"
@@ -373,16 +388,19 @@ def media(ws):
                                            json.loads(tc.function.arguments or "{}"), ctx)
                         except Exception:
                             out = {"ok": False, "error": "The order system did not answer."}
+                        if isinstance(out, dict) and out.get("end_call"):
+                            # A tool that ends the call speaks its own line, then
+                            # the stream closes and Twilio runs the action URL
+                            # (Dial to dispatch for a transfer, else Hangup).
+                            _say(ws, out.get("say") or "Thanks for calling. Goodbye.")
+                            CALLS.pop(ctx.get("sid"), None)
+                            return
                         history.append({"role": "tool", "tool_call_id": tc.id,
                                         "content": json.dumps(out)[:4000]})
                     continue
                 reply = choice.message.content or ""
                 history.append({"role": "assistant", "content": reply})
                 _say(ws, reply)
-                if any(isinstance(h, dict) and h.get("end_call")
-                       for h in history[-3:]):
-                    CALLS.pop(ctx.get("sid"), None)
-                    return   # closing the stream makes Twilio run the action URL
                 break
         elif mtype == "interrupt":
             pass   # the caller talked over us; their next prompt replaces the tail
