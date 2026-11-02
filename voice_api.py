@@ -626,6 +626,24 @@ def voice_order_call_result():
     if outcome not in ("accepted", "refused", "unclear"):
         return jsonify({"ok": False, "error": "Outcome must be accepted, refused, or unclear."}), 400
     note = (b.get("note") or "").strip()[:400]
+    # An accepted call with an ETA starts the kitchen timer: the same
+    # "order placed" step dispatch would do by hand. Never overrides a
+    # timer already running or an order already ready.
+    eta = None
+    try:
+        eta = int(b.get("eta_minutes"))
+    except (TypeError, ValueError):
+        eta = None
+    if outcome == "accepted" and eta and 1 <= eta <= 180 and \
+            o["kitchen_status"] in ("pending", "waiting") and \
+            o["kitchen_status"] != "preparing":
+        A.db().execute("""UPDATE orders SET manual_state='placed', manual_at=?, manual_by=?,
+                          kitchen_status='preparing', prep_minutes=?, prep_started=? WHERE id=?""",
+                       (A.now(), "AI voice line", eta, A.now(), o["id"]))
+        if note:
+            note = (note + " ready in %d minutes" % eta).strip()
+        else:
+            note = "ready in %d minutes" % eta
     words = {"accepted": "accepted the order", "refused": "declined the order",
              "unclear": "did not clearly confirm the order"}
     body = "Phone call: " + (r["name"] if r else "restaurant") + " " + words[outcome] + \

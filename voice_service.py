@@ -128,8 +128,10 @@ REST_BRIEF_TOOL = _tool("get_order_brief",
 REST_CONFIRM_TOOL = _tool("confirm_order",
     "Record what the restaurant decided. accept true when they will make it, false when "
     "they refuse, and use unclear only when they could not answer clearly. note carries "
-    "anything they changed or said. This ends the call.",
-    {"accept": {"type": "boolean"}, "note": {"type": "string"}}, ["accept"])
+    "anything they changed or said. eta_minutes is how long until the food is ready; "
+    "after they accept, ask them and set it from their answer. This ends the call.",
+    {"accept": {"type": "boolean"}, "note": {"type": "string"},
+     "eta_minutes": {"type": "integer"}}, ["accept"])
 
 PRESS_TOOL = _tool("press",
     "Press touch tones (DTMF digits) on the call to get through a phone menu. "
@@ -147,8 +149,9 @@ REST_SYSTEM = (
     "for delivery. Read each item with its options and any note, then the total, then the "
     "delivery address and the customer's first name.\n"
     "2. Ask: can you take care of this?\n"
-    "3. When they accept, confirm you are sending the order over and call confirm_order "
-    "with accept true. If they refuse or want changes, call confirm_order with accept false "
+    "3. When they accept, ask: about how long until that is ready? Then call confirm_order "
+    "with accept true and eta_minutes set to their answer, and confirm you are sending the "
+    "order over. If they refuse or want changes, call confirm_order with accept false "
     "or unclear and put what they said in note. Then end politely.\n"
     "Never take card numbers and never offer anything beyond confirming or refusing. "
     "If the person you speak with wants dispatch, say you are connecting them, and call "
