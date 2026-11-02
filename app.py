@@ -2177,7 +2177,7 @@ def dev_guard():
 # signed-in developer keeps full access. Nothing is deleted. Any value other than 2
 # (including a missing variable) keeps the site running.
 # Optional SUSPEND_MESSAGE replaces the wording on the paused page.
-SUSPEND_OPEN_PREFIXES = ("/static/", "/brand/", "/media/", "/uploads/", "/.well-known/", "/manifest/", "/privacy", "/delete-account", "/api/noonlight/")
+SUSPEND_OPEN_PREFIXES = ("/static/", "/brand/", "/media/", "/uploads/", "/.well-known/", "/manifest/", "/privacy", "/delete-account", "/api/noonlight/", "/api/voice/")
 SUSPEND_OPEN_PATHS = {"/dispatch/login", "/dispatch/logout", "/favicon.ico", "/robots.txt", "/sw.js"}
 
 
@@ -21165,6 +21165,10 @@ h1{color:#e53935;margin:0 0 4px} .card{background:#1b1b1b;border:1px solid #333;
                      "".join(rows) or "<li class='muted'>nothing yet</li>")
     return page
 
+
+# ---- AI voice line (Twilio) tools ----
+from voice_api import voice_bp
+app.register_blueprint(voice_bp)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=False)

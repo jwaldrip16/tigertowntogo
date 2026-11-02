@@ -1,0 +1,4 @@
+flask
+flask-sock
+openai>=1.0
+requests

@@ -7,3 +7,6 @@ tzdata>=2024.1
 psycopg[binary]>=3.1
 psycopg-pool>=3.2
 pywebpush>=1.9
+
+flask-sock
+openai
