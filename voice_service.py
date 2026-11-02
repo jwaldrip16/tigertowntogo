@@ -20,6 +20,7 @@ import os, json
 from flask import Flask, request, Response
 from flask_sock import Sock
 import requests
+from urllib.parse import quote as _urlquote
 from openai import OpenAI
 
 app = Flask(__name__)
@@ -130,7 +131,13 @@ REST_CONFIRM_TOOL = _tool("confirm_order",
     "anything they changed or said. This ends the call.",
     {"accept": {"type": "boolean"}, "note": {"type": "string"}}, ["accept"])
 
-RESTAURANT_TOOLS = [REST_BRIEF_TOOL, REST_CONFIRM_TOOL, HANDOFF_TOOL]
+PRESS_TOOL = _tool("press",
+    "Press touch tones (DTMF digits) on the call to get through a phone menu. "
+    "Press one menu step at a time. Allowed characters: 0-9, * and #; use w for a "
+    "half-second wait (ww for a full second).",
+    {"digits": {"type": "string"}}, ["digits"])
+
+RESTAURANT_TOOLS = [REST_BRIEF_TOOL, REST_CONFIRM_TOOL, HANDOFF_TOOL, PRESS_TOOL]
 
 REST_SYSTEM = (
     "You are the delivery line of the brand %s, calling a restaurant to read them a "
@@ -148,8 +155,19 @@ REST_SYSTEM = (
     "handoff_to_dispatch with transfer true."
 )
 
-def restaurant_prompt(brand):
-    return REST_SYSTEM % (brand, brand)
+REST_IVR = (
+    "\nIf the line answers with a phone menu, get through it with the press tool. The "
+    "restaurant's saved menu path is: %s. Press one step at a time, then stay quiet and "
+    "listen for the next menu prompt or a person. If after a few tries you cannot reach "
+    "a person, call confirm_order with accept false and note that you could not get "
+    "through the phone menu, then end the call."
+)
+
+def restaurant_prompt(brand, ivr=""):
+    base = REST_SYSTEM % (brand, brand)
+    if (ivr or "").strip():
+        base += REST_IVR % ivr.strip()
+    return base
 
 
 def ff_call(path, body):
@@ -166,6 +184,19 @@ def run_tool(name, args, ctx):
     """One tool call. ctx carries the brand and the caller's number."""
     site = ctx["brand"]
     caller = ctx["caller"]
+    if name == "press":
+        d = "".join(ch for ch in (args.get("digits") or "") if ch in "0123456789w*#")
+        if not d:
+            return {"ok": False, "error": "No digits to press."}
+        w = ctx.get("ws")
+        if w is None:
+            return {"ok": False, "error": "No open call to press into."}
+        try:
+            w.send(json.dumps({"type": "sendDigits", "digits": d}))
+        except Exception:
+            return {"ok": False, "error": "Could not press the digits."}
+        return {"ok": True, "pressed": d,
+                "listen": "Digits sent. Stay quiet and listen for the next menu prompt or a person."}
     if name == "get_menu":
         return ff_call("/api/voice/menu", {"site": site})
     if name == "check_address":
@@ -281,10 +312,12 @@ def system_prompt(brand):
 def twilio_outbound():
     """TwiML for the outbound call to a restaurant: the AI is in restaurant mode."""
     code = request.values.get("code", "")
+    ivr = request.values.get("ivr", "").replace("&", "and").replace('"', "").replace("<", "").replace(">", "")
     ws = PUBLIC_URL + "/media"
     twiml = ('<Response><Connect action="/twilio/after">'
              '<Parameter name="mode" value="restaurant"/>'
              '<Parameter name="order" value="' + code.replace('"', '') + '"/>'
+             '<Parameter name="ivr" value="' + ivr + '"/>'
              '<ConversationRelay url="' + ws + '" ttsLanguage="en-US" voice="rime.jorah" '
              'transcriptionLanguage="en-US"/></Connect></Response>')
     return Response(twiml, mimetype="text/xml")
@@ -317,7 +350,8 @@ def call_restaurant():
     r = requests.post("https://api.twilio.com/2010-04-01/Accounts/%s/Calls.json" % TWILIO_SID,
                       auth=(TWILIO_SID, TWILIO_TOKEN),
                       data={"To": to, "From": from_number,
-                            "Url": PUBLIC_URL + "/twilio/outbound?code=" + code + "&brand=" + brand},
+                            "Url": PUBLIC_URL + "/twilio/outbound?code=" + code + "&brand=" + _urlquote(brand)
+                                   + "&ivr=" + _urlquote((brief.get("restaurant", {}).get("ivr_notes") or ""))},
                       timeout=25)
     if r.status_code >= 300:
         return {"ok": False, "error": "Twilio refused the call: " + (r.json().get("message") or r.text[:120])}, 400
@@ -339,7 +373,7 @@ def twilio_after():
 @sock.route("/media")
 def media(ws):
     brand = request.args.get("brand") or os.environ.get("VOICE_DEFAULT_BRAND") or "Fleet Foot Delivery"
-    ctx = {"brand": brand, "caller": "", "mode": "customer", "order": ""}
+    ctx = {"brand": brand, "caller": "", "mode": "customer", "order": "", "ivr": "", "ws": ws}
     history = [{"role": "system", "content": system_prompt(brand)}]
     tools = TOOLS
     while True:
@@ -364,7 +398,8 @@ def media(ws):
                     ctx["mode"] = "restaurant"
                     ctx["order"] = (cp.get("order") or "").strip()
                     ctx["brand"] = (cp.get("brand") or "").strip() or brand
-                    history = [{"role": "system", "content": restaurant_prompt(ctx["brand"])}]
+                    ctx["ivr"] = (cp.get("ivr") or "").strip()
+                    history = [{"role": "system", "content": restaurant_prompt(ctx["brand"], ctx["ivr"])}]
                     tools = RESTAURANT_TOOLS
         elif mtype == "prompt":
             voice_prompt = msg.get("voicePrompt") or msg.get("utterance") or ""

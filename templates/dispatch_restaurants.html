@@ -99,6 +99,8 @@
     <input type="number" name="prep_default" value="{{ d.r['prep_default'] }}" min="1" max="120"></div>
   <div class="row"><label>Phone</label><input name="phone" value="{{ d.r['phone'] }}">
     <button type="button" class="btn small" onclick="restGoogle({{ d.r['id'] }}, this)">Get phone and address from Google</button></div>
+  <div class="row"><label>Phone menu (IVR) notes for the AI voice line</label>
+    <textarea name="ivr_notes" rows="2" placeholder="e.g. Press 2 for the store, then 1 for to-go orders">{{ d.r['ivr_notes'] or '' }}</textarea></div>
   <div class="photoedit"><label>Photo for the customer website</label>
     {% if d.r['image'] %}<img class="edimg" src="{{ d.r['image'] if d.r['image'].startswith('http') else '/media/' ~ d.r['image'] }}" alt="">{% else %}<div class="noimg">No photo yet</div>{% endif %}
     <label class="btn small">{{ 'Replace photo' if d.r['image'] else 'Upload photo' }}

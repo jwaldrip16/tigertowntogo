@@ -506,6 +506,7 @@ def init_db():
     ensure_column(con, "drivers", "short_alert_at", "TEXT")
     ensure_column(con, "restaurants", "zup_id", "TEXT")
     ensure_column(con, "restaurants", "phone_checked", "INTEGER DEFAULT 0")
+    ensure_column(con, "restaurants", "ivr_notes", "TEXT")
     ensure_column(con, "restaurants", "places_checked", "INTEGER DEFAULT 0")
     ensure_column(con, "geocache", "src", "TEXT")   # google / osm: OpenStreetMap results are re-asked once Google is on
     ensure_column(con, "restaurants", "eta_min", "INTEGER")
@@ -12197,6 +12198,9 @@ def dispatch_restaurants():
             if url and not url.lower().startswith(("http://", "https://")):
                 url = "https://" + url
             db().execute("UPDATE restaurants SET order_url=? WHERE id=?", (url, rid))
+        if "ivr_notes" in request.form:
+            db().execute("UPDATE restaurants SET ivr_notes=? WHERE id=?",
+                         ((request.form.get("ivr_notes") or "").strip()[:500], rid))
         if "region_id" in request.form:
             try:
                 _rg = int(request.form.get("region_id") or 0)
