@@ -31,6 +31,9 @@ PUBLIC_URL = (os.environ.get("PUBLIC_URL") or "").rstrip("/")
 MODEL = os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
 DISPATCH_TEXT = os.environ.get("DISPATCH_TEXT") or "(334) 555-0100"
 DISPATCH_NUMBER = (os.environ.get("DISPATCH_NUMBER") or "").strip()   # E.164, e.g. +13345550100
+TWILIO_SID = (os.environ.get("TWILIO_ACCOUNT_SID") or "").strip()
+TWILIO_TOKEN = (os.environ.get("TWILIO_AUTH_TOKEN") or "").strip()
+TWILIO_FROM = (os.environ.get("TWILIO_FROM_NUMBER") or "").strip()   # caller id fallback
 CALLS = {}   # callSid -> {"transfer": bool}; survives only this process
 _client = OpenAI()   # uses OPENAI_API_KEY
 
@@ -117,6 +120,38 @@ TOOLS = [MENU_TOOL, ADDRESS_TOOL, FIND_TOOL, PLACE_TOOL, CANCEL_TOOL, MODIFY_TOO
          ISSUE_TOOL, DRV_ORDERS_TOOL, DRV_MSG_TOOL, DRV_REQ_TOOL, HANDOFF_TOOL]
 
 
+REST_BRIEF_TOOL = _tool("get_order_brief",
+    "Get the order you are calling about: the order number, every item with its options "
+    "and notes, the total, and the delivery address. Call this once, before reading anything.",
+    {}, [])
+REST_CONFIRM_TOOL = _tool("confirm_order",
+    "Record what the restaurant decided. accept true when they will make it, false when "
+    "they refuse, and use unclear only when they could not answer clearly. note carries "
+    "anything they changed or said. This ends the call.",
+    {"accept": {"type": "boolean"}, "note": {"type": "string"}}, ["accept"])
+
+RESTAURANT_TOOLS = [REST_BRIEF_TOOL, REST_CONFIRM_TOOL, HANDOFF_TOOL]
+
+REST_SYSTEM = (
+    "You are the delivery line of the brand %s, calling a restaurant to read them a "
+    "delivery order. Be brief and courteous, like a dispatcher reading a ticket.\n"
+    "Flow:\n"
+    "1. Call get_order_brief, then say: this is the %s delivery line, order <number> "
+    "for delivery. Read each item with its options and any note, then the total, then the "
+    "delivery address and the customer's first name.\n"
+    "2. Ask: can you take care of this?\n"
+    "3. When they accept, confirm you are sending the order over and call confirm_order "
+    "with accept true. If they refuse or want changes, call confirm_order with accept false "
+    "or unclear and put what they said in note. Then end politely.\n"
+    "Never take card numbers and never offer anything beyond confirming or refusing. "
+    "If the person you speak with wants dispatch, say you are connecting them, and call "
+    "handoff_to_dispatch with transfer true."
+)
+
+def restaurant_prompt(brand):
+    return REST_SYSTEM % (brand, brand)
+
+
 def ff_call(path, body):
     body = dict(body or {})
     r = requests.post(FLEETFOOT_URL + path, json=body,
@@ -158,6 +193,17 @@ def run_tool(name, args, ctx):
         return ff_call("/api/voice/driver_message", {"phone": caller, "body": args.get("body")})
     if name == "driver_request":
         return ff_call("/api/voice/driver_request", {"phone": caller, "request": args.get("request")})
+    if name == "get_order_brief":
+        return ff_call("/api/voice/order_brief", {"code": ctx.get("order")})
+    if name == "confirm_order":
+        out = ff_call("/api/voice/order_call_result",
+                      {"code": ctx.get("order"),
+                       "outcome": "accepted" if args.get("accept") else
+                                  ("unclear" if str(args.get("note") or "").strip().lower().startswith("unclear") else "refused"),
+                       "note": args.get("note") or ""})
+        out["end_call"] = True
+        out.setdefault("say", "Thanks, I am sending that over. Have a good day.")
+        return out
     if name == "handoff_to_dispatch":
         if args.get("transfer") and ctx.get("sid"):
             CALLS[ctx["sid"]] = {"transfer": True}
@@ -216,6 +262,53 @@ def system_prompt(brand):
     ) % (brand, DISPATCH_TEXT)
 
 
+@app.route("/twilio/outbound", methods=["GET", "POST"])
+def twilio_outbound():
+    """TwiML for the outbound call to a restaurant: the AI is in restaurant mode."""
+    code = request.values.get("code", "")
+    ws = PUBLIC_URL + "/media"
+    twiml = ('<Response><Connect action="/twilio/after">'
+             '<Parameter name="mode" value="restaurant"/>'
+             '<Parameter name="order" value="' + code.replace('"', '') + '"/>'
+             '<ConversationRelay url="' + ws + '" ttsLanguage="en-US" voice="rime.jorah" '
+             'transcriptionLanguage="en-US"/></Connect></Response>')
+    return Response(twiml, mimetype="text/xml")
+
+
+@app.post("/call/restaurant")
+def call_restaurant():
+    """Dial a restaurant with the order. Called by the Fleet Foot app (X-Voice-Token)."""
+    if not TOKEN or (request.headers.get("X-Voice-Token") or "").strip() != TOKEN:
+        return {"ok": False, "error": "Bad voice token."}, 403
+    code = (request.get_json(silent=True) or {}).get("code", "")
+    if not code:
+        return {"ok": False, "error": "Say which order to call about."}, 400
+    brief = ff_call("/api/voice/order_brief", {"code": code})
+    if not brief.get("ok"):
+        return {"ok": False, "error": brief.get("error") or "Could not load the order."}, 400
+    phone = "".join(ch for ch in (brief.get("restaurant", {}).get("phone") or "") if ch.isdigit())
+    if len(phone) < 10:
+        return {"ok": False, "error": "The restaurant has no phone number on file."}, 400
+    if not (TWILIO_SID and TWILIO_TOKEN):
+        return {"ok": False, "error": "Twilio is not set up on the voice service."}, 400
+    to = "+1" + phone[-10:]
+    brand = (brief.get("site") or {}).get("name") or ""
+    brand_name = (brief.get("restaurant", {}).get("name") or "").strip().lower()
+    from_number = TWILIO_FROM
+    for var, val in os.environ.items():
+        if var.startswith("VOICE_BRAND_") and val.strip().lower() == brand_name:
+            from_number = "+1" + var[len("VOICE_BRAND_"):]
+            break
+    r = requests.post("https://api.twilio.com/2010-04-01/Accounts/%s/Calls.json" % TWILIO_SID,
+                      auth=(TWILIO_SID, TWILIO_TOKEN),
+                      data={"To": to, "From": from_number,
+                            "Url": PUBLIC_URL + "/twilio/outbound?code=" + code + "&brand=" + brand},
+                      timeout=25)
+    if r.status_code >= 300:
+        return {"ok": False, "error": "Twilio refused the call: " + (r.json().get("message") or r.text[:120])}, 400
+    return {"ok": True, "sid": r.json().get("sid")}
+
+
 @app.route("/twilio/after", methods=["POST"])
 def twilio_after():
     """Runs when the AI session ends. A marked call dials dispatch; anything else hangs up."""
@@ -231,8 +324,9 @@ def twilio_after():
 @sock.route("/media")
 def media(ws):
     brand = request.args.get("brand") or os.environ.get("VOICE_DEFAULT_BRAND") or "Fleet Foot Delivery"
-    ctx = {"brand": brand, "caller": ""}
+    ctx = {"brand": brand, "caller": "", "mode": "customer", "order": ""}
     history = [{"role": "system", "content": system_prompt(brand)}]
+    tools = TOOLS
     while True:
         try:
             raw = ws.receive(timeout=300)
@@ -249,6 +343,14 @@ def media(ws):
             ctx["caller"] = msg.get("from") or msg.get("caller") or ""
             ctx["sid"] = msg.get("callSid") or msg.get("callSID") or msg.get("sid") or ""
             CALLS[ctx["sid"]] = {"transfer": False}
+            cp = msg.get("customParameters") or msg.get("custom_parameters") or {}
+            if isinstance(cp, dict):
+                if (cp.get("mode") or "") == "restaurant":
+                    ctx["mode"] = "restaurant"
+                    ctx["order"] = (cp.get("order") or "").strip()
+                    ctx["brand"] = (cp.get("brand") or "").strip() or brand
+                    history = [{"role": "system", "content": restaurant_prompt(ctx["brand"])}]
+                    tools = RESTAURANT_TOOLS
         elif mtype == "prompt":
             voice_prompt = msg.get("voicePrompt") or msg.get("utterance") or ""
             if not voice_prompt.strip():
@@ -258,7 +360,7 @@ def media(ws):
             for _ in range(4):
                 try:
                     resp = _client.chat.completions.create(
-                        model=MODEL, messages=history, tools=TOOLS, temperature=0.4)
+                        model=MODEL, messages=history, tools=tools, temperature=0.4)
                 except Exception:
                     _say(ws, "Sorry, one moment.")
                     return

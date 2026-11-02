@@ -468,3 +468,174 @@ def voice_driver_request():
     A.db().commit()
     return jsonify({"ok": True,
                     "message": "Dispatch got your request and will approve it shortly."})
+
+
+# ---- restaurant call-in: the voice line dials a restaurant and reads the order ----
+
+import json as _json
+import urllib.request as _urllib
+import urllib.error as _urlerr
+
+
+def _voice_call_conf():
+    """Where the voice service lives and the token it accepts from us."""
+    url = tok = ""
+    try:
+        for k, col in (("voice_call_url", "url"), ("voice_call_token", "tok")):
+            row = A.db().execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
+            if row and row["value"]:
+                if col == "url":
+                    url = str(row["value"]).strip().rstrip("/")
+                else:
+                    tok = str(row["value"]).strip()
+    except Exception:
+        pass
+    return url or os.environ.get("VOICE_CALL_URL", "").strip().rstrip("/"), \
+        tok or _voice_token()
+
+
+def _rest_items_lines(raw):
+    lines = []
+    try:
+        items = _json.loads(raw or "[]")
+    except Exception:
+        items = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        qty = int(it.get("qty", 1) or 1)
+        line = ("%d %s" % (qty, it.get("name") or "item")).strip()
+        picks = it.get("options") or []
+        if picks:
+            line += " (" + "; ".join(
+                str(p.get("name") or "").strip() for p in picks if str(p.get("name") or "").strip()
+            ) + ")"
+        note = (it.get("note") or "").strip()
+        if note:
+            line += " [" + note + "]"
+        lines.append(line)
+    return lines
+
+
+def _order_for_call(b):
+    code = (b.get("code") or "").strip()
+    o = None
+    if code:
+        o = A.db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
+    if o is None:
+        return None
+    r = A.db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+    return o, r
+
+
+def _brand_name(restaurant_id):
+    """The brand line the customer called: restaurant -> region -> site."""
+    row = A.db().execute("""SELECT s.name FROM restaurants r
+                            LEFT JOIN regions g ON g.id=r.region_id
+                            LEFT JOIN sites s ON s.id=g.site_id
+                            WHERE r.id=?""", (restaurant_id,)).fetchone()
+    if row and row["name"]:
+        return row["name"]
+    row = A.db().execute("SELECT name FROM sites ORDER BY COALESCE(sort,0), id LIMIT 1").fetchone()
+    return row["name"] if row else "Fleet Foot Delivery"
+
+
+@voice_bp.post("/api/voice/order_brief")
+@voice_auth
+def voice_order_brief():
+    """Everything the AI needs to read a call-in order to a restaurant."""
+    b = request.get_json(force=True) or {}
+    found = _order_for_call(b)
+    if not found:
+        return jsonify({"ok": False, "error": "No order with that number."}), 404
+    o, r = found
+    if not r:
+        return jsonify({"ok": False, "error": "That order has no restaurant on file."}), 404
+    cents = lambda c: "$%s" % (("%.2f" % ((c or 0) / 100.0)).rstrip("0").rstrip(".") if (c or 0) % 100
+                               else "%d" % ((c or 0) // 100))
+    return jsonify({
+        "ok": True,
+        "code": o["code"],
+        "site": {"name": _brand_name(o["restaurant_id"])},
+        "restaurant": {"name": r["name"], "phone": (r["phone"] or "")},
+        "items": _rest_items_lines(o["items"]),
+        "total": cents(o["total_cents"]),
+        "delivery_address": o["address"] or "",
+        "delivery_note": (o["address_note"] or "").strip(),
+        "customer_first": (o["customer_name"] or "").split(" ")[0],
+        "customer_phone_last4": _digits(o["customer_phone"])[-4:],
+        "placed_at": o["created_at"] or "",
+        "kitchen_status": o["kitchen_status"] or "",
+    })
+
+
+@voice_bp.post("/api/voice/restaurant_call")
+@voice_auth
+def voice_restaurant_call():
+    """Dispatch asks the voice line to dial the restaurant and read the order aloud."""
+    b = request.get_json(force=True) or {}
+    found = _order_for_call(b)
+    if not found:
+        return jsonify({"ok": False, "error": "No order with that number."}), 404
+    o, r = found
+    if not r:
+        return jsonify({"ok": False, "error": "That order has no restaurant on file."}), 404
+    phone = _digits(r["phone"])
+    if len(phone) < 10:
+        return jsonify({"ok": False, "error": "No phone number on file for this restaurant."}), 400
+    url, tok = _voice_call_conf()
+    if not url:
+        return jsonify({"ok": False, "error": "The voice service is not set up yet: set its address in Settings."}), 400
+    payload = _json.dumps({"code": o["code"], "restaurant": r["name"]}).encode()
+    req = _urllib.Request(url + "/call/restaurant", data=payload, method="POST",
+                          headers={"Content-Type": "application/json", "X-Voice-Token": tok})
+    try:
+        with _urllib.urlopen(req, timeout=15) as resp:
+            out = _json.loads(resp.read().decode() or "{}")
+    except _urlerr.HTTPError as e:
+        try:
+            out = _json.loads(e.read().decode() or "{}")
+        except Exception:
+            out = {}
+        if not out.get("error"):
+            out = {"error": "The voice service refused the call request."}
+    except Exception:
+        return jsonify({"ok": False, "error": "Could not reach the voice service."}), 502
+    if out.get("ok"):
+        A.db().execute("""INSERT INTO rest_messages(restaurant_id,sender,who,body,created_at,seen_by_rest,seen_by_dispatch)
+                          VALUES(?,?,?,?,?,0,0)""",
+                       (r["id"], "dispatch", "AI voice line",
+                        "The AI voice line is calling you with order " + o["code"] + ". "
+                        "Answering confirms you have it.", A.now()))
+        A.db().commit()
+    out["code"] = o["code"]
+    return jsonify(out), (200 if out.get("ok") else 400)
+
+
+@voice_bp.post("/api/voice/order_call_result")
+@voice_auth
+def voice_order_call_result():
+    """The voice service reports what the restaurant said on the call."""
+    b = request.get_json(force=True) or {}
+    found = _order_for_call(b)
+    if not found:
+        return jsonify({"ok": False, "error": "No order with that number."}), 404
+    o, r = found
+    outcome = (b.get("outcome") or "").strip().lower()
+    if outcome not in ("accepted", "refused", "unclear"):
+        return jsonify({"ok": False, "error": "Outcome must be accepted, refused, or unclear."}), 400
+    note = (b.get("note") or "").strip()[:400]
+    words = {"accepted": "accepted the order", "refused": "declined the order",
+             "unclear": "did not clearly confirm the order"}
+    body = "Phone call: " + (r["name"] if r else "restaurant") + " " + words[outcome] + \
+           " " + o["code"] + ("." if not note else ". They said: " + note)
+    if r:
+        A.db().execute("""INSERT INTO rest_messages(restaurant_id,sender,who,body,created_at,seen_by_rest,seen_by_dispatch)
+                          VALUES(?,?,?,?,?,1,1)""",
+                       (r["id"], "dispatch", "AI voice line", body, A.now()))
+    if outcome != "accepted" and r:
+        A.raise_call_alert("restaurant", r["name"], r["phone"] or "",
+                           "Did not confirm order " + o["code"] + " by phone" + (": " + note if note else ""),
+                           restaurant_id=r["id"], order_id=o["id"])
+    A.db().commit()
+    return jsonify({"ok": True, "code": o["code"], "outcome": outcome})
