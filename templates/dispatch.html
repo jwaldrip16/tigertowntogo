@@ -1766,7 +1766,32 @@ function manualButtons(o){
   return go+(o.manual_state==='ordering'
       ? '<button class="btn tiny" disabled>Ordering in process'+by+'</button>'
       : '<button class="btn tiny primary" onclick="manualStep('+o.id+',\'ordering\')">Ordering in process</button>')+
-    '<button class="btn tiny primary" onclick="manualStep('+o.id+',\'placed\')">Order placed + start timer</button>';
+    '<button class="btn tiny primary" onclick="manualStep('+o.id+',\'placed\')">Order placed + start timer</button>'+
+    '<button class="btn tiny" onclick="callRestaurantDlg('+o.id+')">AI call</button>';
+}
+
+async function callRestaurantDlg(id){
+  let def = '';
+  try{ const r = await fetch('/api/dispatch/voice-script'); const j = await r.json(); if(j && j.ok) def = j.script||''; }catch(e){}
+  let box = document.getElementById('aiCallBox');
+  if(!box){ box=document.createElement('div'); box.id='aiCallBox'; box.className='modalback'; document.body.appendChild(box); }
+  box.innerHTML = '<div class="modal panel"><h2>AI call to the restaurant</h2>'+
+    '<label>Extra script for this call (blank uses the default from Settings)</label>'+
+    '<textarea id="aiScriptTxt" rows="6" style="width:100%">'+esc(def)+'</textarea>'+
+    '<div style="margin-top:8px"><button class="btn tiny primary" id="aiCallBtn" onclick="callRestaurantGo('+id+')">Call restaurant</button> '+
+    '<button class="btn tiny" onclick="document.getElementById(\'aiCallBox\').remove()">Cancel</button></div>'+
+    '<p class="muted small" id="aiCallMsg"></p></div>';
+}
+
+async function callRestaurantGo(id){
+  const btn = document.getElementById('aiCallBtn');
+  btn.disabled = true;
+  const script = document.getElementById('aiScriptTxt').value;
+  const res = await jpost('/api/dispatch/call-restaurant', {order_id:id, script:script});
+  const msg = document.getElementById('aiCallMsg');
+  if(res && res.ok){ msg.textContent = 'Calling now. The restaurant chat will show the outcome.';
+    setTimeout(()=>{ const b=document.getElementById('aiCallBox'); if(b) b.remove(); board(true); }, 1500); }
+  else { msg.textContent = (res && res.error) || 'The call did not go out.'; btn.disabled = false; }
 }
 async function manualStep(id, op){
   const box = document.getElementById('m'+id);

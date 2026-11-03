@@ -12097,6 +12097,35 @@ def api_reopen():
     return jsonify({"ok": True})
 
 
+@app.get("/api/dispatch/voice-script")
+def api_voice_script_get():
+    """The saved default script for the AI restaurant call, for the dispatch dialog."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    row = db().execute("SELECT value FROM settings WHERE key='voice_rest_script'").fetchone()
+    return jsonify({"ok": True, "script": (row["value"] or "") if row else ""})
+
+
+@app.post("/api/dispatch/call-restaurant")
+def api_call_restaurant():
+    """Dispatch dials the restaurant with the AI voice line, with a script."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    lk = delivered_lock(o)
+    if lk:
+        return lk
+    if o["dispatch_status"] in ("delivered", "cancelled"):
+        return jsonify({"ok": False, "error": "That order is already finished."}), 400
+    if o["dispatch_status"] == "awaiting_payment" or o["kitchen_status"] == "waiting":
+        return jsonify({"ok": False, "error": "Mark the card paid first, then call the restaurant."}), 400
+    out, status = do_restaurant_call(o["code"], (b.get("script") or "").strip())
+    return jsonify(out), status
+
+
 @app.post("/api/dispatch/manual-order")
 def api_manual_order():
     """For restaurants not on the restaurant app: dispatch places the order with the
@@ -12349,6 +12378,11 @@ def dispatch_settings():
     if request.method == "POST":
         _am_owner = is_owner(session.get("dispatcher_id"))
         _am_dev = is_dev()
+        if "voice_script_present" in request.form:
+            for _vk in ("voice_rest_script", "voice_customer_script"):
+                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                             (_vk, (request.form.get(_vk) or "").strip()))
+            saved = True
         if "automsg_present" in request.form and (_am_owner or _am_dev):
             for _k, _l, _h, _d in AUTO_MSGS:
                 if (_k in DEV_AUTO_MSGS and not _am_dev) or (_k not in DEV_AUTO_MSGS and not _am_owner):
@@ -21171,7 +21205,7 @@ h1{color:#e53935;margin:0 0 4px} .card{background:#1b1b1b;border:1px solid #333;
 
 
 # ---- AI voice line (Twilio) tools ----
-from voice_api import voice_bp
+from voice_api import voice_bp, do_restaurant_call
 app.register_blueprint(voice_bp)
 
 if __name__ == "__main__":

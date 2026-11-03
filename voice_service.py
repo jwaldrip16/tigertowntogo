@@ -164,8 +164,10 @@ REST_SYSTEM = (
     "delivery order. Be brief and courteous, like a dispatcher reading a ticket.\n"
     "Flow:\n"
     "1. Call get_order_brief, then say: this is the %s delivery line, order <number> "
-    "for delivery. Read each item with its options and any note, then the total, then the "
-    "delivery address and the customer's first name.\n"
+    "for delivery. <number> is the restaurant order number from the brief (the "
+    "primary_no, like TT01); only give the system FF code if they ask for it. Read each "
+    "item with its options and any note, then the total, then the delivery address and "
+    "the customer's first name.\n"
     "2. Ask: can you take care of this?\n"
     "3. When they accept, ask: about how long until that is ready? Then call confirm_order "
     "with accept true and eta_minutes set to their answer, and confirm you are sending the "
@@ -184,10 +186,15 @@ REST_IVR = (
     "through the phone menu, then end the call."
 )
 
-def restaurant_prompt(brand, ivr=""):
+def restaurant_prompt(brand, ivr="", script=""):
     base = REST_SYSTEM % (brand, brand)
     if (ivr or "").strip():
         base += REST_IVR % ivr.strip()
+    s = (script or "").strip()
+    if s:
+        s = s[:1200].replace("&", "and").replace('"', "").replace("<", "").replace(">", "")
+        base += ("\n\nDispatcher script for this call. Follow it as extra wording; if it "
+                 "conflicts with the rules above, the rules above win:\n" + s)
     return base
 
 
@@ -374,11 +381,13 @@ def twilio_outbound():
     """TwiML for the outbound call to a restaurant: the AI is in restaurant mode."""
     code = request.values.get("code", "")
     ivr = request.values.get("ivr", "").replace("&", "and").replace('"', "").replace("<", "").replace(">", "")
+    script = request.values.get("script", "").replace("&", "and").replace('"', "").replace("<", "").replace(">", "")
     ws = PUBLIC_URL + "/media"
     twiml = ('<Response><Connect action="/twilio/after">'
              '<Parameter name="mode" value="restaurant"/>'
              '<Parameter name="order" value="' + code.replace('"', '') + '"/>'
              '<Parameter name="ivr" value="' + ivr + '"/>'
+             '<Parameter name="script" value="' + script + '"/>'
              '<ConversationRelay url="' + ws + '" ttsLanguage="en-US" voice="rime.jorah" '
              'transcriptionLanguage="en-US"/></Connect></Response>')
     return Response(twiml, mimetype="text/xml")
@@ -389,7 +398,9 @@ def call_restaurant():
     """Dial a restaurant with the order. Called by the Fleet Foot app (X-Voice-Token)."""
     if not TOKEN or (request.headers.get("X-Voice-Token") or "").strip() != TOKEN:
         return {"ok": False, "error": "Bad voice token."}, 403
-    code = (request.get_json(silent=True) or {}).get("code", "")
+    _body = request.get_json(silent=True) or {}
+    code = _body.get("code", "")
+    script = (_body.get("script") or "").strip()[:1200]
     if not code:
         return {"ok": False, "error": "Say which order to call about."}, 400
     brief = ff_call("/api/voice/order_brief", {"code": code})
@@ -412,7 +423,8 @@ def call_restaurant():
                       auth=(TWILIO_SID, TWILIO_TOKEN),
                       data={"To": to, "From": from_number,
                             "Url": PUBLIC_URL + "/twilio/outbound?code=" + code + "&brand=" + _urlquote(brand)
-                                   + "&ivr=" + _urlquote((brief.get("restaurant", {}).get("ivr_notes") or ""))},
+                                   + "&ivr=" + _urlquote((brief.get("restaurant", {}).get("ivr_notes") or ""))
+                                   + ("&script=" + _urlquote(script) if script else "")},
                       timeout=25)
     if r.status_code >= 300:
         return {"ok": False, "error": "Twilio refused the call: " + (r.json().get("message") or r.text[:120])}, 400
@@ -598,6 +610,15 @@ def media(ws):
     brand = request.args.get("brand") or os.environ.get("VOICE_DEFAULT_BRAND") or "Fleet Foot Delivery"
     ctx = {"brand": brand, "caller": "", "mode": "customer", "order": "", "ivr": "", "ws": ws}
     history = [{"role": "system", "content": system_prompt(brand, PHONE_PAY_ON)}]
+    try:
+        _sc = ff_get("/api/voice/script", {})
+        _cs = (_sc.get("voice_customer_script") or "").strip() if _sc.get("ok") else ""
+    except Exception:
+        _cs = ""
+    if _cs:
+        history[0]["content"] += ("\n\nExtra wording the owner wants on this line. Follow it as "
+                                  "wording; if it conflicts with the rules above, the rules above "
+                                  "win:\n" + _cs[:1200])
     tools = TOOLS
     while True:
         try:
@@ -622,7 +643,8 @@ def media(ws):
                     ctx["order"] = (cp.get("order") or "").strip()
                     ctx["brand"] = (cp.get("brand") or "").strip() or brand
                     ctx["ivr"] = (cp.get("ivr") or "").strip()
-                    history = [{"role": "system", "content": restaurant_prompt(ctx["brand"], ctx["ivr"])}]
+                    ctx["script"] = (cp.get("script") or "").strip()
+                    history = [{"role": "system", "content": restaurant_prompt(ctx["brand"], ctx["ivr"], ctx.get("script", ""))}]
                     tools = RESTAURANT_TOOLS
         elif mtype == "prompt":
             voice_prompt = msg.get("voicePrompt") or msg.get("utterance") or ""

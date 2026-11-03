@@ -265,6 +265,15 @@ rsLoad();
   {% endif %}
   {% endfor %}
   {% endif %}
+  {% if owner_view or dev_view %}
+  <h2>AI voice line scripts</h2>
+  <input type="hidden" name="voice_script_present" value="1">
+  <div class="muted small">Extra wording the AI voice line uses. Leave blank to use the built-in script. The restaurant-call script can also be rewritten for a single call from the AI call button on an order.</div>
+  <label>Customer ordering line script</label>
+  <textarea name="voice_customer_script" rows="4" maxlength="1200" placeholder="Extra wording for the line that takes orders from customers">{{ s.get('voice_customer_script','') }}</textarea>
+  <label>Restaurant call script (default)</label>
+  <textarea name="voice_rest_script" rows="4" maxlength="1200" placeholder="Extra wording for the line that calls restaurants to confirm orders">{{ s.get('voice_rest_script','') }}</textarea>
+  {% endif %}
   {% if owner_view %}
   <h2 style="margin-top:18px">Staffing alerts for dispatch</h2>
   <p class="muted small">Shown on the dispatch board with a sound and a notification, worked out for each region on its own, only while the business is open. Tap Got it to hide one for a while.</p>
