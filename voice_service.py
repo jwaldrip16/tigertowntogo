@@ -17,7 +17,7 @@
 #   POST https://<this service>/twilio/voice
 # ---------------------------------------------------------------------------
 import os, json
-from flask import Flask, request, Response
+from flask import Flask, request, Response, jsonify
 from flask_sock import Sock
 import requests
 from urllib.parse import quote as _urlquote
@@ -28,6 +28,23 @@ sock = Sock(app)
 
 FLEETFOOT_URL = (os.environ.get("FLEETFOOT_URL") or "").rstrip("/")
 TOKEN = (os.environ.get("FLEETFOOT_VOICE_TOKEN") or "").strip()
+
+# Pay by phone (Twilio <Pay> through the Generic Pay Connector to PayPal).
+#   PHONE_PAY=1            new call-in orders pay on the call by keypad instead of
+#                          transferring to dispatch
+#   VOICE_PAY_CONNECTOR    the Generic Pay Connector's unique name in the Twilio console
+#   PAY_TEST_MODE=1        accept only Twilio's test cards without touching PayPal
+PHONE_PAY_ON = (os.environ.get("PHONE_PAY") or "") == "1"
+PAY_CONNECTOR = (os.environ.get("VOICE_PAY_CONNECTOR") or "Default").strip()
+PAY_TEST_MODE = (os.environ.get("PAY_TEST_MODE") or "") == "1"
+PAY_TX = {}   # transaction_id -> gateway response; Twilio retries reuse the answer
+PAY_TEST_CARDS = {"4111111111111111", "5555555555554444", "378282246310005",
+                  "6011111111111117", "3065930009020004", "3566002020360505",
+                  "6200000000000005", "6771798021000008"}
+
+
+def _dollars(cents):
+    return "%.2f" % (int(cents or 0) / 100.0)
 PUBLIC_URL = (os.environ.get("PUBLIC_URL") or "").rstrip("/")
 MODEL = os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
 DISPATCH_TEXT = os.environ.get("DISPATCH_TEXT") or "(334) 555-0100"
@@ -95,9 +112,10 @@ MODIFY_TOOL = _tool("modify_order",
      "note": {"type": "string"}}, ["code"])
 
 ISSUE_TOOL = _tool("report_issue",
-    "Report a problem with an order (wrong item, missing item, late, cold food). "
-    "Files it to dispatch.",
+    "Report a problem with an order (wrong item, missing item, late, cold food, "
+    "wanting the food remade). Files it to dispatch.",
     {"code": {"type": "string"}, "issue": {"type": "string"},
+     "remake": {"type": "boolean"},
      "note": {"type": "string"}}, ["code", "issue"])
 
 DRV_ORDERS_TOOL = _tool("driver_orders",
@@ -210,21 +228,41 @@ def run_tool(name, args, ctx):
         args = dict(args)
         args["site"] = site
         args.setdefault("customer_phone", caller)
+        try:
+            tip = float(args.pop("tip_dollars", 0) or 0)
+        except (TypeError, ValueError):
+            tip = 0.0
+        if tip < 0:
+            tip = 0.0
+        if PHONE_PAY_ON:
+            args["pay_on_call"] = True
+            args["tip_cents"] = int(round(tip * 100))
         out = ff_call("/api/voice/place_order", args)
         if out.get("ok"):
-            # A new order: hand the caller straight to dispatch, who takes the
-            # card and the tip. Remakes and changes to an existing order never
-            # reach here, so they never transfer.
-            if ctx.get("sid"):
-                CALLS[ctx["sid"]] = {"transfer": True}
             code = str(out.get("code") or "").replace(" ", "")
             spoken = " ".join(code) if code else ""
             out["end_call"] = True
-            out["say"] = ("Perfect, your order is in, number " + spoken +
-                          ". I am connecting you with dispatch now to take "
-                          "your payment and tip.") if spoken else \
-                         ("Perfect, your order is in. I am connecting you "
-                          "with dispatch now to take your payment and tip.")
+            if PHONE_PAY_ON and ctx.get("sid"):
+                # Pay on the call: the keypad payment line takes the card next.
+                CALLS[ctx["sid"]] = {"pay": {"code": code, "brand": ctx.get("brand") or "",
+                                             "amount_cents": int(out.get("total_cents") or 0),
+                                             "tries": 0}}
+                out["say"] = (("Perfect, your order is in, number " + spoken + ". ")
+                              if spoken else "Perfect, your order is in. ") + \
+                             ("Your total is " + _dollars(out.get("total_cents")) +
+                              " with your tip. Stay on the line and enter your card "
+                              "details on your keypad when prompted.")
+            else:
+                # A new order: hand the caller straight to dispatch, who takes the
+                # card and the tip. Remakes and changes to an existing order never
+                # reach here, so they never transfer.
+                if ctx.get("sid"):
+                    CALLS[ctx["sid"]] = {"transfer": True}
+                out["say"] = ("Perfect, your order is in, number " + spoken +
+                              ". I am connecting you with dispatch now to take "
+                              "your payment and tip.") if spoken else \
+                             ("Perfect, your order is in. I am connecting you "
+                              "with dispatch now to take your payment and tip.")
         return out
     if name == "cancel_order":
         return ff_call("/api/voice/cancel_order", {"code": args.get("code"), "phone": caller})
@@ -235,7 +273,9 @@ def run_tool(name, args, ctx):
     if name == "report_issue":
         return ff_call("/api/voice/report_issue",
                        {"code": args.get("code"), "phone": caller,
-                        "issue": args.get("issue"), "note": args.get("note")})
+                        "issue": args.get("issue"),
+                        "remake": bool(args.get("remake")),
+                        "note": args.get("note")})
     if name == "driver_orders":
         return ff_call("/api/voice/driver_orders", {"phone": caller})
     if name == "driver_message":
@@ -295,7 +335,25 @@ def health():
     return {"ok": True, "fleet_foot_set": bool(FLEETFOOT_URL and TOKEN)}
 
 
-def system_prompt(brand):
+def payment_rule(pay):
+    """The payment paragraph of the customer prompt."""
+    if pay:
+        return ("- After the caller confirms the order, ask how much they would like "
+                "to tip: whole dollars, zero is fine. Pass it as tip_dollars in "
+                "place_order. Never ask for card numbers, expiration dates, zip codes, "
+                "or security codes; the keypad prompts collect those right after the "
+                "call. Once the order is placed, say the total with the tip included "
+                "and tell the caller they will enter their card on their keypad next. "
+                "Remakes and changes to an existing order never take a tip or a "
+                "payment. ")
+    return ("- Payment and the tip are taken by dispatch, so never ask for card "
+            "numbers or a tip. The moment a new order is placed, the call transfers "
+            "to dispatch automatically so they can take the card and the tip; just "
+            "tell the caller dispatch is picking up. Remakes and changes to an "
+            "existing order do not transfer. ")
+
+
+def system_prompt(brand, pay=False):
     return (
         "You are the phone agent for %s, a food delivery service. You talk with "
         "callers, place and change delivery orders, take driver check-ins, and report "
@@ -303,12 +361,12 @@ def system_prompt(brand):
         "Rules:\n"
         "- Call get_menu first so you only offer real menu items and prices. Never invent items.\n"
         "- Before placing an order: confirm the items and the delivery address back to the caller, then read the total back and get a clear yes.\n"
-        "- Payment and the tip are taken by dispatch, so never ask for card numbers or a tip. The moment a new order is placed, the call transfers to dispatch automatically so they can take the card and the tip; just tell the caller dispatch is picking up. Remakes and changes to an existing order do not transfer.\n"
-        "- Only offer a remake, a credit, or a refund if a tool says it is allowed. The API, not you, decides what is allowed.\n"
+        "%s" +
+        "- Only offer a remake, a credit, or a refund if a tool says it is allowed. A remake is only possible within 15 minutes of delivery; after that the API refuses it, so say a remake is not possible this late and connect the caller with dispatch. The API, not you, decides what is allowed.\n"
         "- If a tool refuses (for example the order is already with the kitchen), explain that simply and offer to send a message to dispatch with report_issue.\n"
         "- If the caller is a driver, use the driver tools; status changes go to dispatch for approval.\n"
         "- If the caller is angry, confused, or wants something no tool covers, say you are connecting them to a person, call handoff_to_dispatch, and tell them dispatch will call back at %s."
-    ) % (brand, DISPATCH_TEXT)
+    ) % (brand, payment_rule(pay), DISPATCH_TEXT)
 
 
 @app.route("/twilio/outbound", methods=["GET", "POST"])
@@ -361,11 +419,42 @@ def call_restaurant():
     return {"ok": True, "sid": r.json().get("sid")}
 
 
+def pay_twiml(pay, retry=False):
+    """The card-entry TwiML: Twilio asks for the card, expiry, zip and security code."""
+    code = (pay.get("code") or "").replace('"', "")
+    brand = (pay.get("brand") or "").replace('"', "")
+    amount = _dollars(pay.get("amount_cents"))
+    head = ("Your total is " + amount + " dollars, tip included. "
+            "Enter your card information on your keypad when prompted."
+            if not retry else
+            "The card did not go through. Let us try once more. "
+            "Enter your card information on your keypad when prompted.")
+    return ('<Response><Say>' + head + '</Say>'
+            '<Pay chargeAmount="' + amount + '" paymentConnector="' + PAY_CONNECTOR +
+            '" action="/twilio/pay-result">'
+            '<Parameter name="code" value="' + code + '"/>'
+            '<Parameter name="brand" value="' + brand + '"/>'
+            '</Pay></Response>')
+
+
+def ff_get(path, params):
+    try:
+        r = requests.get(FLEETFOOT_URL + path, params=params,
+                         headers={"X-Voice-Token": TOKEN}, timeout=(5, 9))
+        return r.json()
+    except Exception:
+        return {"ok": False}
+
+
 @app.route("/twilio/after", methods=["POST"])
 def twilio_after():
-    """Runs when the AI session ends. A marked call dials dispatch; anything else hangs up."""
+    """Runs when the AI session ends: a pay-by-phone call runs the card prompts,
+    a marked call dials dispatch, anything else hangs up."""
     sid = request.values.get("CallSid", "")
     state = CALLS.pop(sid, None)
+    if state and state.get("pay") and PAY_CONNECTOR:
+        CALLS[sid] = state          # /twilio/pay-result still needs the order
+        return Response(pay_twiml(state["pay"]), mimetype="text/xml")
     target = dispatch_number_for(request.values.get("To", ""))
     if state and state.get("transfer") and target:
         return Response('<Response><Dial>' + target + '</Dial></Response>',
@@ -373,11 +462,142 @@ def twilio_after():
     return Response('<Response><Hangup/></Response>', mimetype="text/xml")
 
 
+@app.route("/twilio/pay", methods=["GET", "POST"])
+def twilio_pay():
+    """Re-runs the card prompts after a failed attempt."""
+    pay = (CALLS.get(request.values.get("CallSid", "")) or {}).get("pay") or {}
+    if not pay:
+        return Response('<Response><Hangup/></Response>', mimetype="text/xml")
+    return Response(pay_twiml(pay, retry=True), mimetype="text/xml")
+
+
+@app.route("/twilio/pay-result", methods=["POST"])
+def twilio_pay_result():
+    """Twilio reports the keypad payment result here."""
+    sid = request.values.get("CallSid", "")
+    pay = (CALLS.get(sid) or {}).get("pay") or {}
+    ref = (request.values.get("PayConnector_charge_ref")
+           or request.values.get("PayConnector_charge_id") or "")
+    if request.values.get("PaymentStatus") == "success" and pay.get("code"):
+        ff_call("/api/voice/mark_paid",
+                {"code": pay["code"], "ref": ref,
+                 "amount_cents": int(pay.get("amount_cents") or 0)})
+        return Response('<Response><Say>Thank you. Your order is confirmed and paid. '
+                        'Your driver will be on the way soon.</Say><Hangup/></Response>',
+                        mimetype="text/xml")
+    target = dispatch_number_for(request.values.get("To", ""))
+    if pay:
+        tries = int(pay.get("tries") or 0) + 1
+        pay["tries"] = tries
+        CALLS[sid] = {"pay": pay}
+        if tries < 2:
+            return Response('<Response><Redirect method="POST">/twilio/pay</Redirect>'
+                            '</Response>', mimetype="text/xml")
+    if target:
+        return Response('<Response><Say>The card did not go through. I am connecting '
+                        'you with dispatch, one moment.</Say><Dial>' + target +
+                        '</Dial></Response>', mimetype="text/xml")
+    return Response('<Response><Say>The card did not go through. Dispatch will call '
+                    'you back shortly to finish the payment.</Say><Hangup/></Response>',
+                    mimetype="text/xml")
+
+
+@app.post("/gateway/pay")
+def gateway_pay():
+    """The Generic Pay Connector's endpoint: charge the card through PayPal.
+
+    Twilio posts the card details here; they go straight through to the order's
+    own brand PayPal keys and are never written to disk or to a log. Twilio
+    retries within 10 seconds reusing the same transaction_id, so the answer is
+    remembered instead of charging twice.
+    """
+    b = request.get_json(force=True, silent=True) or {}
+    params = b.get("parameters") or {}
+    tx = str(b.get("transaction_id") or "")
+
+    def done(resp):
+        if tx:
+            PAY_TX[tx] = resp
+        return jsonify(resp)
+
+    if tx and tx in PAY_TX:
+        return jsonify(PAY_TX[tx])
+    if str(b.get("method") or "") != "charge":
+        return done({"charge_id": None, "error_code": "unsupported",
+                     "error_message": "Only charge transactions are supported."})
+    code = str(params.get("code") or "").strip()
+    if not code:
+        return done({"charge_id": None, "error_code": "missing_order",
+                     "error_message": "No order code was passed."})
+    card = str(b.get("cardnumber") or "").replace(" ", "")
+    if PAY_TEST_MODE:
+        if card in PAY_TEST_CARDS:
+            cid = "TEST-" + (tx[:12] or "test")
+            return done({"charge_id": cid, "error_code": None, "error_message": None,
+                         "parameters": {"code": code, "charge_ref": cid}})
+        return done({"charge_id": None, "error_code": "test_card",
+                     "error_message": "Test mode accepts only Twilio's test cards."})
+    keys = ff_get("/api/voice/pp_keys", {"code": code})
+    if not keys.get("ok") or not (keys.get("client") and keys.get("secret")):
+        return done({"charge_id": None, "error_code": "no_processor",
+                     "error_message": "This brand's PayPal card keys are not set up."})
+    base = keys.get("base") or "https://api-m.paypal.com"
+    try:
+        tok = requests.post(base + "/v1/oauth2/token",
+                            auth=(keys["client"], keys["secret"]),
+                            data={"grant_type": "client_credentials"}, timeout=(5, 9))
+        tok.raise_for_status()
+        at = tok.json().get("access_token") or ""
+        hdr = {"Authorization": "Bearer " + at}
+        expiry = (str(b.get("expiry_year") or "").zfill(4)[-4:] + "-" +
+                  str(b.get("expiry_month") or "").zfill(2))
+        order = requests.post(
+            base + "/v2/checkout/orders", headers=hdr,
+            json={"intent": "CAPTURE",
+                  "purchase_units": [{"reference_id": code[:127],
+                                      "description": str(b.get("description") or "delivery order")[:127],
+                                      "amount": {"value": "%.2f" % float(b.get("amount") or 0),
+                                                 "currency_code": str(b.get("currency_code") or "USD")}}],
+                  "payment_source": {"card": {"number": card,
+                                              "security_code": str(b.get("cvv") or ""),
+                                              "expiry": expiry,
+                                              "billing_address": {
+                                                  "postal_code": str(b.get("postal_code") or ""),
+                                                  "country_code": "US"}}}},
+            timeout=(5, 9))
+        if order.status_code >= 400:
+            j = order.json() or {}
+            msg = ""
+            for iss in (j.get("details") or []):
+                msg = iss.get("description") or msg
+                break
+            return done({"charge_id": None, "error_code": "declined",
+                         "error_message": (msg or j.get("message") or "The card was declined.")[:200]})
+        oid = (order.json() or {}).get("id") or ""
+        cap = requests.post(base + "/v2/checkout/orders/" + oid + "/capture",
+                            headers=hdr, json={}, timeout=(5, 9))
+        cj = cap.json() or {}
+        caps = ((cj.get("purchase_units") or [{}])[0].get("payments") or {}).get("captures") or []
+        if cap.status_code >= 400 or not caps or caps[0].get("status") not in ("COMPLETED", "PENDING"):
+            msg = ""
+            for iss in (cj.get("details") or []):
+                msg = iss.get("description") or msg
+                break
+            return done({"charge_id": None, "error_code": "declined",
+                         "error_message": (msg or "PayPal did not complete the charge.")[:200]})
+        cid = caps[0].get("id") or oid
+        return done({"charge_id": cid, "error_code": None, "error_message": None,
+                     "parameters": {"code": code, "charge_ref": cid}})
+    except Exception:
+        return done({"charge_id": None, "error_code": "gateway",
+                     "error_message": "The payment gateway could not be reached."})
+
+
 @sock.route("/media")
 def media(ws):
     brand = request.args.get("brand") or os.environ.get("VOICE_DEFAULT_BRAND") or "Fleet Foot Delivery"
     ctx = {"brand": brand, "caller": "", "mode": "customer", "order": "", "ivr": "", "ws": ws}
-    history = [{"role": "system", "content": system_prompt(brand)}]
+    history = [{"role": "system", "content": system_prompt(brand, PHONE_PAY_ON)}]
     tools = TOOLS
     while True:
         try:
@@ -431,7 +651,9 @@ def media(ws):
                             # the stream closes and Twilio runs the action URL
                             # (Dial to dispatch for a transfer, else Hangup).
                             _say(ws, out.get("say") or "Thanks for calling. Goodbye.")
-                            CALLS.pop(ctx.get("sid"), None)
+                            st = CALLS.get(ctx.get("sid")) or {}
+                            if not (st.get("transfer") or st.get("pay")):
+                                CALLS.pop(ctx.get("sid"), None)
                             return
                         history.append({"role": "tool", "tool_call_id": tc.id,
                                         "content": json.dumps(out)[:4000]})

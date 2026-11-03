@@ -99,6 +99,21 @@ def _cutoff_msg(o):
             "cancelled here. I can send your message to dispatch instead.")
 
 
+def _delivered_min(o):
+    """Minutes since the order was marked delivered (None while not delivered)."""
+    ts = o["delivered_at"] or o["status_changed_at"]
+    if o["dispatch_status"] != "delivered" or not ts:
+        return None
+    try:
+        t = A.dt.datetime.fromisoformat(str(ts)[:19])
+        return round((A.dt.datetime.now() - t).total_seconds() / 60.0)
+    except Exception:
+        return None
+
+
+REMAKE_WINDOW_MIN = 15
+
+
 def _order_view(o):
     return {"code": o["code"], "restaurant": o["rname"],
             "status": o["dispatch_status"], "kitchen": o["kitchen_status"],
@@ -106,6 +121,7 @@ def _order_view(o):
             "hold_reason": o["hold_reason"] or "",
             "total": A.money(o["total_cents"]), "total_cents": o["total_cents"],
             "address": o["address"], "placed_at": o["created_at"],
+            "delivered_min": _delivered_min(o),
             "driver": bool(o["driver_id"])}
 
 
@@ -286,12 +302,17 @@ def voice_place():
     payload = {"restaurant_id": r["id"], "items": items,
                "customer_name": name, "customer_phone": phone, "address": addr,
                "note": (b.get("note") or "")[:200],
-               "dispatch_note": ("Placed by the AI voice line. Take payment by phone or on "
-                                 "delivery." + ((" " + str(b.get("dispatch_note"))[:200])
-                                                if b.get("dispatch_note") else "")),
+               "dispatch_note": ("Placed by the AI voice line. Card was taken on the "
+                                 "call through the keypad payment line."
+                                 if b.get("pay_on_call") else
+                                 "Placed by the AI voice line. Take payment by phone or on "
+                                 "delivery.") + ((" " + str(b.get("dispatch_note"))[:200])
+                                                 if b.get("dispatch_note") else ""),
                "tip_cents": b.get("tip_cents") or 0}
     with A.app.test_request_context("/checkout", method="POST", json=payload):
         resp = A.checkout()
+        if isinstance(resp, tuple):
+            resp = resp[0]
         data = resp.get_json()
     if not data.get("ok"):
         return jsonify({"ok": False, "error": data.get("error", "The order did not go through.")}), 400
@@ -391,9 +412,19 @@ def voice_issue():
     if o is None:
         return jsonify({"ok": False,
                         "error": "I could not find that order for this phone number."}), 404
+    remake = bool(b.get("remake"))
+    if remake:
+        # A remake is only taken within 15 minutes of the delivery being marked.
+        dmin = _delivered_min(o)
+        if o["dispatch_status"] == "delivered" and (dmin is None or dmin > REMAKE_WINDOW_MIN):
+            return jsonify({"ok": False, "error":
+                            "This order was delivered more than 15 minutes ago, so a "
+                            "remake can't be requested on this line anymore. Connect "
+                            "the caller with dispatch instead."}), 400
     issue = (b.get("issue") or "issue").strip()[:80]
     note = (b.get("note") or "").strip()[:300]
-    txt = "CUSTOMER ISSUE (AI voice line): " + issue + ((" - " + note) if note else "")
+    txt = (("REMAKE REQUEST" if remake else "CUSTOMER ISSUE") +
+           " (AI voice line): " + issue + ((" - " + note) if note else ""))
     A.db().execute("UPDATE orders SET dispatch_note=? WHERE id=?",
                    (((o["dispatch_note"] or "") + " | " + txt)[:500], o["id"]))
     A.raise_call_alert("voice", o["customer_name"], o["customer_phone"], txt,
@@ -658,3 +689,44 @@ def voice_order_call_result():
                            restaurant_id=r["id"], order_id=o["id"])
     A.db().commit()
     return jsonify({"ok": True, "code": o["code"], "outcome": outcome})
+
+
+@voice_bp.get("/api/voice/pp_keys")
+@voice_auth
+def voice_pp_keys():
+    """The PayPal keys for an order's brand, for the keypad payment gateway."""
+    code = (request.args.get("code") or "").strip()
+    o = A.db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    conf = A.pp_conf(A.pp_order_acct(o))
+    brand = ""
+    try:
+        r = A.db().execute("SELECT * FROM restaurants WHERE id=?",
+                           (o["restaurant_id"],)).fetchone()
+        s = A.site_of_region(A._rv(r, "region_id") if r else None)
+        brand = (s["name"] if s else "") or ""
+    except Exception:
+        brand = ""
+    return jsonify({"ok": True, "brand": brand, "mode": conf["mode"], "base": conf["base"],
+                    "client": conf["client"], "secret": conf["secret"],
+                    "enabled": bool(conf["client"] and conf["secret"])})
+
+
+@voice_bp.post("/api/voice/mark_paid")
+@voice_auth
+def voice_mark_paid():
+    """The keypad payment line reports a successful card charge here."""
+    b = request.get_json(force=True) or {}
+    o = A.db().execute("SELECT * FROM orders WHERE code=?",
+                       ((b.get("code") or "").strip(),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    if o["dispatch_status"] in ("delivered", "cancelled"):
+        return jsonify({"ok": False, "error": "This order is closed."}), 400
+    if o["payment_status"] == "paid":
+        return jsonify({"ok": True, "already": True, "code": o["code"]})
+    A.mark_paid(o, "card_paypal", str(b.get("ref") or "")[:200],
+                int(b.get("amount_cents") or 0) or None)
+    o2 = A.db().execute("SELECT * FROM orders WHERE id=?", (o["id"],)).fetchone()
+    return jsonify({"ok": True, "code": o2["code"], "paid_cents": int(o2["paid_cents"] or 0)})
