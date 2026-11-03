@@ -273,6 +273,9 @@ rsLoad();
   <textarea name="voice_customer_script" rows="4" maxlength="1200" placeholder="Extra wording for the line that takes orders from customers">{{ s.get('voice_customer_script','') }}</textarea>
   <label>Restaurant call script (default)</label>
   <textarea name="voice_rest_script" rows="4" maxlength="1200" placeholder="Extra wording for the line that calls restaurants to confirm orders">{{ s.get('voice_rest_script','') }}</textarea>
+  <label>Minutes before the AI calls a restaurant app order nobody confirmed (0 or blank = never)</label>
+  <input name="voice_chase_min" type="number" min="0" max="180" value="{{ s.get('voice_chase_min','') }}" placeholder="10">
+  <div class="muted small">Restaurants on the restaurant app confirm orders there. If one sits unconfirmed this long after it was sent, the AI voice line calls them. Phone-only restaurants are never auto-called; the AI call button is for those.</div>
   {% endif %}
   {% if owner_view %}
   <h2 style="margin-top:18px">Staffing alerts for dispatch</h2>

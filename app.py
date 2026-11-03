@@ -642,6 +642,7 @@ def init_db():
     ensure_column(con, "orders", "ref_code", "TEXT")
     ensure_column(con, "orders", "paged_at", "TEXT")
     ensure_column(con, "orders", "kitchen_sent_at", "TEXT")
+    ensure_column(con, "orders", "ai_chase_at", "TEXT")
     # Restaurants not on the restaurant app yet: dispatch places the order with them by hand.
     ensure_column(con, "restaurants", "uses_app", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "restaurants", "call_method", "TEXT NOT NULL DEFAULT 'phone'")   # called-in stores: phone or online
@@ -12379,7 +12380,7 @@ def dispatch_settings():
         _am_owner = is_owner(session.get("dispatcher_id"))
         _am_dev = is_dev()
         if "voice_script_present" in request.form:
-            for _vk in ("voice_rest_script", "voice_customer_script"):
+            for _vk in ("voice_rest_script", "voice_customer_script", "voice_chase_min"):
                 db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
                              (_vk, (request.form.get(_vk) or "").strip()))
             saved = True
@@ -17952,6 +17953,58 @@ def _sched_notice_worker():
 threading.Thread(target=_sched_notice_worker, daemon=True).start()
 
 
+def confirm_chase_tick():
+    """Call restaurants on the restaurant app that have not confirmed an order in time.
+    Phone-only restaurants are never auto-called: dispatch places those by hand or with
+    the AI call button."""
+    row = db().execute("SELECT value FROM settings WHERE key='voice_chase_min'").fetchone()
+    raw = (row["value"] or "").strip() if row else ""
+    if raw == "":
+        mins = 10
+    else:
+        try:
+            mins = int(raw)
+        except ValueError:
+            mins = 10
+    if mins < 1 or not business_is_open():
+        return 0
+    from voice_api import do_restaurant_call
+    cutoff = (dt.datetime.now() - dt.timedelta(minutes=mins)).isoformat(timespec="seconds")
+    rows = db().execute("""SELECT o.id, o.code, o.kitchen_sent_at, r.name rname, r.phone rphone, r.id rid
+                           FROM orders o JOIN restaurants r ON r.id=o.restaurant_id
+                           WHERE r.uses_app=1 AND o.kitchen_status='pending'
+                             AND o.kitchen_sent_at IS NOT NULL AND o.kitchen_sent_at<=?
+                             AND o.ai_chase_at IS NULL
+                             AND o.dispatch_status NOT IN ('delivered','cancelled')""",
+                        (cutoff,)).fetchall()
+    n = 0
+    for o in rows:
+        try:
+            dt.datetime.fromisoformat(o["kitchen_sent_at"])
+        except (TypeError, ValueError):
+            continue
+        db().execute("UPDATE orders SET ai_chase_at=? WHERE id=?", (now(), o["id"]))
+        db().commit()
+        out, status = do_restaurant_call(o["code"], None)
+        if not out.get("ok"):
+            raise_call_alert("restaurant", o["rname"], o["rphone"] or "",
+                             "The AI confirm call for order " + o["code"] +
+                             " did not go out: " + (out.get("error") or "unknown reason"),
+                             restaurant_id=o["rid"], order_id=o["id"])
+        n += 1
+    return n
+
+
+def _confirm_chase_worker():
+    while True:
+        try:
+            with app.app_context():
+                confirm_chase_tick()
+        except Exception as e:
+            print("confirm chase skipped:", e)
+        time.sleep(45)
+
+
 def _auto_business_worker():
     while True:
         try:
@@ -17963,6 +18016,8 @@ def _auto_business_worker():
 
 if os.environ.get("AUTO_BUSINESS", "1") != "0":
     threading.Thread(target=_auto_business_worker, daemon=True).start()
+
+threading.Thread(target=_confirm_chase_worker, daemon=True).start()
 
 
 @app.post("/api/dispatch/auto-business")
