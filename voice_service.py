@@ -258,7 +258,7 @@ def run_tool(name, args, ctx):
         out = ff_call("/api/voice/place_order", args)
         if out.get("ok"):
             code = str(out.get("code") or "").replace(" ", "")
-            spoken = " ".join(code) if code else ""
+            spoken = _spoken_numbers(out, ctx)
             out["end_call"] = True
             if PHONE_PAY_ON and ctx.get("sid"):
                 # Pay on the call: the keypad payment line takes the card next.
@@ -480,13 +480,31 @@ def _clean_spoken(t):
             .replace(">", "").strip())
 
 
+def _spoken_numbers(out, ctx):
+    """The order number(s) read to the customer, per the dispatch setting."""
+    ff = str(out.get("code") or "").replace(" ", "")
+    pr = str(out.get("primary_no") or "").replace(" ", "")
+    ffs = " ".join(ff)
+    prs = " ".join(pr)
+    mode = ctx.get("num_mode") or "both"
+    if prs and mode == "primary":
+        return prs
+    if prs and mode == "both":
+        return prs + ", system number " + ffs
+    return ffs
+
+
 def _order_whisper(out, ctx):
     """What dispatch hears before a brand-new caller connects: the order summary."""
     code = _clean_spoken(str(out.get("code") or ""))[:20]
     brand = _clean_spoken(ctx.get("brand") or "")[:40]
     total = _dollars(out.get("total_cents"))
+    pr = _clean_spoken(str(out.get("primary_no") or ""))[:20]
     txt = "New order" + (" for " + brand if brand else "")
-    if code:
+    if pr:
+        txt += ", order number " + " ".join(pr) + ", system " + " ".join(code) \
+            + ", total " + total + ". Take the payment and the tip."
+    elif code:
         txt += ", order number " + code + ", total " + total + ". Take the payment and the tip."
     else:
         txt += ", total " + total + "."
@@ -671,6 +689,9 @@ def media(ws):
         _cs = (_sc.get("voice_customer_script") or "").strip() if _sc.get("ok") else ""
     except Exception:
         _cs = ""
+    ctx["num_mode"] = ((_sc.get("voice_customer_number") or "") if _sc.get("ok") else "").strip()
+    if ctx["num_mode"] not in ("primary", "ff"):
+        ctx["num_mode"] = "both"
     if _cs:
         history[0]["content"] += ("\n\nExtra wording the owner wants on this line. Follow it as "
                                   "wording; if it conflicts with the rules above, the rules above "

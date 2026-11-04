@@ -320,6 +320,7 @@ def voice_place():
     A.db().execute("UPDATE orders SET source='call_in' WHERE id=?", (o["id"],))
     A.db().commit()
     return jsonify({"ok": True, "code": o["code"], "order_id": o["id"],
+                    "primary_no": o["primary_no"] or "",
                     "restaurant": r["name"], "total": A.money(o["total_cents"]),
                     "total_cents": o["total_cents"],
                     "hold_reason": o["hold_reason"] or "",
@@ -743,9 +744,11 @@ def voice_order_call_result():
 def voice_script():
     """The owner's editable call scripts, for the voice line's prompts."""
     out = {"ok": True}
-    for k in ("voice_customer_script", "voice_rest_script"):
+    for k in ("voice_customer_script", "voice_rest_script", "voice_customer_number"):
         row = A.db().execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
         out[k] = (row["value"] or "") if row else ""
+    if out["voice_customer_number"] not in ("both", "primary", "ff"):
+        out["voice_customer_number"] = "both"   # blank or junk falls back to both numbers
     return jsonify(out)
 
 

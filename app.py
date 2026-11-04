@@ -12380,7 +12380,8 @@ def dispatch_settings():
         _am_owner = is_owner(session.get("dispatcher_id"))
         _am_dev = is_dev()
         if "voice_script_present" in request.form:
-            for _vk in ("voice_rest_script", "voice_customer_script", "voice_chase_min"):
+            for _vk in ("voice_rest_script", "voice_customer_script", "voice_chase_min",
+                        "voice_customer_number"):
                 db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
                              (_vk, (request.form.get(_vk) or "").strip()))
             saved = True

@@ -276,6 +276,13 @@ rsLoad();
   <label>Minutes before the AI calls a restaurant app order nobody confirmed (0 or blank = never)</label>
   <input name="voice_chase_min" type="number" min="0" max="180" value="{{ s.get('voice_chase_min','') }}" placeholder="10">
   <div class="muted small">Restaurants on the restaurant app confirm orders there. If one sits unconfirmed this long after it was sent, the AI voice line calls them. Phone-only restaurants are never auto-called; the AI call button is for those.</div>
+  <label>Order number the line reads to the customer</label>
+  <select name="voice_customer_number">
+    <option value="both" {{ 'selected' if (s.get('voice_customer_number','both')=='both') else '' }}>Both: restaurant number and FF code</option>
+    <option value="primary" {{ 'selected' if (s.get('voice_customer_number')=='primary') else '' }}>Restaurant number only (TT01)</option>
+    <option value="ff" {{ 'selected' if (s.get('voice_customer_number')=='ff') else '' }}>FF code only</option>
+  </select>
+  <div class="muted small">The customer hears their order number right after it is placed. The restaurant number (TT01 style) is the one you and the restaurant work from.</div>
   {% endif %}
   {% if owner_view %}
   <h2 style="margin-top:18px">Staffing alerts for dispatch</h2>
