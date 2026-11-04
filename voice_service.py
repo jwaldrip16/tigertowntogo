@@ -141,7 +141,10 @@ HANDOFF_TOOL = _tool("handoff_to_dispatch",
     "The caller is angry, confused, or asking for something no tool covers. "
     "With transfer true the caller is dialed through to dispatch right now; "
     "with transfer false dispatch is told to call them back.",
-    {"note": {"type": "string"}, "transfer": {"type": "boolean"}}, ["note", "transfer"])
+    {"note": {"type": "string"}, "transfer": {"type": "boolean"},
+     "summary": {"type": "string",
+                 "description": "Short briefing for the dispatcher: what the caller needs "
+                                "and the order number if there is one."}}, ["note", "transfer"])
 
 TOOLS = [MENU_TOOL, ADDRESS_TOOL, FIND_TOOL, PLACE_TOOL, CANCEL_TOOL, MODIFY_TOOL,
          ISSUE_TOOL, REST_CALL_TOOL, DRV_ORDERS_TOOL, DRV_MSG_TOOL, DRV_REQ_TOOL, HANDOFF_TOOL]
@@ -272,7 +275,7 @@ def run_tool(name, args, ctx):
                 # card and the tip. Remakes and changes to an existing order never
                 # reach here, so they never transfer.
                 if ctx.get("sid"):
-                    CALLS[ctx["sid"]] = {"transfer": True}
+                    CALLS[ctx["sid"]] = {"transfer": True, "whisper": _order_whisper(out, ctx)}
                 out["say"] = ("Perfect, your order is in, number " + spoken +
                               ". I am connecting you with dispatch now to take "
                               "your payment and tip.") if spoken else \
@@ -314,7 +317,8 @@ def run_tool(name, args, ctx):
         return out
     if name == "handoff_to_dispatch":
         if args.get("transfer") and ctx.get("sid"):
-            CALLS[ctx["sid"]] = {"transfer": True}
+            CALLS[ctx["sid"]] = {"transfer": True,
+                                 "whisper": args.get("summary") or ""}
             return {"ok": True, "end_call": True,
                     "say": "I understand, and I am sorry. Connecting you with dispatch now, "
                            "one moment."}
@@ -470,6 +474,42 @@ def ff_get(path, params):
         return {"ok": False}
 
 
+def _clean_spoken(t):
+    """Keep a briefing safe to put inside TwiML and pleasant to hear."""
+    return ((t or "").replace("&", "and").replace('"', "").replace("<", "")
+            .replace(">", "").strip())
+
+
+def _order_whisper(out, ctx):
+    """What dispatch hears before a brand-new caller connects: the order summary."""
+    code = _clean_spoken(str(out.get("code") or ""))[:20]
+    brand = _clean_spoken(ctx.get("brand") or "")[:40]
+    total = _dollars(out.get("total_cents"))
+    txt = "New order" + (" for " + brand if brand else "")
+    if code:
+        txt += ", order number " + code + ", total " + total + ". Take the payment and the tip."
+    else:
+        txt += ", total " + total + "."
+    return txt
+
+
+def _dial_inner(target, whisper):
+    """A Dial that lets dispatch hear the briefing before the caller connects."""
+    if whisper and PUBLIC_URL:
+        url = PUBLIC_URL + "/twilio/whisper?w=" + _urlquote(_clean_spoken(whisper)[:400])
+        return '<Dial><Number url="' + url + '">' + target + '</Number></Dial>'
+    return '<Dial>' + target + '</Dial>'
+
+
+@app.route("/twilio/whisper", methods=["GET", "POST"])
+def twilio_whisper():
+    """The warm-transfer briefing Twilio plays to dispatch before connecting the caller."""
+    text = _clean_spoken(request.values.get("w", ""))[:400]
+    if not text:
+        return Response('<Response><Hangup/></Response>', mimetype="text/xml")
+    return Response('<Response><Say>' + text + '</Say></Response>', mimetype="text/xml")
+
+
 @app.route("/twilio/after", methods=["POST"])
 def twilio_after():
     """Runs when the AI session ends: a pay-by-phone call runs the card prompts,
@@ -481,8 +521,8 @@ def twilio_after():
         return Response(pay_twiml(state["pay"]), mimetype="text/xml")
     target = dispatch_number_for(request.values.get("To", ""))
     if state and state.get("transfer") and target:
-        return Response('<Response><Dial>' + target + '</Dial></Response>',
-                        mimetype="text/xml")
+        return Response('<Response>' + _dial_inner(target, state.get("whisper")) +
+                        '</Response>', mimetype="text/xml")
     return Response('<Response><Hangup/></Response>', mimetype="text/xml")
 
 
@@ -518,9 +558,13 @@ def twilio_pay_result():
             return Response('<Response><Redirect method="POST">/twilio/pay</Redirect>'
                             '</Response>', mimetype="text/xml")
     if target:
+        code = _clean_spoken(str(pay.get("code") or ""))[:20]
+        brief = ("The card failed twice on the keypad for order " + code +
+                 ". They need payment help.") if code else \
+                "The card failed twice on the keypad."
         return Response('<Response><Say>The card did not go through. I am connecting '
-                        'you with dispatch, one moment.</Say><Dial>' + target +
-                        '</Dial></Response>', mimetype="text/xml")
+                        'you with dispatch, one moment.</Say>' + _dial_inner(target, brief) +
+                        '</Response>', mimetype="text/xml")
     return Response('<Response><Say>The card did not go through. Dispatch will call '
                     'you back shortly to finish the payment.</Say><Hangup/></Response>',
                     mimetype="text/xml")
