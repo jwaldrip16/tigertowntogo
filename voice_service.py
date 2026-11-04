@@ -118,6 +118,14 @@ ISSUE_TOOL = _tool("report_issue",
      "remake": {"type": "boolean"},
      "note": {"type": "string"}}, ["code", "issue"])
 
+REST_CALL_TOOL = _tool("restaurant_issue",
+    "The caller is a restaurant calling about an order (a mistake, a missing item, or any other "
+    "problem). Report it to dispatch with the restaurant's own order number.",
+    {"number": {"type": "string",
+                "description": "The restaurant's own order number, like TT01, or the FF number."},
+     "issue": {"type": "string"},
+     "note": {"type": "string"}}, ["number", "issue"])
+
 DRV_ORDERS_TOOL = _tool("driver_orders",
     "Look up this driver's active orders. The caller's phone number identifies them.", {}, [])
 
@@ -136,7 +144,7 @@ HANDOFF_TOOL = _tool("handoff_to_dispatch",
     {"note": {"type": "string"}, "transfer": {"type": "boolean"}}, ["note", "transfer"])
 
 TOOLS = [MENU_TOOL, ADDRESS_TOOL, FIND_TOOL, PLACE_TOOL, CANCEL_TOOL, MODIFY_TOOL,
-         ISSUE_TOOL, DRV_ORDERS_TOOL, DRV_MSG_TOOL, DRV_REQ_TOOL, HANDOFF_TOOL]
+         ISSUE_TOOL, REST_CALL_TOOL, DRV_ORDERS_TOOL, DRV_MSG_TOOL, DRV_REQ_TOOL, HANDOFF_TOOL]
 
 
 REST_BRIEF_TOOL = _tool("get_order_brief",
@@ -283,6 +291,10 @@ def run_tool(name, args, ctx):
                         "issue": args.get("issue"),
                         "remake": bool(args.get("remake")),
                         "note": args.get("note")})
+    if name == "restaurant_issue":
+        return ff_call("/api/voice/restaurant_issue",
+                       {"number": args.get("number"), "issue": args.get("issue"),
+                        "note": args.get("note")})
     if name == "driver_orders":
         return ff_call("/api/voice/driver_orders", {"phone": caller})
     if name == "driver_message":
@@ -370,7 +382,7 @@ def system_prompt(brand, pay=False):
         "- Before placing an order: confirm the items and the delivery address back to the caller, then read the total back and get a clear yes.\n"
         "%s" +
         "- Only offer a remake, a credit, or a refund if a tool says it is allowed. A remake is only possible within 15 minutes of delivery; after that the API refuses it, so say a remake is not possible this late and connect the caller with dispatch. The API, not you, decides what is allowed.\n"
-        "- If a tool refuses (for example the order is already with the kitchen), explain that simply and offer to send a message to dispatch with report_issue.\n"
+        "- If a tool refuses (for example the order is already with the kitchen), explain that simply and offer to send a message to dispatch with report_issue.\n"        "- If the caller says they are a restaurant calling about an order, ask for their order number (their own number like TT01, or the FF number) and what the problem is, then report it with restaurant_issue. Do not take or change an order with them.\n"
         "- If the caller is a driver, use the driver tools; status changes go to dispatch for approval.\n"
         "- If the caller is angry, confused, or wants something no tool covers, say you are connecting them to a person, call handoff_to_dispatch, and tell them dispatch will call back at %s."
     ) % (brand, payment_rule(pay), DISPATCH_TEXT)

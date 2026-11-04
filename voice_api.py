@@ -434,6 +434,41 @@ def voice_issue():
                     "message": "Dispatch has your report and will follow up."})
 
 
+@voice_bp.post("/api/voice/restaurant_issue")
+@voice_auth
+def voice_restaurant_issue():
+    """A restaurant calls the line about an order. Log it to dispatch and their chat."""
+    b = request.get_json(force=True) or {}
+    num = (b.get("number") or "").strip().upper()
+    if not num:
+        return jsonify({"ok": False,
+                        "error": "Ask the restaurant for their order number."}), 400
+    issue = (b.get("issue") or "").strip()[:80]
+    note = (b.get("note") or "").strip()[:300]
+    row = A.db().execute("""SELECT o.*, r.name rname, r.phone rphone FROM orders o
+                            JOIN restaurants r ON r.id=o.restaurant_id
+                            WHERE UPPER(o.code)=? OR UPPER(COALESCE(o.primary_no,''))=?
+                            ORDER BY o.id DESC LIMIT 1""", (num, num)).fetchone()
+    if row is None:
+        return jsonify({"ok": False, "error": "No order found with that number."}), 404
+    label = row["primary_no"] or row["code"]
+    tail = (" - " + note) if note else ""
+    txt = "RESTAURANT ISSUE (AI voice line) order " + label + ": " + (issue or "issue") + tail
+    A.db().execute("UPDATE orders SET dispatch_note=? WHERE id=?",
+                   (((row["dispatch_note"] or "") + " | " + txt)[:500], row["id"]))
+    A.db().execute("""INSERT INTO rest_messages(restaurant_id,sender,who,body,created_at,seen_by_rest,seen_by_dispatch)
+                      VALUES(?,?,?,?,?,0,0)""",
+                   (row["restaurant_id"], "dispatch", "AI voice line",
+                    "The restaurant called the AI line about order " + label +
+                    ": " + (issue or "issue") + tail, A.now()))
+    A.raise_call_alert("restaurant", row["rname"], row["rphone"] or "", txt,
+                       restaurant_id=row["restaurant_id"], order_id=row["id"])
+    A.db().commit()
+    return jsonify({"ok": True, "code": row["code"], "number": label,
+                    "placed": row["created_at"],
+                    "message": "Dispatch has your report and will follow up."})
+
+
 @voice_bp.post("/api/voice/driver_orders")
 @voice_auth
 def voice_driver_orders():
