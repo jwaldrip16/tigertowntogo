@@ -348,7 +348,7 @@ def twilio_voice():
     greeting = "Thank you for calling " + brand + ". How can I help you today?"
     twiml = ('<Response><Connect action="/twilio/after"><ConversationRelay url="' + ws + '" '
              'welcomeGreeting="' + greeting + '" '
-             'ttsLanguage="en-US" voice="rime.jorah" '
+             'ttsLanguage="en-US" voice="rime.luna" '
              'transcriptionLanguage="en-US"/></Connect></Response>')
     return Response(twiml, mimetype="text/xml")
 
@@ -404,7 +404,7 @@ def twilio_outbound():
              '<Parameter name="order" value="' + code.replace('"', '') + '"/>'
              '<Parameter name="ivr" value="' + ivr + '"/>'
              '<Parameter name="script" value="' + script + '"/>'
-             '<ConversationRelay url="' + ws + '" ttsLanguage="en-US" voice="rime.jorah" '
+             '<ConversationRelay url="' + ws + '" ttsLanguage="en-US" voice="rime.luna" '
              'transcriptionLanguage="en-US"/></Connect></Response>')
     return Response(twiml, mimetype="text/xml")
 
