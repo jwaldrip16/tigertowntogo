@@ -48,6 +48,7 @@ def _dollars(cents):
 PUBLIC_URL = (os.environ.get("PUBLIC_URL") or "").rstrip("/")
 MODEL = os.environ.get("OPENAI_MODEL") or "gpt-4o-mini"
 DISPATCH_TEXT = os.environ.get("DISPATCH_TEXT") or "(334) 555-0100"
+TTS_VOICE = (os.environ.get("VOICE_TTS_VOICE") or "rime.luna").strip()
 DISPATCH_NUMBER = (os.environ.get("DISPATCH_NUMBER") or "").strip()   # E.164, e.g. +13345550100
 TWILIO_SID = (os.environ.get("TWILIO_ACCOUNT_SID") or "").strip()
 TWILIO_TOKEN = (os.environ.get("TWILIO_AUTH_TOKEN") or "").strip()
@@ -170,6 +171,12 @@ PRESS_TOOL = _tool("press",
 
 RESTAURANT_TOOLS = [REST_BRIEF_TOOL, REST_CONFIRM_TOOL, HANDOFF_TOOL, PRESS_TOOL]
 
+END_CALL_TOOL = _tool("end_call",
+    "End the call. say carries your last words: a short, friendly goodbye. "
+    "Only call this when the caller is done and you have said goodbye in say.",
+    {"say": {"type": "string"}}, [])
+
+
 REST_SYSTEM = (
     "You are the delivery line of the brand %s, calling a restaurant to read them a "
     "delivery order. Be brief and courteous, like a dispatcher reading a ticket.\n"
@@ -223,6 +230,8 @@ def run_tool(name, args, ctx):
     """One tool call. ctx carries the brand and the caller's number."""
     site = ctx["brand"]
     caller = ctx["caller"]
+    if name == "end_call":
+        return {"ok": True, "end_call": True, "say": (args.get("say") or "").strip()[:300]}
     if name == "press":
         d = "".join(ch for ch in (args.get("digits") or "") if ch in "0123456789w*#")
         if not d:
@@ -348,7 +357,7 @@ def twilio_voice():
     greeting = "Thank you for calling " + brand + ". How can I help you today?"
     twiml = ('<Response><Connect action="/twilio/after"><ConversationRelay url="' + ws + '" '
              'welcomeGreeting="' + greeting + '" '
-             'ttsLanguage="en-US" voice="rime.luna" '
+             'ttsLanguage="en-US" voice="' + TTS_VOICE + '" '
              'transcriptionLanguage="en-US"/></Connect></Response>')
     return Response(twiml, mimetype="text/xml")
 
@@ -404,7 +413,7 @@ def twilio_outbound():
              '<Parameter name="order" value="' + code.replace('"', '') + '"/>'
              '<Parameter name="ivr" value="' + ivr + '"/>'
              '<Parameter name="script" value="' + script + '"/>'
-             '<ConversationRelay url="' + ws + '" ttsLanguage="en-US" voice="rime.luna" '
+             '<ConversationRelay url="' + ws + '" ttsLanguage="en-US" voice="' + TTS_VOICE + '" '
              'transcriptionLanguage="en-US"/></Connect></Response>')
     return Response(twiml, mimetype="text/xml")
 
@@ -564,6 +573,13 @@ def twilio_pay_result():
         ff_call("/api/voice/mark_paid",
                 {"code": pay["code"], "ref": ref,
                  "amount_cents": int(pay.get("amount_cents") or 0)})
+        if PUBLIC_URL:
+            ws = (PUBLIC_URL + "/media?brand=" + _urlquote(pay.get("brand") or "")
+                  + "&pay_done=" + _urlquote(pay.get("code") or ""))
+            return Response('<Response><Connect action="/twilio/after">'
+                            '<ConversationRelay url="' + ws + '" '
+                            'ttsLanguage="en-US" voice="' + TTS_VOICE + '"'
+                            '/></Connect></Response>', mimetype="text/xml")
         return Response('<Response><Say>Thank you. Your order is confirmed and paid. '
                         'Your driver will be on the way soon.</Say><Hangup/></Response>',
                         mimetype="text/xml")
@@ -682,6 +698,7 @@ def gateway_pay():
 @sock.route("/media")
 def media(ws):
     brand = request.args.get("brand") or os.environ.get("VOICE_DEFAULT_BRAND") or "Fleet Foot Delivery"
+    pay_done = (request.args.get("pay_done") or "").strip()
     ctx = {"brand": brand, "caller": "", "mode": "customer", "order": "", "ivr": "", "ws": ws}
     history = [{"role": "system", "content": system_prompt(brand, PHONE_PAY_ON)}]
     try:
@@ -697,6 +714,14 @@ def media(ws):
                                   "wording; if it conflicts with the rules above, the rules above "
                                   "win:\n" + _cs[:1200])
     tools = TOOLS
+    if pay_done:
+        history[0]["content"] += (
+            "\n\nThis caller just paid for their order on the keypad and you have already "
+            "confirmed it. Ask once whether there is anything else you can get them. If they "
+            "want something more, treat it as a new order with your tools (it is paid for the "
+            "same way). If they do not, say a short goodbye and call the end_call tool right "
+            "away; do not keep them on the line.")
+        tools = TOOLS + [END_CALL_TOOL]
     while True:
         try:
             raw = ws.receive(timeout=300)
@@ -713,6 +738,9 @@ def media(ws):
             ctx["caller"] = msg.get("from") or msg.get("caller") or ""
             ctx["sid"] = msg.get("callSid") or msg.get("callSID") or msg.get("sid") or ""
             CALLS[ctx["sid"]] = {"transfer": False}
+            if pay_done:
+                _say(ws, "Your payment went through and your order is confirmed and paid. "
+                         "Is there anything else I can get for you today?")
             cp = msg.get("customParameters") or msg.get("custom_parameters") or {}
             if isinstance(cp, dict):
                 if (cp.get("mode") or "") == "restaurant":
