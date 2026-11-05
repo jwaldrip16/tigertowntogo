@@ -312,7 +312,14 @@ def run_tool(name, args, ctx):
     if name == "driver_message":
         return ff_call("/api/voice/driver_message", {"phone": caller, "body": args.get("body")})
     if name == "driver_request":
-        return ff_call("/api/voice/driver_request", {"phone": caller, "request": args.get("request")})
+        out = ff_call("/api/voice/driver_request", {"phone": caller, "request": args.get("request")})
+        if out.get("transfer_to_dispatch") and ctx.get("sid"):
+            CALLS[ctx["sid"]] = {"transfer": True,
+                                 "whisper": "A driver phoned the AI line and asked to go online. "
+                                            "Their driver app shows them unavailable, so they need dispatch approval."}
+            return {"ok": True, "end_call": True,
+                    "say": "Let me connect you with dispatch, one moment."}
+        return out
     if name == "get_order_brief":
         return ff_call("/api/voice/order_brief", {"code": ctx.get("order")})
     if name == "confirm_order":

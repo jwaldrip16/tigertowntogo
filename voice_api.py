@@ -531,6 +531,16 @@ def voice_driver_request():
     if want not in ("online", "break", "offline"):
         return jsonify({"ok": False,
                         "error": "Ask for online, break, or offline."}), 400
+    if want == "online" and (d["status"] or "").lower() == "unavailable":
+        _mode, _msg = A.driver_unavail_phone(d["id"], want)
+        if _mode == "set":
+            return jsonify({"ok": True, "message": _msg})
+        if _mode == "refuse":
+            return jsonify({"ok": False, "error": _msg})
+        if _mode == "transfer":
+            return jsonify({"ok": False,
+                            "error": "I am connecting you with dispatch to approve that.",
+                            "transfer_to_dispatch": True})
     A.db().execute("UPDATE drivers SET pending_request=? WHERE id=?", (want, d["id"]))
     A.db().commit()
     return jsonify({"ok": True,

@@ -12705,6 +12705,15 @@ def dispatch_settings():
                     _mv = 0
                 db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
                              ("self_status_min" + _sfx, str(_mv)))
+                _uks = ["self_status_unavail"]
+                if brands_on():
+                    for _st in db().execute("SELECT id FROM sites ORDER BY name").fetchall():
+                        if int(_st["id"]) in _mbs:
+                            continue
+                        _uks.append("self_status_unavail_" + str(_st["id"]))
+                for _uk in _uks:
+                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
+                                 (_uk, "1" if request.form.get(_uk) else "0"))
         if "future_lead_min" in request.form:
             try:
                 lm = int(request.form["future_lead_min"])
@@ -13090,6 +13099,35 @@ def driver_self_set(did, want):
     set_driver_status(did, want, _msg + ".", by="Driver (self)", sender="system")
     auto_assign()
     return True, None
+
+
+def driver_unavail_phone(did, want):
+    """The AI phone line: drivers marked unavailable may put themselves online
+    without dispatch when the per-brand setting allows. Returns (mode, message):
+    "set" (done), "refuse" (the line says the message), "transfer" (the line hands
+    the call to dispatch), or "skip" (the normal request path applies)."""
+    _d = db().execute("SELECT * FROM drivers WHERE id=?", (did,)).fetchone()
+    if _d is None or (_d["status"] or "").lower() != "unavailable" or want != "online":
+        return "skip", ""
+    _mbs = main_business_site_ids()
+    _sfxs = []
+    for _sid in driver_site_ids(did) or [None]:
+        _sfxs.append("" if (not _sid or _sid in _mbs) else "_" + str(_sid))
+    if not any(setting("self_status_unavail" + _sfx, int) == 1 for _sfx in _sfxs):
+        return "transfer", ""
+    if not business_is_open():
+        return "refuse", "The business is closed, so drivers cannot go online right now."
+    _shut = driver_brands_closed(did)
+    if _shut:
+        return "refuse", _shut + " is outside its hours right now. Drivers can go online 30 minutes before it opens."
+    if not (_d["active"] if _d["active"] is not None else 1):
+        return "refuse", "Your driver account is inactive. Call dispatch."
+    _msg = "You set yourself online"
+    if day_pick("driver", did):
+        _msg += " in " + region_names(day_pick("driver", did))
+    set_driver_status(did, "online", _msg + " by phone.", by="Driver (self, phone)", sender="system")
+    auto_assign()
+    return "set", "You are online. Dispatch can see you now."
 
 
 def request_status(driver_id, want):
