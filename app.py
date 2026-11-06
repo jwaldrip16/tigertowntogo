@@ -673,6 +673,11 @@ def init_db():
                    ("source", "TEXT"), ("added_by", "TEXT"), ("reset_hash", "TEXT"), ("reset_expires", "TEXT"),
                    ("reset_tries", "INTEGER NOT NULL DEFAULT 0")):
         ensure_column(con, "customers", _c, _d)
+    for _c, _d in (("reset_hash", "TEXT"), ("reset_expires", "TEXT"),
+                   ("reset_tries", "INTEGER NOT NULL DEFAULT 0")):
+        ensure_column(con, "drivers", _c, _d)
+        ensure_column(con, "dispatchers", _c, _d)
+    ensure_column(con, "dispatchers", "phone", "TEXT")
     con.execute("""CREATE TABLE IF NOT EXISTS applications (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT NOT NULL,
                    name TEXT, phone TEXT, email TEXT, region_ids TEXT, data TEXT, status TEXT NOT NULL DEFAULT 'new',
                    notes TEXT, created_at TEXT, updated_at TEXT, updated_by TEXT)""")
@@ -8522,7 +8527,7 @@ def api_dispatch_users():
                     "i_am_owner": is_owner(), "i_am_dev": is_dev(), "i_am_real_owner": is_real_owner(),
                     "dev_order_edit": dev_can_edit_orders(),
                     "dev_all_brands": str(setting("dev_all_brands") or 0) == "1",
-                    "users": [{"id": r["id"], "name": r["name"], "username": r["username"],
+                    "users": [{"id": r["id"], "name": r["name"], "username": r["username"], "phone": r["phone"] or "",
                                "owner": bool(r["is_owner"]), "dev": bool(r["is_dev"]),
                                "created_at": (r["created_at"] or "")[:10]} for r in rows]})
 
@@ -8536,6 +8541,9 @@ def api_dispatch_user_save():
     name = (data.get("name") or "").strip()
     username = (data.get("username") or "").strip().lower()
     password = (data.get("password") or "").strip()
+    phone = phone_digits(data.get("phone") or "") if "phone" in data else None
+    if phone and len(phone) != 10:
+        return jsonify({"ok": False, "error": "Give the mobile number as 10 digits; password reset texts go there."}), 400
     if not name or not username:
         return jsonify({"ok": False, "error": "Name and username are both required."}), 400
     clash = db().execute("SELECT id FROM dispatchers WHERE username=? AND id IS NOT ?",
@@ -8550,9 +8558,15 @@ def api_dispatch_user_save():
     if make_dev and not is_dev():
         return jsonify({"ok": False, "error": "Only a developer can create a developer account."}), 403
     if uid:
-        if password:
+        if password and phone is not None:
+            db().execute("UPDATE dispatchers SET name=?,username=?,password=?,phone=? WHERE id=?",
+                         (name, username, password, phone, uid))
+        elif password:
             db().execute("UPDATE dispatchers SET name=?,username=?,password=? WHERE id=?",
                          (name, username, password, uid))
+        elif phone is not None:
+            db().execute("UPDATE dispatchers SET name=?,username=?,phone=? WHERE id=?",
+                         (name, username, phone, uid))
         else:
             db().execute("UPDATE dispatchers SET name=?,username=? WHERE id=?", (name, username, uid))
         if uid == session.get("dispatcher_id"):
@@ -8561,8 +8575,8 @@ def api_dispatch_user_save():
     else:
         if len(password) < 4:
             return jsonify({"ok": False, "error": "Give the new dispatcher a password of at least 4 characters."}), 400
-        cur = db().execute("INSERT INTO dispatchers(name,username,password,created_at,is_dev) VALUES(?,?,?,?,?)",
-                           (name, username, password, now(), 1 if make_dev else 0))
+        cur = db().execute("INSERT INTO dispatchers(name,username,password,phone,created_at,is_dev) VALUES(?,?,?,?,?,?)",
+                           (name, username, password, phone if phone is not None else "", now(), 1 if make_dev else 0))
         uid = cur.lastrowid
         log("dispatcher", ("created developer " if make_dev else "created ") + username)
     if "owner" in data:
@@ -21050,6 +21064,134 @@ def account_reset():
     shown = who if by_email else (nice_phone(phone_digits(who)) if phone_digits(who) else "")
     return render_template("account_reset.html", step=step, msg=msg, err=err, who=shown, phone=shown,
                            texting=texting_on(), emailing=email_on(), biz_phone=nice_phone(dispatch_phone()))
+
+_STAFF_RESET_TABLES = ("drivers", "dispatchers")
+
+def _staff_reset_code(table, rid):
+    """A 6 digit code for a driver or dispatcher reset, stored hashed like the customer ones."""
+    code = str(secrets.randbelow(900000) + 100000)
+    exp = (dt.datetime.now() + dt.timedelta(minutes=15)).isoformat(timespec="seconds")
+    db().execute("UPDATE " + table + " SET reset_hash=?, reset_expires=?, reset_tries=0 WHERE id=?",
+                 (generate_password_hash(code), exp, rid))
+    db().commit()
+    return code
+
+def _staff_reset_sends_ok(key):
+    """At most 3 codes asked for per hour, like the customer reset."""
+    sends = [x for x in session.get(key, []) if time.time() - x < 3600]
+    if len(sends) >= 3:
+        return False
+    sends.append(time.time())
+    session[key] = sends
+    return True
+
+@app.route("/reset/driver", methods=["GET", "POST"])
+def driver_reset():
+    """Forgot PIN: a 6 digit code goes by text to the mobile number on the driver account."""
+    step, msg, err = request.form.get("step") or request.args.get("step") or "send", "", ""
+    phone = "".join(ch for ch in (request.form.get("phone") or request.args.get("phone") or "") if ch.isdigit())
+    biz = (setting("business_name", str) or "Fleet Foot Delivery").strip()
+    if request.method == "POST" and step == "send":
+        if len(phone) != 10:
+            err = "Enter the 10 digit mobile number on your driver account."
+        elif not _staff_reset_sends_ok("drv_reset_sends"):
+            err = "Too many codes asked for. Try again in an hour, or call dispatch."
+        elif not texting_on():
+            msg = ("Texting isn't set up on this account yet. Call dispatch at " +
+                   (nice_phone(dispatch_phone()) or "our number") + " and they can reset your PIN for you.")
+        else:
+            d = db().execute("SELECT * FROM drivers WHERE phone=?", (phone,)).fetchone()
+            if d and not (d["active"] if d["active"] is not None else 1):
+                msg = "That driver account is inactive. Call dispatch to get put back on the schedule first."
+            else:
+                if d:
+                    send_text("+1" + phone, biz + " driver PIN reset code: " + _staff_reset_code("drivers", d["id"]) +
+                              ". It works for 15 minutes.")
+                msg = "If that number is on a driver account, we just texted it a 6 digit code."
+                step = "verify"
+    elif request.method == "POST" and step == "verify":
+        code = "".join(ch for ch in (request.form.get("code") or "") if ch.isdigit())
+        pin = (request.form.get("pin") or "").strip()
+        d = db().execute("SELECT * FROM drivers WHERE phone=?", (phone,)).fetchone()
+        if len(pin) < 4:
+            err = "Pick a PIN with at least 4 characters."
+        elif pin != (request.form.get("pin2") or "").strip():
+            err = "The two PINs don't match."
+        elif not d or not (d["active"] if d["active"] is not None else 1):
+            err = "That driver account is inactive. Call dispatch."
+        elif not d["reset_hash"] or (d["reset_expires"] or "") < now():
+            err = "That code has expired or is wrong. Ask for a new one."
+        elif int(d["reset_tries"] or 0) >= 5:
+            err = "Too many wrong tries. Ask for a new code."
+        elif not check_password_hash(d["reset_hash"], code):
+            db().execute("UPDATE drivers SET reset_tries=reset_tries+1 WHERE id=?", (d["id"],))
+            db().commit()
+            err = "That code is wrong. Check it and try again."
+        else:
+            db().execute("UPDATE drivers SET pin=?, reset_hash=NULL, reset_expires=NULL, reset_tries=0 WHERE id=?",
+                         (pin, d["id"]))
+            db().commit()
+            log_driver(d["id"], "reset their PIN by text")
+            session["driver_id"] = d["id"]
+            session["driver_name"] = d["name"]
+            session.permanent = True
+            return redirect(url_for("driver"))
+    shown = nice_phone(phone) if len(phone) == 10 else phone
+    return render_template("driver_reset.html", step=step, msg=msg, err=err, phone=shown,
+                           texting=texting_on(), biz_phone=nice_phone(dispatch_phone()))
+
+@app.route("/reset/dispatch", methods=["GET", "POST"])
+def dispatch_reset():
+    """Forgot password: a 6 digit code goes by text to the mobile number saved on the dispatcher account."""
+    step, msg, err = request.form.get("step") or request.args.get("step") or "send", "", ""
+    username = (request.form.get("username") or request.args.get("username") or "").strip().lower()
+    biz = (setting("business_name", str) or "Fleet Foot Delivery").strip()
+    if request.method == "POST" and step == "send":
+        if not username:
+            err = "Enter your dispatcher username."
+        elif not _staff_reset_sends_ok("dsp_reset_sends"):
+            err = "Too many codes asked for. Try again in an hour."
+        elif not texting_on():
+            msg = ("Texting isn't set up on this account yet. An owner can change your password for you "
+                   "on the account tab of the dispatch site.")
+        else:
+            d = db().execute("SELECT * FROM dispatchers WHERE username=?", (username,)).fetchone()
+            dphone = phone_digits((d["phone"] if d else "") or "")
+            if d and len(dphone) == 10:
+                send_text("+1" + dphone, biz + " dispatcher password reset code: " +
+                          _staff_reset_code("dispatchers", d["id"]) + ". It works for 15 minutes.")
+                msg = "If that username has an account with a mobile number on it, we just texted it a 6 digit code."
+            else:
+                msg = ("No mobile number is saved on that account yet. An owner can add one on the account tab, "
+                       "then you can reset your password here by text.")
+            step = "verify"
+    elif request.method == "POST" and step == "verify":
+        code = "".join(ch for ch in (request.form.get("code") or "") if ch.isdigit())
+        pw = (request.form.get("password") or "").strip()
+        d = db().execute("SELECT * FROM dispatchers WHERE username=?", (username,)).fetchone()
+        if len(pw) < 4:
+            err = "Pick a password with at least 4 characters."
+        elif pw != (request.form.get("password2") or "").strip():
+            err = "The two passwords don't match."
+        elif not d or not d["reset_hash"] or (d["reset_expires"] or "") < now():
+            err = "That code has expired or is wrong. Ask for a new one."
+        elif int(d["reset_tries"] or 0) >= 5:
+            err = "Too many wrong tries. Ask for a new code."
+        elif not check_password_hash(d["reset_hash"], code):
+            db().execute("UPDATE dispatchers SET reset_tries=reset_tries+1 WHERE id=?", (d["id"],))
+            db().commit()
+            err = "That code is wrong. Check it and try again."
+        else:
+            db().execute("UPDATE dispatchers SET password=?, reset_hash=NULL, reset_expires=NULL, reset_tries=0 WHERE id=?",
+                         (pw, d["id"]))
+            db().commit()
+            log("dispatcher", d["username"] + " reset their password by text")
+            session["dispatcher_id"] = d["id"]
+            session["dispatcher_name"] = d["name"]
+            session.permanent = True
+            return redirect(url_for("dispatch"))
+    return render_template("dispatch_reset.html", step=step, msg=msg, err=err, username=username,
+                           texting=texting_on())
 
 @app.post("/api/dispatch/customer-reset-code")
 def api_dispatch_customer_reset_code():

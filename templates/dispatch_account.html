@@ -13,6 +13,7 @@
       username or password here. Your name is what drivers see on every message you send them.</p>
       <div class="row"><label>Name</label><input id="myName" value="{{ me['name'] }}"></div>
       <div class="row"><label>Username</label><input id="myUser" value="{{ me['username'] }}"></div>
+      <div class="row"><label>Mobile number</label><input id="myPhone" value="{{ me['phone'] or '' }}" placeholder="10 digits, gets password reset texts"></div>
       <div class="row"><label>New password</label>
         <input id="myPass" type="password" placeholder="leave blank to keep the current one"></div>
       <button class="btn primary" onclick="saveMe()">Save my account</button>
@@ -26,6 +27,7 @@
       <div class="row"><label>Name</label><input id="nName" placeholder="Nicole Frazier"></div>
       <div class="row"><label>Username</label><input id="nUser" placeholder="nicole"></div>
       <div class="row"><label>Password</label><input id="nPass" type="password" placeholder="at least 4 characters"></div>
+      <div class="row"><label>Mobile number</label><input id="nPhone" placeholder="10 digits, gets password reset texts"></div>
       <div class="row" id="nOwnerRow" style="display:none"><label><input type="checkbox" id="nOwner"> Owner account (chats with every region, sees all regions)</label></div>
       <div class="row" id="nDevRow" style="display:none"><label><input type="checkbox" id="nDev"> Developer account (full access, can't delete orders, changes orders only when an owner allows it; the last developer account can't be deleted)</label></div>
       <button class="btn primary" onclick="addUser()">Create dispatcher</button>
@@ -154,32 +156,34 @@ async function loadUsers(){
     '<div class="card pad"><div class="row between"><div><strong>'+u.name+'</strong>'+
       (u.id===res.me ? ' <span class="pill blue">you</span>' : '')+
       (u.dev ? ' <span class="pill">developer</span>' : (u.owner ? ' <span class="pill green">owner</span>' : ''))+
-      '<div class="muted small">'+u.username+(u.created_at?(' · added '+u.created_at):'')+'</div></div>'+
-      '<div>'+((u.owner && !res.i_am_owner) || (u.dev && !res.i_am_dev) ? '' : '<button class="btn tiny" onclick="editUser('+u.id+',\''+u.name.replace(/'/g,"\\'")+'\',\''+u.username+'\')">Edit</button>')+
+      '<div class="muted small">'+u.username+(u.phone?(' · '+u.phone):'')+(u.created_at?(' · added '+u.created_at):'')+'</div></div>'+
+      '<div>'+((u.owner && !res.i_am_owner) || (u.dev && !res.i_am_dev) ? '' : '<button class="btn tiny" onclick="editUser('+u.id+',\''+u.name.replace(/'/g,"\\'")+'\',\''+u.username+'\',\'+(u.phone||'')+'\')">Edit</button>')+
       (res.i_am_owner && !u.dev ? '<button class="btn tiny" onclick="setOwner('+u.id+','+(!u.owner)+')">'+(u.owner?'Remove owner':'Make owner')+'</button>' : '')+
       ((u.dev && !(res.i_am_dev && DEVS>1)) || u.id===res.me || (u.owner && !res.i_am_owner) ? '' : '<button class="btn tiny danger" onclick="delUser('+u.id+')">Remove</button>')+
       '</div></div></div>').join('');
 }
 async function saveMe(){
   const res = await jpost('/api/dispatch/user', {id: {{ me['id'] }},
-    name: myName.value, username: myUser.value, password: myPass.value});
+    name: myName.value, username: myUser.value, password: myPass.value, phone: myPhone.value});
   meMsg.textContent = res.ok ? 'Saved.' : (res.error || 'Could not save that.');
   myPass.value = '';
   loadUsers();
 }
 async function addUser(){
-  const res = await jpost('/api/dispatch/user', {name:nName.value, username:nUser.value, password:nPass.value,
+  const res = await jpost('/api/dispatch/user', {name:nName.value, username:nUser.value, password:nPass.value, phone:nPhone.value,
     owner: document.getElementById('nOwner').checked, developer: document.getElementById('nDev').checked});
   newMsg.textContent = res.ok ? ('Created ' + res.username + '.') : (res.error || 'Could not create that user.');
-  if(res.ok){ nName.value=''; nUser.value=''; nPass.value=''; document.getElementById('nOwner').checked=false; document.getElementById('nDev').checked=false; }
+  if(res.ok){ nName.value=''; nUser.value=''; nPass.value=''; nPhone.value=''; document.getElementById('nOwner').checked=false; document.getElementById('nDev').checked=false; }
   loadUsers();
 }
-async function editUser(id, name, username){
+async function editUser(id, name, username, phone){
   const n = prompt('Display name', name); if(n === null) return;
   const u = prompt('Username', username); if(u === null) return;
   const p = prompt('New password (blank keeps the current one)', '');
   if(p === null) return;
-  const res = await jpost('/api/dispatch/user', {id:id, name:n, username:u, password:p});
+  const m = prompt('Mobile number for password reset texts (blank = none)', phone || '');
+  if(m === null) return;
+  const res = await jpost('/api/dispatch/user', {id:id, name:n, username:u, password:p, phone:m});
   if(!res.ok) alert(res.error || 'Could not save that.');
   loadUsers();
 }

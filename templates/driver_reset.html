@@ -1,0 +1,27 @@
+{% extends "base.html" %}{% block title %}Reset your driver PIN{% endblock %}{% block body %}
+<div class="panel" style="max-width:440px;margin:20px auto">
+  <h1 style="margin-top:0">Reset your driver PIN</h1>
+  {% if err %}<p class="cc-err">{{ err }}</p>{% endif %}
+  {% if msg %}<p>{{ msg }}</p>{% endif %}
+  {% if step == 'verify' %}
+  <form method="post">
+    <input type="hidden" name="step" value="verify">
+    <label>Mobile number on your driver account</label><input name="phone" value="{{ phone }}" inputmode="numeric" required>
+    <label>6 digit code</label><input name="code" inputmode="numeric" maxlength="6" autocomplete="one-time-code" required>
+    <label>New PIN</label><input name="pin" type="password" minlength="4" autocomplete="new-password" required>
+    <label>New PIN again</label><input name="pin2" type="password" minlength="4" autocomplete="new-password" required>
+    <button class="btn primary" style="width:100%;margin-top:10px">Set new PIN</button>
+  </form>
+  <p class="small"><a href="/reset/driver">Get a new code</a></p>
+  {% else %}
+  <p class="muted">{% if texting %}Enter the mobile number on your driver account and we'll text you a 6 digit code.{% else %}Call dispatch{% if biz_phone %} at {{ biz_phone }}{% endif %} and they can reset your PIN for you.{% endif %}</p>
+  <form method="post">
+    <input type="hidden" name="step" value="send">
+    <label>Mobile number</label><input name="phone" value="{{ phone }}" inputmode="numeric" autocomplete="username" required>
+    <button class="btn primary" style="width:100%;margin-top:10px">Send me a code</button>
+  </form>
+  <p class="small"><a href="/reset/driver?step=verify">I already have a code</a></p>
+  {% endif %}
+  <p class="small"><a href="/driver/login">Back to driver sign in</a></p>
+</div>
+{% endblock %}
