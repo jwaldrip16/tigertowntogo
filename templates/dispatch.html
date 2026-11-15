@@ -147,6 +147,7 @@
 <script src="/static/itempick.js"></script><script src="/static/orderlines.js"></script><script src="/static/orderview.js"></script><script src="/static/cardbox.js"></script><script src="/static/ppcard.js"></script>
 <script>
 const ORDSHOW = "{{ ordshow('dispatch') }}";
+const AI_REST_CALLS_OFF = {{ 1 if ai_rest_calls_off|default(False) else 0 }};
 function ordMain(o){ return (ORDSHOW !== 'secondary' && o && o.primary_no) ? o.primary_no : (o ? o.code : ''); }
 function ordSub(o){ return (ORDSHOW === 'both' && o && o.primary_no) ? o.code : ''; }
 function ordBoth(o){ const s = ordSub(o); return ordMain(o) + (s ? ' (' + s + ')' : ''); }
@@ -978,6 +979,7 @@ function renderCompleted(res){
                  : '<span class="pill '+(o.dispatch_status==='delivered'?'green':'grey')+'">'+o.dispatch_status+'</span>'+oAgePill(o)+' ')+
     '<span class="muted small">'+(o.delivered_time || (o.delivered_at||'').replace('T',' '))+'</span></div>'+
     restLine(o)+
+    redoLine(o)+
     '<div class="order-actions">'+
       OrderView.btn(o)+
       (swpOrder(o)?'':reopenButtons(o))+
@@ -1709,6 +1711,7 @@ function orderCard(o, opts, drivers){
     (o.tip_cents ? ' <span class="pill grey">tip '+o.tip+(o.tip_pct!==null && o.tip_pct!==undefined ? ' ('+o.tip_pct+'%)' : '')+'</span>' : '')+
     (o.placed_by!=='customer' ? ' <span class="pill grey">by '+o.placed_by+'</span>' : '')+'</div>'+
     restLine(o)+
+    redoLine(o)+
     (o.needs_address_approval ? '<div class="issuebar">Address not verified &middot; pending dispatch '+
       'approval. The kitchen has not seen this order yet.</div>' : '')+
     '<div class="order-actions">'+
@@ -1767,7 +1770,7 @@ function manualButtons(o){
       ? '<button class="btn tiny" disabled>Ordering in process'+by+'</button>'
       : '<button class="btn tiny primary" onclick="manualStep('+o.id+',\'ordering\')">Ordering in process</button>')+
     '<button class="btn tiny primary" onclick="manualStep('+o.id+',\'placed\')">Order placed + start timer</button>'+
-    '<button class="btn tiny" onclick="callRestaurantDlg('+o.id+')">AI call</button>';
+    (AI_REST_CALLS_OFF ? '' : '<button class="btn tiny" onclick="callRestaurantDlg('+o.id+')">AI call</button>');
 }
 
 async function callRestaurantDlg(id){
@@ -1937,8 +1940,16 @@ function reopenButtons(o){
   if (o.dispatch_status==='cancelled' && !IS_OWNER) return '';
   if (['delivered','cancelled'].indexOf(o.dispatch_status) < 0) return '';
   const c = String(o.code||'').replace(/'/g,'');
-  return (o.driver_id ? '<button class="btn tiny primary" onclick="reopen('+o.id+',\''+c+'\',true)" title="Marked complete by mistake? Send it back to the same driver">Reopen to '+esc(o.driver||'driver')+'</button>' : '')+
-    '<button class="btn tiny" onclick="reopen('+o.id+',\''+c+'\',false)" title="Put it back in the queue for any driver">Reopen to queue</button>';
+  return '<button class="btn tiny primary" onclick="redoDialog('+o.id+',0)" title="Left-off item or redo: creates a new order, this one stays delivered">Reopen as new order</button>'+
+    (o.driver_id ? '<button class="btn tiny" onclick="reopen('+o.id+',\''+c+'\',true)" title="Driver marked it delivered early? Pull this order back to the same driver">Delivered early: to '+esc(o.driver||'driver')+'</button>' : '')+
+    '<button class="btn tiny" onclick="reopen('+o.id+',\''+c+'\',false)" title="Driver marked it delivered early? Pull this order back to the queue">Delivered early: requeue</button>';
+}
+function redoLine(o){
+  if(!o) return '';
+  const from = o.cloned_from || '';
+  if(!from && !o.issue) return '';
+  return '<div class="small muted" style="margin:2px 0">Reorder of '+esc(from || 'an earlier order')+
+    (o.issue ? ': '+esc(o.issue) : '')+(o.issue_note ? ' ('+esc(o.issue_note)+')' : '')+'</div>';
 }
 function restLine(o){
   return o.restaurant ? '<div class="small" style="margin:2px 0 4px"><span class="muted">Restaurant:</span> <b>'+esc(o.restaurant)+'</b>'+

@@ -268,6 +268,7 @@ rsLoad();
   {% if owner_view or dev_view %}
   <h2>AI voice line scripts</h2>
   <input type="hidden" name="voice_script_present" value="1">
+  <label style="display:block;margin-bottom:6px"><input type="checkbox" name="voice_rest_calls_off" value="1" {{ 'checked' if s.get('voice_rest_calls_off','0') == '1' else '' }}> Turn off AI calls to restaurants (no auto confirm calls, the AI call button is hidden; the customer ordering line stays on)</label>
   <div class="muted small">Extra wording the AI voice line uses. Leave blank to use the built-in script. The restaurant-call script can also be rewritten for a single call from the AI call button on an order.</div>
   <label>Customer ordering line script</label>
   <textarea name="voice_customer_script" rows="4" maxlength="1200" placeholder="Extra wording for the line that takes orders from customers">{{ s.get('voice_customer_script','') }}</textarea>

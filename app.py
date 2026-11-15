@@ -5950,6 +5950,15 @@ def checkout():
         # Card order: the kitchen never sees it until dispatch marks the card paid.
         kitchen_status, dstat = "waiting", "awaiting_payment"
         hold_reason = "card on file, run it" if card else "waiting on card"
+    _dn = (payload.get("dispatch_note") or "").strip()
+    if from_code:
+        _rd = "Reorder of " + from_code + (" (" + issue_label + ")" if issue_label else "")
+        if issue_note:
+            _rd += ": " + issue_note
+        if not _dn:
+            _dn = _rd
+        elif ("Reorder of " + from_code) not in _dn:
+            _dn = _rd + "\n" + _dn
     code = make_order_code()
     cur = db().execute("""INSERT INTO orders(code,restaurant_id,customer_name,customer_phone,address,
         address_note,dispatch_note,lat,lng,items,subtotal_cents,fee_cents,item_fee_cents,tax_cents,
@@ -5958,7 +5967,7 @@ def checkout():
         pickup_name,pickup_address,pickup_phone,pickup_lat,pickup_lng,service_cents,drop_style)
         VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (code, r["id"], payload["customer_name"], payload["customer_phone"], formatted,
-         payload.get("note", ""), payload.get("dispatch_note", ""), lat, lng,
+         payload.get("note", ""), _dn, lat, lng,
          json.dumps(items), subtotal, fee, ifee, tax, tip, total, miles,
          issue_label, issue_note, from_code, address_ok, src,
          (clean_ref(payload.get("ref"), payload.get("customer_phone")) or None) if dispatcher_required() else None,
@@ -6479,7 +6488,7 @@ def dispatch_logout():
 def dispatch():
     if not dispatcher_required():
         return redirect(url_for("dispatch_login"))
-    return render_template("dispatch.html")
+    return render_template("dispatch.html", ai_rest_calls_off=voice_rest_calls_off())
 
 
 def status_label(d):
@@ -12085,6 +12094,13 @@ def api_reopen():
         db().execute("""UPDATE orders SET payment_status='unpaid', paid_at=NULL, paid_cents=0
                         WHERE id=?""", (o["id"],))
     db().execute("UPDATE orders SET auto_pay_note=NULL WHERE id=?", (o["id"],))
+    # a pulled-back order starts its board clock over: the prep countdown clears and an
+    # overdue due-by gets a fresh window (one dispatch set on purpose and still ahead stays)
+    try:
+        _overdue = bool(o["due_by"]) and dt.datetime.fromisoformat(o["due_by"]) < dt.datetime.now()
+    except Exception:
+        _overdue = False
+    _fresh_due = (dt.datetime.now() + dt.timedelta(minutes=asap_due_min())).replace(microsecond=0).isoformat() if _overdue else None
     keep = bool(data.get("keep_driver")) and o["driver_id"]
     if keep:
         seq = db().execute("""SELECT COALESCE(MAX(stack_seq),0)+1 s FROM orders WHERE driver_id=?
@@ -12093,14 +12109,18 @@ def api_reopen():
         # back to "assigned" so the driver's phone pages again and the board flashes
         # until the driver taps Received
         db().execute("""UPDATE orders SET dispatch_status='assigned', delivered_at=NULL, stack_seq=?,
-                        paged_at=? WHERE id=?""", (seq, now(), o["id"]))
+                        paged_at=?, prep_started=NULL,
+                        due_by=CASE WHEN due_by IS NULL OR due_by < ? THEN ? ELSE due_by END WHERE id=?""",
+                     (seq, now(), now(), _fresh_due, o["id"]))
         auto_msg("drv_reopen", "INSERT INTO messages(driver_id,sender,body,created_at) VALUES(?,?,?,?)",
                      (o["driver_id"], "dispatch",
                       "Order " + o["code"] + " was reopened and sent back to you. Tap Received to accept it.", now()))
         push_driver(o["driver_id"], "Order " + o["code"] + " was reopened and sent back to you.", tag="assign-" + o["code"])
     else:
         db().execute("""UPDATE orders SET dispatch_status='queued', delivered_at=NULL, driver_id=NULL,
-                        stack_seq=NULL, hold_reason=NULL WHERE id=?""", (o["id"],))
+                        stack_seq=NULL, hold_reason=NULL, prep_started=NULL,
+                        due_by=CASE WHEN due_by IS NULL OR due_by < ? THEN ? ELSE due_by END WHERE id=?""",
+                     (now(), _fresh_due, o["id"]))
     db().commit()
     log("reopen", o["code"] + " by " + (session.get("dispatcher_name") or "Dispatch"))
     if keep:
@@ -12134,6 +12154,8 @@ def api_call_restaurant():
         return jsonify({"ok": False, "error": "That order is already finished."}), 400
     if o["dispatch_status"] == "awaiting_payment" or o["kitchen_status"] == "waiting":
         return jsonify({"ok": False, "error": "Mark the card paid first, then call the restaurant."}), 400
+    if voice_rest_calls_off():
+        return jsonify({"ok": False, "error": "AI calls to restaurants are turned off in dispatch settings."}), 403
     out, status = do_restaurant_call(o["code"], (b.get("script") or "").strip())
     return jsonify(out), status
 
@@ -12395,6 +12417,8 @@ def dispatch_settings():
                         "voice_customer_number"):
                 db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
                              (_vk, (request.form.get(_vk) or "").strip()))
+            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('voice_rest_calls_off',?)",
+                         ("1" if request.form.get("voice_rest_calls_off") else "0",))
             saved = True
         if "automsg_present" in request.form and (_am_owner or _am_dev):
             for _k, _l, _h, _d in AUTO_MSGS:
@@ -18003,10 +18027,19 @@ def _sched_notice_worker():
 threading.Thread(target=_sched_notice_worker, daemon=True).start()
 
 
+def voice_rest_calls_off():
+    """True when dispatch settings turn off the AI phone line's calls to restaurants
+    (the AI call button disappears and confirm chase stops calling)."""
+    row = db().execute("SELECT value FROM settings WHERE key='voice_rest_calls_off'").fetchone()
+    return bool(row and (row["value"] or "").strip() == "1")
+
+
 def confirm_chase_tick():
     """Call restaurants on the restaurant app that have not confirmed an order in time.
     Phone-only restaurants are never auto-called: dispatch places those by hand or with
     the AI call button."""
+    if voice_rest_calls_off():
+        return 0
     row = db().execute("SELECT value FROM settings WHERE key='voice_chase_min'").fetchone()
     raw = (row["value"] or "").strip() if row else ""
     if raw == "":
