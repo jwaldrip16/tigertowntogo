@@ -623,6 +623,11 @@ def init_db():
     ensure_column(con, "dispatchers", "is_owner", "INTEGER DEFAULT 0")
     ensure_column(con, "dispatchers", "is_dev", "INTEGER DEFAULT 0")
     seed_dev_account(con)
+    # A brand-new or wiped copy must still end up with a real owner: the demo
+    # dispatchers are seeded without one, so promote the first non-developer.
+    if not con.execute("SELECT 1 FROM dispatchers WHERE is_owner=1").fetchone():
+        con.execute("UPDATE dispatchers SET is_owner=1 WHERE id="
+                    "(SELECT MIN(id) FROM dispatchers WHERE COALESCE(is_dev,0)=0)")
     ensure_column(con, "messages", "region_id", "INTEGER")
     con.execute("""CREATE TABLE IF NOT EXISTS dispatcher_availability (id INTEGER PRIMARY KEY AUTOINCREMENT,
                    dispatcher_id INTEGER NOT NULL, dow INTEGER NOT NULL, start_time TEXT NOT NULL,
@@ -1783,7 +1788,8 @@ def stamp_regions():
                 con.execute("INSERT OR IGNORE INTO regions(name,sort,created_at) VALUES(?,?,?)", (n, i, now()))
             con.execute("INSERT OR REPLACE INTO settings(key,value) VALUES('regions_seeded','1')")
     if not con.execute("SELECT 1 FROM dispatchers WHERE is_owner=1").fetchone():
-        con.execute("UPDATE dispatchers SET is_owner=1 WHERE id=(SELECT MIN(id) FROM dispatchers)")
+        con.execute("UPDATE dispatchers SET is_owner=1 WHERE id="
+                    "(SELECT MIN(id) FROM dispatchers WHERE COALESCE(is_dev,0)=0)")
     for r in con.execute("""SELECT id, address FROM restaurants
                             WHERE region_id IS NULL AND slug!='oneoff'""").fetchall():
         con.execute("UPDATE restaurants SET region_id=? WHERE id=?", (region_match(r["address"]), r["id"]))
