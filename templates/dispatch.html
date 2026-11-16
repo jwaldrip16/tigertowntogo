@@ -1734,10 +1734,11 @@ function orderCard(o, opts, drivers){
       (canReorder(o) ? '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>' : '')+
       (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
       '<select id="as'+o.id+'" onchange="assign('+o.id+',this.value)">'+opts+'</select>'+
-      '<button class="btn tiny" onclick="dstat('+o.id+',\'received\')">Received</button>'+
-      '<button class="btn tiny" onclick="dstat('+o.id+',\'at_restaurant\')">At rest</button>'+
-      '<button class="btn tiny" onclick="dstat('+o.id+',\'enroute\')">Enroute</button>'+
-      '<button class="btn tiny" onclick="complete('+o.id+',\''+o.code+'\')">Complete</button>'+
+      (o.driver_id ?
+        '<button class="btn tiny" onclick="dstat('+o.id+',\'received\')">Received</button>'+
+        '<button class="btn tiny" onclick="dstat('+o.id+',\'at_restaurant\')">At rest</button>'+
+        '<button class="btn tiny" onclick="dstat('+o.id+',\'enroute\')">Enroute</button>'+
+        '<button class="btn tiny" onclick="complete('+o.id+',\''+o.code+'\')">Complete</button>' : '')+
       '<button class="btn tiny" onclick="hold('+o.id+')">Hold</button>'+
     '</div></div>';
 }

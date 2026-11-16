@@ -7425,6 +7425,11 @@ def api_order_status():
     if k and dispatcher_required():
         db().execute("UPDATE orders SET kitchen_go=1 WHERE id=?", (o["id"],))
     d = data.get("dispatch_status")
+    # no driver assigned yet: the dispatcher cannot walk the order through
+    # received / at restaurant / en route / complete, those steps belong to a driver
+    if (d in ("received", "at_restaurant", "enroute", "delivered") and not o["driver_id"]
+            and o["dispatch_status"] != "delivered"):
+        return jsonify({"ok": False, "error": "Assign a driver to this order first."}), 400
     if k in ("pending", "preparing", "ready") and o["dispatch_status"] == "awaiting_payment":
         return jsonify({"ok": False, "error": "Mark the card paid first. The restaurant gets this "
                         "order the moment it is paid."}), 400
