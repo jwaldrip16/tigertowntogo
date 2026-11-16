@@ -5959,6 +5959,7 @@ def checkout():
                 issue_label = REDO_REASONS[issue_key]
                 db().execute("UPDATE orders SET issue=?, issue_note=? WHERE id=?",
                              (issue_label, issue_note, src["id"]))
+            from_primary = (src["primary_no"] or "").strip() if "primary_no" in src.keys() else ""
 
     if not sched and (not business_is_open() or (not dispatcher_required() and not business_in_hours(rid=r["region_id"]))):
         # closed business: nothing goes out now, but future orders are still welcome
@@ -5987,12 +5988,15 @@ def checkout():
         hold_reason = "card on file, run it" if card else "waiting on card"
     _dn = (payload.get("dispatch_note") or "").strip()
     if from_code:
-        _rd = "Reorder of " + from_code + (" (" + issue_label + ")" if issue_label else "")
+        # the note names the first order the way dispatch sees it: the brand
+        # number (TTG01...) when it has one, else its FF number
+        _fl = from_primary or from_code
+        _rd = "Reorder of " + _fl + (" (" + issue_label + ")" if issue_label else "")
         if issue_note:
             _rd += ": " + issue_note
         if not _dn:
             _dn = _rd
-        elif ("Reorder of " + from_code) not in _dn:
+        elif ("Reorder of " + _fl) not in _dn and ("Reorder of " + from_code) not in _dn:
             _dn = _rd + "\n" + _dn
     code = make_order_code()
     cur = db().execute("""INSERT INTO orders(code,restaurant_id,customer_name,customer_phone,address,
@@ -6016,7 +6020,7 @@ def checkout():
     db().commit()
     log("order", code + " placed for " + r["name"] +
         ("" if address_ok else " (address not verified, waiting on dispatch approval)") +
-        (" (from " + from_code + (": " + issue_label if issue_label else "") + ")" if from_code else ""))
+        (" (from " + _fl + (": " + issue_label if issue_label else "") + ")" if from_code else ""))
     oid = cur.lastrowid
     try:
         assign_primary(oid)
