@@ -598,7 +598,7 @@ function renderDrivers(list){
       '</button>' : '';
     const ord = ['1st up','2nd up','3rd up'];
     const ordOf = n => (ord[n-1] || n+'th up');
-    const turn = (d.status==='online' && (d.region_lines||[]).length)
+    const turn = (d.on_orders||[]).length ? '<span class="pill grey">on a run</span>' : (d.status==='online' && (d.region_lines||[]).length)
       ? d.region_lines.map(x => x.pos
           ? '<span class="pill '+(x.pos===1?'green':'blue')+'">'+esc(x.region)+' '+ordOf(x.pos)+'</span>'
           : (x.locked_to ? '<span class="pill grey" title="On a live order in '+esc(x.locked_to)+'">'+esc(x.region)+': locked to '+esc(x.locked_to)+' until delivered</span>'
@@ -1940,8 +1940,7 @@ function reopenButtons(o){
   if (o.dispatch_status==='cancelled' && !IS_OWNER) return '';
   if (['delivered','cancelled'].indexOf(o.dispatch_status) < 0) return '';
   const c = String(o.code||'').replace(/'/g,'');
-  return '<button class="btn tiny primary" onclick="redoDialog('+o.id+',0)" title="Left-off item or redo: creates a new order, this one stays delivered">Reopen as new order</button>'+
-    (o.driver_id ? '<button class="btn tiny" onclick="reopen('+o.id+',\''+c+'\',true)" title="Driver marked it delivered early? Pull this order back to the same driver">Delivered early: to '+esc(o.driver||'driver')+'</button>' : '')+
+  return (o.driver_id ? '<button class="btn tiny" onclick="reopen('+o.id+',\''+c+'\',true)" title="Driver marked it delivered early? Pull this order back to the same driver">Delivered early: to '+esc(o.driver||'driver')+'</button>' : '')+
     '<button class="btn tiny" onclick="reopen('+o.id+',\''+c+'\',false)" title="Driver marked it delivered early? Pull this order back to the queue">Delivered early: requeue</button>';
 }
 function redoLine(o){

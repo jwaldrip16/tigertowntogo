@@ -342,6 +342,7 @@ function ordinal(n){
 function turnPill(d){
   if (d.status === 'offline') return '<span class="pill grey">off shift, not in line</span>';
   if (d.status === 'break')   return '<span class="pill amber">on break, not in line</span>';
+  if (d.on_run) return '<span class="pill grey">on a run</span>';
   if ((d.region_lines||[]).length) return d.region_lines.map(x => x.pos
       ? '<span class="pill '+(x.pos===1?'green':'blue')+'">'+ffEsc(x.region)+': you are '+(x.pos===1?'first':ordinal(x.pos))+' in line</span>'
       : (x.locked_to ? '<span class="pill amber">'+ffEsc(x.region)+': locked to '+ffEsc(x.locked_to)+' until delivered</span>'
@@ -501,12 +502,12 @@ function renderStatus(d){
     ' '+turnPill(d)+
     '<div class="muted small">'+
     (d.status==='online'
-      ? ((d.region_lines||[]).length
+      ? (d.on_run ? 'You are on a run. When your last stop is delivered you go to the back of the line. ' : ((d.region_lines||[]).length
           ? d.region_lines.map(x => x.pos ? 'In '+x.region+' you are '+(x.pos===1?'first':ordinal(x.pos))+' in line for the next order. '
                                           : (x.locked_to ? 'You are out of the '+x.region+' line until your '+x.locked_to+' order is delivered. '
                                                            : 'In '+x.region+' you are at your stack limit until a stop clears. ')).join('')
           : (d.up_next ? (d.up_next===1 ? 'You are first in line for the next order. ' : 'You are '+ordinal(d.up_next)+' in line for the next order. ')
-                   : 'You are holding your stack limit, so you are out of line until a stop clears. '))
+                   : 'You are holding your stack limit, so you are out of line until a stop clears. ')))
       : 'Dispatch has you '+d.status+', so you are out of the rotation. ')+
     ((d.max_stack||0) >= 999 ? 'No stack limit. ' : 'Stacking up to '+d.max_stack+' orders. ')+
     d.waiting_count+' order'+(d.waiting_count===1?'':'s')+' waiting to go out.'+
@@ -586,6 +587,7 @@ function renderRun(stack, total){
     '<span class="pill blue">'+o.dispatch_status.replace('_',' ')+'</span>'+
     (o.drop_label ? ' <span class="pill '+(o.drop_style==='door'?'grey':'amber')+'">'+o.drop_label+'</span>' : '')+'</div>'+
     (o.restaurant ? '<div class="drvrest">'+hEsc(o.restaurant)+(o.customer ? ' <span class="muted small">&rarr; '+hEsc(o.customer)+'</span>' : '')+'</div>' : '')+
+    (o.extra_pay_cents ? '<div class="muted small">Extra pay for this stop: <b>$'+(o.extra_pay_cents/100).toFixed(2)+'</b></div>' : '')+
     '<div class="order-actions">'+
     OrderView.btn(o)+
     '<button class="btn tiny primary" onclick="navStop('+ix+',\'r\')">Navigate to restaurant</button>'+

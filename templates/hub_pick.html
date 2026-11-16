@@ -29,6 +29,7 @@ button{font-size:16px;padding:12px 16px;border:0;border-radius:10px;background:{
 </style></head><body>
 <div class="wrap">
   <div class="head"><img id="headLogo" src="{{ logo }}" alt=""><h1 id="headTitle">{{ title }}</h1><p>Pick the delivery company you work with.</p></div>
+  {% if off %}<div class="card" style="text-align:center"><p style="margin:0 0 6px;font-weight:600">Turned off for now</p><p class="muted" style="margin:0">No brands are switched on, so this link is closed. Ask your manager to turn a brand on.</p></div>{% else %}
   <div id="opening" class="card"><img id="openLogo" src="{{ logo }}" alt=""><p>Opening <b id="openName"></b>&hellip;</p><p><a href="#" id="switchNow">Switch company</a></p></div>
   <div id="picker">
     <div class="card">
@@ -42,7 +43,9 @@ button{font-size:16px;padding:12px 16px;border:0;border-radius:10px;background:{
       <div class="list" id="list"><p class="muted">Loading&hellip;</p></div>
     </div>
   </div>
+  {% endif %}
 </div>
+{% if not off %}
 <script>
 (function(){
   var WHICH = {{ which|tojson }}, LOGIN = {{ login_path|tojson }}, KEY = 'ff_company_' + WHICH;
@@ -108,5 +111,6 @@ button{font-size:16px;padding:12px 16px;border:0;border-radius:10px;background:{
   document.getElementById('code').onkeydown = function(e){ if (e.key === 'Enter') byCode(); };
   if ('serviceWorker' in navigator) { navigator.serviceWorker.register('/sw.js',{scope:'/'}).catch(function(){}); }
 })();
+{% endif %}
 </script>
 </body></html>

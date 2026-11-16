@@ -648,6 +648,7 @@ def init_db():
     ensure_column(con, "orders", "paged_at", "TEXT")
     ensure_column(con, "orders", "kitchen_sent_at", "TEXT")
     ensure_column(con, "orders", "ai_chase_at", "TEXT")
+    ensure_column(con, "orders", "extra_pay_cents", "INTEGER")
     # Restaurants not on the restaurant app yet: dispatch places the order with them by hand.
     ensure_column(con, "restaurants", "uses_app", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "restaurants", "call_method", "TEXT NOT NULL DEFAULT 'phone'")   # called-in stores: phone or online
@@ -3698,6 +3699,7 @@ def order_dict(o):
         "id": o["id"], "code": o["code"], "site_name": (_so["name"] if _so is not None else ""),
         "region_id": int(_rv(o, "region_id") or 0), "region_label": (region_label(_rv(o, "region_id")) if regions_on() else ""),
         "primary_no": (_rv(o, "primary_no") or ""),
+        "extra_pay_cents": int(_rv(o, "extra_pay_cents") or 0),
         "site_phone": (nice_phone(_so["phone"] or "") if _so is not None and (_so["phone"] or "").strip() else ""),
         "site_logo": site_logo_url(_so),
         "eta_min": _e["eta_min"], "eta_clock": _e["eta_clock"], "eta_note": _e["eta_note"],
@@ -5787,9 +5789,13 @@ def checkout():
     if not typed:
         return jsonify({"ok": False, "error": "Enter a delivery address."}), 400
     items = clean_items(payload["items"])
+    if payload.get("problem") and payload.get("from_order_id"):
+        # problem remake: the food rings up free; the kitchen already made it
+        items = [dict(i, price_cents=0, fee_cents=0) for i in items]
     subtotal = sum(i["price_cents"] * i["qty"] for i in items)
     ifee = item_fees(items)
-    if subtotal <= 0:
+    if subtotal <= 0 and not (payload.get("problem") and payload.get("from_order_id")):
+        # a problem remake can go out with no new items: it is a re-delivery, the fee and tip are 0
         return jsonify({"ok": False, "error": "Your cart is empty."}), 400
     if not dispatcher_required():
         _mr = delivery_rules(r)
@@ -5901,7 +5907,18 @@ def checkout():
         return jsonify({"ok": False, "error": "Type a tip amount, like 5.00."}), 400
     if tip < 0:
         return jsonify({"ok": False, "error": "The tip can't be a negative amount."}), 400
+    if payload.get("problem") and payload.get("from_order_id"):
+        # problem remake: no delivery fee and no tip; the driver's extra pay is its own line
+        tip = 0
+        fee = 0
     total = subtotal + fee + ifee + tax + service + tip
+    extra_pay = 0
+    if payload.get("problem") and payload.get("from_order_id"):
+        # problem remake: the driver's extra pay is its own line, capped like other extra pay
+        try:
+            extra_pay = max(0, min(50000, int(round(float(payload.get("extra_pay_cents", 0) or 0)))))
+        except Exception:
+            extra_pay = 0
     # rewards account, rewards, gift card and saved card
     cr = checkout_credits(payload, placed_by, dg, subtotal, total)
     if cr.get("error"):
@@ -5970,8 +5987,9 @@ def checkout():
         address_note,dispatch_note,lat,lng,items,subtotal_cents,fee_cents,item_fee_cents,tax_cents,
         tip_cents,total_cents,miles,issue,issue_note,cloned_from,address_ok,source,ref_code,token,
         kitchen_status,dispatch_status,hold_reason,placed_by,created_at,
-        pickup_name,pickup_address,pickup_phone,pickup_lat,pickup_lng,service_cents,drop_style)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        pickup_name,pickup_address,pickup_phone,pickup_lat,pickup_lng,service_cents,drop_style,
+        extra_pay_cents)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (code, r["id"], payload["customer_name"], payload["customer_phone"], formatted,
          payload.get("note", ""), _dn, lat, lng,
          json.dumps(items), subtotal, fee, ifee, tax, tip, total, miles,
@@ -5981,7 +5999,7 @@ def checkout():
          kitchen_status, dstat, hold_reason, placed_by, now(),
          pu_name or None, pu_addr if pu_name else None, pu_phone if pu_name else None,
          pu_lat if pu_name else None, pu_lng if pu_name else None, service,
-         clean_drop_style(payload.get("drop_style"))))
+         clean_drop_style(payload.get("drop_style")), extra_pay))
     db().commit()
     log("order", code + " placed for " + r["name"] +
         ("" if address_ok else " (address not verified, waiting on dispatch approval)") +
@@ -6585,7 +6603,8 @@ def drv_fee_pay(o, r=None):
 def drv_pay_suggest(o):
     r = drv_pay_rule()
     return (r["flat_cents"] + drv_fee_pay(o, r)
-            + int(o["tip_cents"] or 0) * r["tip_pct"] // 100)
+            + int(o["tip_cents"] or 0) * r["tip_pct"] // 100
+            + int(_rv(o, "extra_pay_cents") or 0))
 
 def driver_payout_target(d):
     """(wallet, recipient_type, receiver, label) or None when the driver has nothing on file."""
@@ -13606,7 +13625,7 @@ def api_driver_state():
                     "scheduled": scheduled,
                     "self_status": driver_self_status_on(did),
                     "done": [order_dict(o) for o in done],
-                    "driver": {"name": d["name"], "status": d["status"],
+                    "driver": {"name": d["name"], "status": d["status"], "on_run": bool(mine),
                                "pending_request": d["pending_request"], "max_stack": d["max_stack"],
                                "up_next": rotation.get(d["id"]), "waiting_count": waiting,
                                "region_lines": driver_region_lines(lineups, d["id"]) if regions_on() else [],
@@ -13902,6 +13921,12 @@ def rest_login():
         err = wrong_brand_msg(site, "restaurant", home_brand_name_for({int(rs["id"])} if rs is not None else set()))   # switched to another brand's company
         session.pop("restaurant_id", None)
     return render_template("rest_login.html", err=err)
+
+
+@app.route("/go/kitchen/login", methods=["GET", "POST"])
+def hub_kitchen_login():
+    # the kitchen app's own address: same sign-in as /restaurant/login
+    return rest_login()
 
 @app.route("/restaurant/logout")
 def rest_logout():
@@ -15538,7 +15563,7 @@ def rest_invoice_view(iid):
 # app goes straight to that company's own site. "Switch company" signs them out and
 # brings the picker back. Developers manage the company list at /dispatch/companies.
 HUB_APPS = {"driver": ("Fleet Foot Driver", "/driver/login", "hub-driver"),
-            "kitchen": ("Fleet Foot Restaurant", "/restaurant/login", "hub-kitchen")}
+            "kitchen": ("Fleet Foot Restaurant", "/go/kitchen/login", "hub-kitchen")}
 
 
 def clean_site_url(u):
@@ -15918,15 +15943,20 @@ def hub_pick(which):
         return redirect("/go/driver")
     title, login_path, manifest = HUB_APPS[which]
     logo = DEFAULT_LOGO   # the shared apps always open on the Fleet Foot Delivery logo
+    shown = hub_shown_companies()
     return render_template("hub_pick.html", which=which, title=title, login_path=login_path,
-                           manifest=manifest, logo=logo)
+                           manifest=manifest, logo=logo, off=not shown)
+
+
+def hub_shown_companies():
+    """Companies offered on the shared driver and kitchen pick pages."""
+    return [hub_company(r) for r in company_rows() if (r.get("listed") if r.get("listed") is not None else 1)
+            and not company_locked(r)]   # locked brands stay hidden until unlocked
 
 
 @app.get("/api/hub/companies")
 def api_hub_companies():
-    rows = [hub_company(r) for r in company_rows() if (r.get("listed") if r.get("listed") is not None else 1)
-            and not company_locked(r)]   # locked brands stay hidden until unlocked
-    return jsonify({"ok": True, "companies": rows})
+    return jsonify({"ok": True, "companies": hub_shown_companies()})
 
 
 @app.get("/api/hub/find")
