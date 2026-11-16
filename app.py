@@ -8425,8 +8425,17 @@ def dispatch_new_order():
             src["late_warning"] = late_warn
             src["problem"] = bool(request.args.get("problem"))
             if src["problem"]:
-                # a problem with the first order: start blank, keeping only who and where
-                src.update({"restaurant_id": None, "items": [], "tip_cents": 0, "fee_cents": 0,
+                # a problem with the first order: keep who, where and the same business,
+                # and let the dispatcher add the items that need to go out again from the first order
+                src["prev_items"] = json.loads(o["items"])
+                try:
+                    src["extra_suggest"] = drv_pay_suggest(o)  # what the first trip paid the driver
+                except Exception:
+                    src["extra_suggest"] = 0
+                _sr = db().execute("SELECT slug FROM restaurants WHERE id=?",
+                                   (src["restaurant_id"],)).fetchone()
+                src["pick_from_prev"] = bool(_sr and _sr["slug"] != "oneoff")
+                src.update({"items": [], "tip_cents": 0, "fee_cents": 0,
                             "address_note": "", "drop_style": "door", "dispatch_note": "",
                             "pay_method": "", "house_name": ""})
             # every reorder is paid on the house account, named for the order's brand

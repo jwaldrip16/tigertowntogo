@@ -13,13 +13,20 @@
 {% for m in get_flashed_messages() %}<div class="panel" style="border-left:4px solid #b42318;color:#b42318">{{ m }}</div>{% endfor %}
 {% if src %}
 <div class="issuebar">Previous order: <b>{{ src['prev_no'] }}</b>.
-  {% if src['problem'] %}Only the customer's name, phone and address are filled in. Pick the restaurant and items,
-  say what went wrong, and choose the original driver or the queue.{% else %}Everything below is copied from it. Change anything you need,
+  {% if src['problem'] %}{% if src['pick_from_prev'] %}The business stays the same as the first order. Click Add on what needs to go out again,
+  say what went wrong, and choose the original driver or the queue.{% else %}Only the customer's name, phone and address are filled in. Pick the restaurant and items,
+  say what went wrong, and choose the original driver or the queue.{% endif %}{% else %}Everything below is copied from it. Change anything you need,
   say what went wrong, then send it to the pending queue.{% endif %}</div>
 {% if src['late_warning'] %}<div class="panel" style="border-left:4px solid #b54708;background:#fffaeb;color:#93370d">{{ src['late_warning'] }}</div>{% endif %}
 {% endif %}
 <div class="cols">
   <section>
+  {% if src and src['pick_from_prev'] %}
+    <h2>What they ordered on {{ src['prev_no'] }}</h2>
+    <p class="small muted">The remake goes to the same business as the first order. Click Add on the item that needs to go out again.</p>
+    <div id="prevList"></div>
+    <div class="hidden">
+  {% endif %}
     <h2>Restaurant</h2>
     <p class="small muted">One restaurant per order. For a second restaurant, place a separate order and link it below. The order minimum and delivery fee apply to each order, and it may go with a different driver, so the tip is per order.</p>
     {% if locked_brands %}<p class="small" style="color:#b42318">Locked brand, no orders until it's unlocked in Settings &gt; Regions &gt; Brand sites: {{ locked_brands|join(', ') }}</p>{% endif %}
@@ -50,6 +57,7 @@
         and calls this number. Add the food as custom items on the right.</p>
     </div>
     <div id="menu"></div>
+  {% if src and src['pick_from_prev'] %}</div>{% endif %}
   </section>
   <style>
     .srchhits{border:1px solid #ddd;border-radius:8px;margin:4px 0 8px;max-height:260px;overflow:auto;background:#fff}
@@ -115,7 +123,7 @@
     <div class="row">
       <input id="extraPay" type="number" step="0.01" min="0" placeholder="Extra pay $" style="max-width:130px">
     </div>
-    <p class="muted small">No delivery fee and no tip on a problem remake, and every item prices at $0.00 since the kitchen already made the food. Extra pay is what the driver gets for taking it out again.</p>
+    <p class="muted small">No delivery fee and no tip on a problem remake, and every item prices at $0.00 since the kitchen already made the food. Extra pay is what the driver gets for taking it out again.{% if src['extra_suggest'] %} It starts at ${{ '%.2f'|format(src['extra_suggest']/100) }}, what the first order paid the driver; change it if you like.{% endif %}</p>
     {% else %}
     <h3>Fee and tip</h3>
     <div class="row">
@@ -419,6 +427,22 @@ function bump(ix,d){
   f.qty += d; if (f.qty<=0) cart.splice(ix,1);
   draw();
 }
+// A problem remake lists what was on the first order; Add puts that item back on the remake.
+function prevList(){ return (SRC && SRC.problem && SRC.prev_items) || []; }
+function drawPrev(){
+  const box = document.getElementById('prevList'); if(!box) return;
+  const items = prevList();
+  box.innerHTML = items.length ? items.map((it,k)=>
+    '<div class="row"><div>'+ItemPick.label(it)+
+    (it.note ? '<div class="muted small">'+ItemPickEsc(it.note)+'</div>' : '')+'</div>'+
+    '<div class="right"><button class="btn small" onclick="addPrev('+k+')">Add</button></div></div>').join('')
+    : '<p class="muted">The first order has no items on it. Use the custom item box on the right.</p>';
+}
+function addPrev(k){
+  const it = prevList()[k]; if(!it) return;
+  cart.push(Object.assign({}, it, {id: it.menu_item_id || ('p'+k)}));
+  draw();
+}
 function subtotal(){ return cart.reduce((s,c)=>s+c.price_cents*c.qty,0); }
 function itemFees(){ return cart.reduce((s,c)=>s+(c.fee_cents||0)*c.qty,0); }
 function addCustom(){
@@ -621,6 +645,11 @@ function prefill(){
   } catch(e) {}
   if (SRC.restaurant_id) document.getElementById('rest').value = SRC.restaurant_id;
   drawMenu();
+  drawPrev();
+  if (SRC.problem){
+    const ep = document.getElementById('extraPay');
+    if (ep && (SRC.extra_suggest||0) > 0) ep.value = (SRC.extra_suggest/100).toFixed(2);
+  }
   cart = SRC.items.map((i,x)=>Object.assign({}, i, {id: i.menu_item_id || ('c'+x)}));
   document.getElementById('name').value = SRC.customer_name || '';
   document.getElementById('phone').value = SRC.customer_phone || '';
