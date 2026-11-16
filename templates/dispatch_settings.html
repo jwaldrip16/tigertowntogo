@@ -159,10 +159,6 @@ rsLoad();
   </div>
   {% endif %}
   {% endif %}
-  <h2>Software updates</h2>
-  {% if owner_view %}
-  <div id="swBox" class="muted small">Checking the GitHub repo this software updates from...</div>
-  {% endif %}
   <h2>Customer website</h2>
   {% if is_owner_view is not defined or is_owner_view %}<p><a class="btn small" href="/dispatch/import-website">Copy a whole website</a> <span class="muted small">Bring in the name, logo, photos, text, contact info and FAQs from a site you own.</span></p>{% endif %}
   <input type="hidden" name="site_present" value="1">
@@ -658,27 +654,4 @@ async function purgeNow(){
   document.getElementById('purgeExport').classList.add('hidden');
   PURGE = null;
 }
-async function swCheck(){
-  const b = document.getElementById('swBox');
-  if(!b) return;
-  b.textContent = 'Checking for updates...';
-  let r;
-  try { r = await (await fetch('/api/dispatch/software-check')).json(); } catch(e){ b.textContent = 'Could not check for updates.'; return; }
-  if(!r.ok){ b.textContent = r.error || 'Could not check for updates.'; return; }
-  const swE = v => String(v||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/"/g,'&quot;');
-  const link = '<a href="' + swE(r.repo_url) + '" target="_blank">' + swE(r.repo) + '</a>';
-  let html = 'This software updates from one GitHub repo: ' + link + ' (branch ' + swE(r.branch) + ').<br>' +
-             'Running version: ' + swE(r.deployed || 'not recorded') + '.<br>';
-  if(r.up_to_date){
-    html += '<strong>You are up to date.</strong> Latest on GitHub: ' + swE(r.latest_short) + ' "' + swE(r.latest_msg) + '" ' + swE(r.latest_date) + '.';
-  } else if(r.deployed){
-    html += '<strong>A newer version is on GitHub:</strong> ' + swE(r.latest_short) + ' "' + swE(r.latest_msg) + '" ' + swE(r.latest_date) +
-            '. Railway rebuilds and updates the software automatically when a new commit lands on ' + swE(r.branch) + '.';
-  } else {
-    html += 'Latest on GitHub: ' + swE(r.latest_short) + ' "' + swE(r.latest_msg) + '" ' + swE(r.latest_date) + '.';
-  }
-  html += '<div class="row mt"><button type="button" class="btn small" onclick="swCheck()">Check again</button></div>';
-  b.innerHTML = html;
-}
-swCheck();
 </script>{% endblock %}
