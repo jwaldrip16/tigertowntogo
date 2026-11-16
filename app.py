@@ -440,6 +440,7 @@ def init_db():
     ensure_column(con, "orders", "issue", "TEXT")
     ensure_column(con, "orders", "issue_note", "TEXT")
     ensure_column(con, "orders", "cloned_from", "TEXT")
+    ensure_column(con, "orders", "problem", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "orders", "item_fee_cents", "INTEGER NOT NULL DEFAULT 0")
     con.execute("UPDATE drivers SET roster='scheduled' WHERE roster NOT IN ('scheduled','unavailable')")
     ensure_column(con, "orders", "dispatch_note", "TEXT")
@@ -5988,8 +5989,8 @@ def checkout():
         tip_cents,total_cents,miles,issue,issue_note,cloned_from,address_ok,source,ref_code,token,
         kitchen_status,dispatch_status,hold_reason,placed_by,created_at,
         pickup_name,pickup_address,pickup_phone,pickup_lat,pickup_lng,service_cents,drop_style,
-        extra_pay_cents)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        extra_pay_cents,problem)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (code, r["id"], payload["customer_name"], payload["customer_phone"], formatted,
          payload.get("note", ""), _dn, lat, lng,
          json.dumps(items), subtotal, fee, ifee, tax, tip, total, miles,
@@ -5999,7 +6000,8 @@ def checkout():
          kitchen_status, dstat, hold_reason, placed_by, now(),
          pu_name or None, pu_addr if pu_name else None, pu_phone if pu_name else None,
          pu_lat if pu_name else None, pu_lng if pu_name else None, service,
-         clean_drop_style(payload.get("drop_style")), extra_pay))
+         clean_drop_style(payload.get("drop_style")), extra_pay,
+         1 if (payload.get("problem") and payload.get("from_order_id")) else 0))
     db().commit()
     log("order", code + " placed for " + r["name"] +
         ("" if address_ok else " (address not verified, waiting on dispatch approval)") +
@@ -7915,6 +7917,8 @@ def dispatch_signature(oid):
 
 def needs_door_signature(o):
     """A card order with no tip and no signature yet: the driver must get the customer to sign."""
+    if o["problem"]:
+        return False
     return not is_cash(o) and not int(o["tip_cents"] or 0) and not (o["tip_sig"] or "")
 
 @app.post("/api/driver/tip-sign")
@@ -13923,9 +13927,14 @@ def rest_login():
     return render_template("rest_login.html", err=err)
 
 
+@app.route("/kitchen/login", methods=["GET", "POST"])
+def kitchen_login():
+    # the kitchen app's own address: same sign-in as /restaurant/login
+    return rest_login()
+
 @app.route("/go/kitchen/login", methods=["GET", "POST"])
 def hub_kitchen_login():
-    # the kitchen app's own address: same sign-in as /restaurant/login
+    # old address kept working; it lands on the same sign-in
     return rest_login()
 
 @app.route("/restaurant/logout")
@@ -15563,7 +15572,7 @@ def rest_invoice_view(iid):
 # app goes straight to that company's own site. "Switch company" signs them out and
 # brings the picker back. Developers manage the company list at /dispatch/companies.
 HUB_APPS = {"driver": ("Fleet Foot Driver", "/driver/login", "hub-driver"),
-            "kitchen": ("Fleet Foot Restaurant", "/go/kitchen/login", "hub-kitchen")}
+            "kitchen": ("Fleet Foot Restaurant", "/kitchen/login", "hub-kitchen")}
 
 
 def clean_site_url(u):
