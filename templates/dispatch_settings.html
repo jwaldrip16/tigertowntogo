@@ -167,6 +167,8 @@ rsLoad();
   <div class="row"><label>X link <input name="social_x" value="{{ s.get('social_x','') }}"></label>
     <label>Facebook link <input name="social_facebook" value="{{ s.get('social_facebook','') }}"></label>
     <label>Instagram link <input name="social_instagram" value="{{ s.get('social_instagram','') }}"></label></div>
+  <div class="row"><label>App Store link <input name="app_ios_url" value="{{ s.get('app_ios_url','') }}" placeholder="https://apps.apple.com/..."></label>
+    <label>Google Play link <input name="app_android_url" value="{{ s.get('app_android_url','') }}" placeholder="https://play.google.com/..."></label></div>
   <h3 style="margin:14px 0 4px">Home page</h3>
   <div class="muted small">Change any wording on the home page. Leave a box as it is, or clear it, to keep the standard wording. You can type {business} for your business name.</div>
   <label>Announcement banner (shows across the top of the home page, leave blank for none)</label><input name="site_announce" maxlength="300" value="{{ site.site_announce }}" placeholder="Closed Thanksgiving Day. Happy holidays!">

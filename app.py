@@ -1265,7 +1265,7 @@ BRAND_IMAGES = ("hero_image", "pocket_image")
 BRAND_TEXT_KEYS = ("home_headline", "home_sub", "site_announce", "how_title", "how1_t", "how1_p", "how2_t", "how2_p",
                    "how3_t", "how3_p", "rest_title", "closed_msg", "any_text", "pocket_title", "pocket_text",
                    "business_email", "business_address", "social_x", "social_facebook", "social_instagram", "faq_text",
-                   "lunch_hours", "dinner_hours")
+                   "lunch_hours", "dinner_hours", "app_ios_url", "app_android_url")
 _BRAND_SETTING_KEYS = set(BRAND_TEXT_KEYS) | set(BRAND_IMAGES)
 # Text a brand must have of its own: Crimson 2 Go must not say "Auburn's finest" or link Tiger Town's Instagram.
 _NO_BORROW_KEYS = {"home_headline", "social_x", "social_facebook", "social_instagram"}
@@ -3910,6 +3910,17 @@ def home():
     if request.args.get("far"):
         _fr = db().execute("SELECT name FROM restaurants WHERE slug=?", (request.args.get("far"),)).fetchone()
         far_name = _fr["name"] if _fr else ""
+    _cm = []
+    try:
+        for _r in db().execute(
+                """SELECT v.stars, v.comment, v.created_at, r.name AS rname
+                   FROM reviews v JOIN restaurants r ON r.id = v.restaurant_id
+                   WHERE v.comment IS NOT NULL AND TRIM(v.comment) != '' AND v.stars >= 4
+                   ORDER BY v.created_at DESC LIMIT 6""").fetchall():
+            _cm.append({"stars": min(int(_r["stars"] or 0), 5), "comment": (_r["comment"] or "").strip(),
+                        "rest": _r["rname"] or "", "when": (_r["created_at"] or "")[:7]})
+    except Exception:
+        _cm = []
     return render_template("index.html", cards=cards, biz_open=biz, regions=regions, far_name=far_name,
                            brands=brands, sel_brand=brand_site["id"] if brand_site is not None else 0,
                            dev_all=bool(brands),
@@ -3920,7 +3931,7 @@ def home():
                            closed_today=[(("" if _hr else g["name"] + ": ") + region_closed_today(g["id"]))
                                          for g in ([{"id": _hr, "name": _hr_name}] if _hr else regions)
                                          if region_closed_today(g["id"])],
-                           any_on=any_rest_on(), any_open=biz and any_rest_open())
+                           any_on=any_rest_on(), any_open=biz and any_rest_open(), comments=_cm)
 
 @app.route("/r/<slug>")
 def menu(slug):
@@ -14653,6 +14664,8 @@ SITE_TEXT = (
     ("pocket_text", "Order from your phone in a few taps. Add {business} to your home screen and it opens like an app.", 400),
     ("lunch_hours", "", 200),
     ("dinner_hours", "", 200),
+    ("app_ios_url", "", 200),
+    ("app_android_url", "", 200),
 )
 SITE_IMAGES = {"hero_image": "/static/home-hero.jpg", "pocket_image": "/static/home-burger.jpg"}
 

@@ -696,3 +696,19 @@ ul.ordlines{margin:4px 0}
 .modalback.hidden{display:none}
 
 .footclosed{font-weight:700}
+
+/* Home page extras matching the old ordering system: left restaurants tab, follow us, customer comments, app badges */
+.sidetab{position:fixed;left:0;top:40%;z-index:60;writing-mode:vertical-rl;transform:rotate(180deg);background:var(--brand,#e53935);color:#fff;font-weight:700;letter-spacing:.14em;text-transform:uppercase;font-size:12px;padding:12px 7px;border-radius:0 8px 8px 0;text-decoration:none;box-shadow:0 2px 8px rgba(0,0,0,.18)}
+.sidetab:hover{filter:brightness(1.1)}
+.followwrap{display:grid;grid-template-columns:1fr 1.5fr;gap:28px;max-width:1100px;margin:0 auto;padding:36px 18px 8px}
+.followwrap h2{margin:0 0 12px;color:var(--brand,#e53935)}
+.socialrow{display:flex;gap:10px;flex-wrap:wrap}
+.socialcircle{width:46px;height:46px;border-radius:50%;background:var(--brand,#e53935);color:#fff;display:inline-flex;align-items:center;justify-content:center;font-weight:800;font-size:18px;text-decoration:none;box-shadow:0 2px 6px rgba(0,0,0,.15)}
+.socialcircle:hover{filter:brightness(1.1)}
+.commentrow blockquote{margin:0 0 12px;padding:12px 16px;background:#fff;border:1px solid var(--line,#e5e7eb);border-radius:12px}
+.commentrow blockquote p{margin:0 0 6px;font-style:italic}
+.commentrow footer{color:#6b7280;font-size:13px}
+.appbadges{display:flex;gap:10px;justify-content:center;margin-top:10px}
+.appbadge{display:inline-block;background:#111;color:#fff;border-radius:8px;padding:8px 14px;text-decoration:none;font-size:13px;line-height:1.25;text-align:center}
+.appbadge b{display:block;font-size:10px;font-weight:600;opacity:.85}
+@media (max-width:760px){.sidetab{display:none}.followwrap{grid-template-columns:1fr}}

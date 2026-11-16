@@ -1,6 +1,7 @@
 {% extends "base.html" %}{% block body %}
 {% set S = site if site is defined and site else {} %}
 {% if S.site_announce %}<div class="siteannounce" style="background:#b44a22;color:#fff;text-align:center;padding:10px 14px;font-weight:600">{{ S.site_announce }}</div>{% endif %}
+<a class="sidetab" href="#restaurants">Restaurants</a>
 <section class="hero fullbleed" style="background-image:linear-gradient(rgba(0,0,0,.38),rgba(0,0,0,.38)),url('{{ S.hero_image or '/static/home-hero.jpg' }}')">
   {% if not all_logos %}<h1>{{ home_headline or 'Delivering the area\'s finest restaurants to your door!' }}</h1>
   {% if S.home_sub %}<p class="herosub" style="color:#fff;font-size:1.1em;margin:-4px 0 10px;text-align:center">{{ S.home_sub|brandsub(biz_name) }}</p>{% endif %}{% endif %}
@@ -87,6 +88,24 @@
 </div>
 </section>
 
+{% if socials or comments %}
+<section class="followwrap">
+  {% if socials %}
+  <div class="followcol">
+    <h2>Follow Us</h2>
+    <div class="socialrow">{% for k, u in socials %}<a class="socialcircle" href="{{ u }}" target="_blank" rel="noopener" aria-label="{{ {'x':'X','facebook':'Facebook','instagram':'Instagram'}[k] }}">{{ {'x':'X','facebook':'f','instagram':'◎'}[k] }}</a>{% endfor %}</div>
+  </div>
+  {% endif %}
+  {% if comments %}
+  <div class="commentscol">
+    <h2>Customer Comments</h2>
+    <div class="commentrow">
+      {% for c in comments %}<blockquote><p>&ldquo;{{ c.comment }}&rdquo;</p><footer>{{ c.rest }} &middot; {{ '&starf;' * c.stars }}{% if c.when %} &middot; {{ c.when }}{% endif %}</footer></blockquote>{% endfor %}
+    </div>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
 <section class="pocket">
   <div class="phone"><div class="phonescreen" style="background-image:url('{{ S.pocket_image or '/static/home-burger.jpg' }}')"><img src="{{ logo_url }}" alt=""></div></div>
   <div class="pockettext">
@@ -94,6 +113,10 @@
     <p>{% if S.pocket_text %}{{ S.pocket_text }}{% else %}Order from your phone in a few taps. Add {{ biz_name }} to your home screen and it opens like an app.{% endif %}</p>
     <p class="small"><b>iPhone:</b> tap Share, then Add to Home Screen.<br><b>Android:</b> tap the &#8942; menu, then Add to Home screen.</p>
     <p><a class="btn primary" href="/rewards">Online rewards</a> <a class="btn" href="/gift-cards">Gift cards</a></p>
+    {% if S.app_ios_url or S.app_android_url %}<p class="appbadges">
+      {% if S.app_ios_url %}<a class="appbadge" href="{{ S.app_ios_url }}" target="_blank" rel="noopener"><b>Download on the</b>App Store</a>{% endif %}
+      {% if S.app_android_url %}<a class="appbadge" href="{{ S.app_android_url }}" target="_blank" rel="noopener"><b>Get it on</b>Google Play</a>{% endif %}
+    </p>{% endif %}
   </div>
 </section>
 {% endblock %}
