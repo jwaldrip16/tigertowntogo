@@ -238,6 +238,14 @@ CREATE TABLE IF NOT EXISTS rest_messages (
   seen_by_dispatch INTEGER DEFAULT 0, seen_by_rest INTEGER DEFAULT 0);
 CREATE INDEX IF NOT EXISTS ix_rest_messages ON rest_messages(restaurant_id, id);
 
+CREATE TABLE IF NOT EXISTS order_notes (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL,
+  who TEXT,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_order_notes ON order_notes(order_id, id);
+
 CREATE TABLE IF NOT EXISTS card_vault (
   order_id INTEGER PRIMARY KEY, blob TEXT NOT NULL, brand TEXT, last4 TEXT,
   created_at TEXT, viewed_at TEXT, viewed_by TEXT);
@@ -2164,6 +2172,7 @@ DEV_ORDER_EDIT_PATHS = {
     "/api/order/edit", "/api/order/note", "/api/order/hold", "/api/order/send-to-driver", "/api/order/reopen",
     "/api/order/card-save", "/api/paypal/replace-card", "/api/dispatch/assign", "/api/dispatch/reorder",
     "/api/dispatch/future-cancel", "/api/dispatch/future-release", "/api/dispatch/confirm-call",
+    "/api/order/notes", "/api/order/notes/delete",
 }
 # Never allowed for a developer, permission or not.
 DEV_NO_DELETE_PATHS = {"/api/dispatch/delete-orders", "/api/dispatch/purge-orders"}
@@ -7183,6 +7192,14 @@ def api_board():
                    JOIN drivers d ON d.id=m.driver_id
                    WHERE m.sender='driver' AND m.seen_by_dispatch=0
                    ORDER BY m.id DESC LIMIT 200""").fetchall() if m["driver_id"] in vis), None)
+    _nmap = {}
+    for n in db().execute("SELECT * FROM order_notes ORDER BY id"):
+        _nmap.setdefault(n["order_id"], []).append(
+            {"id": n["id"], "who": n["who"] or "", "body": n["body"], "at": n["created_at"]})
+    _live_rows = [od(o) for o in live]
+    _done_rows = [done_order_dict(o) for o in done]
+    for _r in _live_rows + _done_rows:
+        _r["notes"] = _nmap.get(_r["id"], [])
     return jsonify({
         "ok": True,
         "regions_label": region_names(my_regions - board_hidden_regions()) if my_regions else region_names(my_regions),
@@ -7206,8 +7223,8 @@ def api_board():
         "late": late_accepts(),
         "rest_chat_unread": rest_chat_unread_for_dispatch()[0],
         "rest_chat_latest": rest_chat_unread_for_dispatch()[1],
-        "orders": [od(o) for o in live],
-        "completed": [done_order_dict(o) for o in done],
+        "orders": _live_rows,
+        "completed": _done_rows,
         "owner": is_owner(),
         "done_day": done_day,
         "noonlight": board_noonlight(),
@@ -8520,6 +8537,43 @@ def api_order_note():
     log("note", o["code"] + " " + note[:80])
     db().commit()
     return jsonify({"ok": True, "note": note})
+
+
+@app.post("/api/order/notes")
+def api_order_note_add():
+    """Dispatch-side notes thread: a dispatcher can keep as many notes on an
+    order as they like, and delete any of them. Drivers and the kitchen do not
+    see these; the shared note button is what they see."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(force=True)
+    oid = data.get("order_id")
+    body = (data.get("body") or "").strip()[:500]
+    o = db().execute("SELECT id, code FROM orders WHERE id=?", (oid,)).fetchone()
+    if not o or not body:
+        return jsonify({"ok": False}), 400
+    who = session.get("dispatcher_name") or "dispatch"
+    db().execute("INSERT INTO order_notes(order_id,who,body,created_at) VALUES(?,?,?,?)",
+                 (o["id"], who, body, now()))
+    log("note", o["code"] + " +" + body[:80])
+    db().commit()
+    return jsonify({"ok": True})
+
+
+@app.post("/api/order/notes/delete")
+def api_order_note_del():
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    data = request.get_json(force=True)
+    nid = data.get("note_id")
+    row = db().execute("""SELECT n.id, o.code FROM order_notes n
+                          JOIN orders o ON o.id=n.order_id WHERE n.id=?""", (nid,)).fetchone()
+    if not row:
+        return jsonify({"ok": False}), 404
+    db().execute("DELETE FROM order_notes WHERE id=?", (nid,))
+    log("note", row["code"] + " note removed")
+    db().commit()
+    return jsonify({"ok": True})
 
 def clean_items(raw):
     """Normalise a cart. A dispatcher can add a custom line that is not on the menu:

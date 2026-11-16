@@ -662,6 +662,46 @@ async function noteOrder(id){
   if(!res.ok) alert('Could not save that note.');
   board(true);
 }
+let NOTES_ID = 0;
+function noteWhen(a){
+  const s = String(a||''); if(s.length < 16) return '';
+  let h = +s.slice(11,13), m = s.slice(14,16);
+  const ap = h >= 12 ? 'PM' : 'AM'; h = h % 12 || 12;
+  const t = new Date();
+  const td = t.getFullYear()+'-'+String(t.getMonth()+1).padStart(2,'0')+'-'+String(t.getDate()).padStart(2,'0');
+  if(s.slice(0,10) === td) return h+':'+m+' '+ap;
+  const mo = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'][+s.slice(5,7)-1];
+  return mo+' '+(+s.slice(8,10))+' '+h+':'+m+' '+ap;
+}
+function notesDialog(id){
+  NOTES_ID = id;
+  const o = findOrder(id) || {};
+  const notes = o.notes || [];
+  let box = document.getElementById('notesBox');
+  if(!box){ box = document.createElement('div'); box.id = 'notesBox'; box.className = 'modalback'; document.body.appendChild(box); }
+  box.innerHTML = '<div class="modal panel"><h2>Notes on '+ordBoth(o)+'</h2>'+
+    (notes.length ? notes.map(n =>
+      '<div class="noterow"><div class="small muted"><b>'+esc(n.who||'dispatch')+'</b> '+esc(noteWhen(n.at))+
+      ' <a href="#" class="notedel" onclick="noteDel('+n.id+');return false">delete</a></div>'+
+      '<div>'+esc(n.body)+'</div></div>').join('') :
+    '<p class="muted small">No notes yet. These stay on the dispatch side; the other note button is the one drivers and the kitchen see.</p>')+
+    '<textarea id="noteNew" rows="2" placeholder="Type a note, then Add note"></textarea>'+
+    '<div class="row"><button class="btn primary" onclick="noteAdd()">Add note</button>'+
+    '<button class="btn" onclick="document.getElementById(\'notesBox\').remove()">Close</button></div></div>';
+}
+async function noteAdd(){
+  const body = document.getElementById('noteNew').value.trim();
+  if(!body || !NOTES_ID) return;
+  const res = await jpost('/api/order/notes', {order_id:NOTES_ID, body:body});
+  if(!res.ok){ alert(res.error || 'Could not add that note.'); return; }
+  board(true); notesDialog(NOTES_ID);
+}
+async function noteDel(nid){
+  if(!confirm('Delete this note?')) return;
+  const res = await jpost('/api/order/notes/delete', {note_id:nid});
+  if(!res.ok){ alert(res.error || 'Could not delete that note.'); return; }
+  board(true); notesDialog(NOTES_ID);
+}
 // New orders from a delivered order are allowed only until 15 minutes after it was delivered.
 function canReorder(o){ return !o || o.reorder_ok !== false; }
 function newFromOrder(id){
@@ -1731,6 +1771,7 @@ function orderCard(o, opts, drivers){
       '<button class="btn tiny" onclick="changeFee('+o.id+')">Change fee ('+o.fee+')</button>'+
       '<button class="btn tiny" onclick="setToken('+o.id+')">'+(o.token?'Tag: '+esc(o.token):'Add tag')+'</button>'+
       '<button class="btn tiny" onclick="noteOrder('+o.id+')">'+(o.dispatch_note?'Edit note':'Add note')+'</button>'+
+      '<button class="btn tiny" onclick="notesDialog('+o.id+')">Notes'+((o.notes && o.notes.length) ? ' ('+o.notes.length+')' : '')+'</button>'+
       (canReorder(o) ? '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>' : '')+
       (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
       '<select id="as'+o.id+'" onchange="assign('+o.id+',this.value)">'+opts+'</select>'+
