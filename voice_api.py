@@ -571,6 +571,29 @@ def _voice_call_conf():
         tok or _voice_token()
 
 
+
+def _voice_ctl(path, body):
+    """POST a control request to the voice service (listen in, take over)."""
+    url, tok = _voice_call_conf()
+    if not url:
+        return {"ok": False, "error": "The voice service is not set up yet: set its address in Settings."}, 400
+    req = _urllib.Request(url + path, data=_json.dumps(body).encode(), method="POST",
+                          headers={"Content-Type": "application/json", "X-Voice-Token": tok})
+    try:
+        with _urllib.urlopen(req, timeout=15) as resp:
+            out = _json.loads(resp.read().decode() or "{}")
+    except _urlerr.HTTPError as e:
+        try:
+            out = _json.loads(e.read().decode() or "{}")
+        except Exception:
+            out = {}
+        if not out.get("error"):
+            out = {"error": "The voice service refused the request."}
+    except Exception:
+        return {"ok": False, "error": "Could not reach the voice service."}, 502
+    return out, (200 if out.get("ok") else 400)
+
+
 def _rest_items_lines(raw):
     lines = []
     try:
@@ -688,6 +711,9 @@ def do_restaurant_call(code, script=None):
                        (r["id"], "dispatch", "AI voice line",
                         "The AI voice line is calling you with order " + label + ". "
                         "Answering confirms you have it.", A.now()))
+        A.db().commit()
+        A.db().execute("UPDATE orders SET rest_call_sid=?, rest_call_at=? WHERE id=?",
+                       (out.get("sid") or "", A.now(), o["id"]))
         A.db().commit()
     out["code"] = o["code"]
     return out, (200 if out.get("ok") else 400)

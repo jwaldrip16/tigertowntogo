@@ -463,6 +463,64 @@ def call_restaurant():
     return {"ok": True, "sid": r.json().get("sid")}
 
 
+
+def _twilio_ctl(path, data):
+    """A raw POST against this Twilio account's REST API."""
+    return requests.post("https://api.twilio.com/2010-04-01/Accounts/%s/%s" % (TWILIO_SID, path),
+                         auth=(TWILIO_SID, TWILIO_TOKEN), data=data, timeout=25)
+
+
+@app.post("/call/listen")
+def call_listen():
+    """Start a live recording on a call so dispatch can listen in. The Fleet Foot app calls this."""
+    if not TOKEN or (request.headers.get("X-Voice-Token") or "").strip() != TOKEN:
+        return {"ok": False, "error": "Bad voice token."}, 403
+    _body = request.get_json(silent=True) or {}
+    sid = (_body.get("sid") or "").strip()
+    if not sid:
+        return {"ok": False, "error": "Say which call to record."}, 400
+    if not (TWILIO_SID and TWILIO_TOKEN):
+        return {"ok": False, "error": "Twilio is not set up on the voice service."}, 400
+    r = _twilio_ctl("Calls/%s/Recordings.json" % sid, {})
+    if r.status_code >= 300:
+        msg = ""
+        try:
+            msg = r.json().get("message") or ""
+        except Exception:
+            pass
+        return {"ok": False, "error": "Twilio refused the listen: " + (msg or r.text[:120])}, 400
+    rec = r.json()
+    return {"ok": True, "recording_sid": rec.get("sid"),
+            "url": "https://api.twilio.com" + (rec.get("uri") or "").replace(".json", ".wav")}
+
+
+@app.post("/call/takeover")
+def call_takeover():
+    """Take a live AI call away from the AI and bridge it to dispatch. The Fleet Foot app calls this."""
+    if not TOKEN or (request.headers.get("X-Voice-Token") or "").strip() != TOKEN:
+        return {"ok": False, "error": "Bad voice token."}, 403
+    _body = request.get_json(silent=True) or {}
+    sid = (_body.get("sid") or "").strip()
+    whisper = (_body.get("whisper") or "").strip()[:400]
+    if not sid:
+        return {"ok": False, "error": "Say which call to take over."}, 400
+    dn = (os.environ.get("DISPATCH_NUMBER") or "").strip()
+    if not dn:
+        return {"ok": False, "error": "Set DISPATCH_NUMBER on the voice service first."}, 400
+    if not PUBLIC_URL:
+        return {"ok": False, "error": "PUBLIC_URL is not set on the voice service."}, 400
+    url = PUBLIC_URL + "/twilio/takeover?w=" + _urlquote(_clean_spoken(whisper)) + "&dn=" + _urlquote(dn)
+    r = _twilio_ctl("Calls/%s.json" % sid, {"Url": url, "Method": "POST"})
+    if r.status_code >= 300:
+        msg = ""
+        try:
+            msg = r.json().get("message") or ""
+        except Exception:
+            pass
+        return {"ok": False, "error": "Twilio refused the take-over: " + (msg or r.text[:120])}, 400
+    return {"ok": True}
+
+
 def pay_twiml(pay, retry=False):
     """The card-entry TwiML: Twilio asks for the card, expiry, zip and security code."""
     code = (pay.get("code") or "").replace('"', "")
@@ -543,6 +601,18 @@ def twilio_whisper():
         return Response('<Response><Hangup/></Response>', mimetype="text/xml")
     return Response('<Response><Say>' + text + '</Say></Response>', mimetype="text/xml")
 
+
+
+
+@app.route("/twilio/takeover", methods=["GET", "POST"])
+def twilio_takeover():
+    """The restaurant hears this when dispatch takes the call away from the AI."""
+    target = (request.values.get("dn") or "").strip()
+    target = "+" + "".join(ch for ch in target if ch.isdigit()) if target else ""
+    if not target:
+        return Response('<Response><Hangup/></Response>', mimetype="text/xml")
+    return Response('<Response><Say>One moment, I am connecting you with our dispatcher.</Say>'
+                    + _dial_inner(target, request.values.get("w", "")) + '</Response>', mimetype="text/xml")
 
 @app.route("/twilio/after", methods=["POST"])
 def twilio_after():

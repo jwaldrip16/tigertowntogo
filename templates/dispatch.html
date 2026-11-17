@@ -1834,9 +1834,28 @@ async function callRestaurantGo(id){
   const script = document.getElementById('aiScriptTxt').value;
   const res = await jpost('/api/dispatch/call-restaurant', {order_id:id, script:script});
   const msg = document.getElementById('aiCallMsg');
-  if(res && res.ok){ msg.textContent = 'Calling now. The restaurant chat will show the outcome.';
-    setTimeout(()=>{ const b=document.getElementById('aiCallBox'); if(b) b.remove(); board(true); }, 1500); }
+  if(res && res.ok){ board(true);
+    msg.innerHTML = 'Calling now. While the AI is on the line: '+
+      '<button class="btn tiny" onclick="restListen('+id+')">Listen in</button> '+
+      '<button class="btn tiny" onclick="restTakeover('+id+')">Take over</button>'+
+      '<div id="aiCallAudio" style="margin-top:8px"></div>'; }
   else { msg.textContent = (res && res.error) || 'The call did not go out.'; btn.disabled = false; }
+}
+async function restListen(id){
+  const box = document.getElementById('aiCallAudio'); if(!box) return;
+  box.innerHTML = '<p class="muted small">Starting the listen...</p>';
+  const r = await jpost('/api/dispatch/rest-call-listen', {order_id:id});
+  if(r && r.ok){ box.innerHTML = '<audio controls autoplay src="'+r.url+'"></audio>'+
+    '<p class="muted small">The listen plays about 20 seconds behind the live call.</p>'; }
+  else box.innerHTML = '<p class="muted small">'+((r && r.error) || 'Could not start the listen.')+'</p>';
+}
+async function restTakeover(id){
+  if(!confirm('Hand the call to dispatch? The AI steps out and the restaurant connects with your dispatch line.')) return;
+  const box = document.getElementById('aiCallAudio'); if(!box) return;
+  box.innerHTML = '<p class="muted small">Connecting the restaurant with dispatch...</p>';
+  const r = await jpost('/api/dispatch/rest-call-takeover', {order_id:id});
+  if(r && r.ok){ box.innerHTML = '<p class="muted small">The AI is out of the call; the restaurant is connecting with dispatch now.</p>'; }
+  else box.innerHTML = '<p class="muted small">'+((r && r.error) || 'Could not take over.')+'</p>';
 }
 async function manualStep(id, op){
   const box = document.getElementById('m'+id);

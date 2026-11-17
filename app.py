@@ -351,6 +351,8 @@ def init_db():
     ensure_column(con, "drivers", "payout_branch_id", "TEXT")      # the driver's Branch worker ID
     ensure_column(con, "drivers", "payout_branch_ids", "TEXT")     # JSON {Branch account id: worker ID} when it differs per account
     ensure_column(con, "drivers", "auto_pay", "INTEGER DEFAULT 1")   # 0 = never auto pay this driver
+    ensure_column(con, "orders", "rest_call_sid", "TEXT")    # sid of the live AI call to the restaurant
+    ensure_column(con, "orders", "rest_call_at", "TEXT")     # when that call started
     ensure_column(con, "drivers", "branch_account_id", "INTEGER")    # which Branch account pays them (blank = by brand)
     con.execute("""CREATE TABLE IF NOT EXISTS branch_accounts (id INTEGER PRIMARY KEY AUTOINCREMENT,
                    name TEXT NOT NULL, mode TEXT DEFAULT 'sandbox', org_id TEXT, api_key TEXT,
@@ -12200,6 +12202,92 @@ def api_call_restaurant():
     out, status = do_restaurant_call(o["code"], (b.get("script") or "").strip())
     return jsonify(out), status
 
+
+
+
+@app.post("/api/dispatch/rest-call-listen")
+def api_rest_call_listen():
+    """Start a listen-in on the live AI call to the restaurant."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    sid = (o["rest_call_sid"] if "rest_call_sid" in o.keys() else "") or ""
+    if not sid:
+        return jsonify({"ok": False, "error": "No AI call is live for this order."}), 400
+    import voice_api
+    out, status = voice_api._voice_ctl("/call/listen", {"sid": sid})
+    if not out.get("ok"):
+        return jsonify(out), status
+    return jsonify({"ok": True, "url": "/api/dispatch/rest-audio/" + (out.get("recording_sid") or "")})
+
+
+@app.get("/api/dispatch/rest-audio/<rsid>")
+def api_rest_audio(rsid):
+    """Stream the listen-in recording (it plays about 20 seconds behind the live call)."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    if not re.match(r"^RE[0-9a-zA-Z]{32}$", rsid or ""):
+        return jsonify({"ok": False, "error": "Bad recording id."}), 400
+    tsid = os.environ.get("TWILIO_SID", "")
+    ttok = os.environ.get("TWILIO_TOKEN", "")
+    if not (tsid and ttok):
+        return jsonify({"ok": False, "error": "Twilio is not set up on this server."}), 400
+    url = "https://api.twilio.com/2010-04-01/Accounts/%s/Recordings/%s.wav" % (tsid, rsid)
+    req = urllib.request.Request(url, headers={"Authorization": "Basic " +
+                                 base64.b64encode((tsid + ":" + ttok).encode()).decode()})
+    try:
+        up = urllib.request.urlopen(req, timeout=30)
+    except Exception:
+        return jsonify({"ok": False, "error": "Could not fetch the recording."}), 502
+    def stream():
+        try:
+            while True:
+                chunk = up.read(65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            up.close()
+    return Response(stream(), mimetype="audio/wav")
+
+
+@app.post("/api/dispatch/rest-call-takeover")
+def api_rest_call_takeover():
+    """Take the live AI call away from the AI and connect the restaurant with dispatch."""
+    if not dispatcher_required():
+        return jsonify({"ok": False, "error": "Sign in again."}), 403
+    b = request.get_json(force=True)
+    o = db().execute("SELECT * FROM orders WHERE id=?", (b.get("order_id"),)).fetchone()
+    if not o:
+        return jsonify({"ok": False, "error": "Order not found."}), 404
+    sid = (o["rest_call_sid"] if "rest_call_sid" in o.keys() else "") or ""
+    if not sid:
+        return jsonify({"ok": False, "error": "No AI call is live for this order."}), 400
+    rest = db().execute("SELECT name FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
+    no = (o["primary_no"] if "primary_no" in o.keys() else "") or ""
+    label = (no + " (system " + o["code"] + ")") if no else o["code"]
+    total = ""
+    try:
+        if int(o["total_cents"] or 0) > 0:
+            total = ", total $%.2f" % (int(o["total_cents"]) / 100.0)
+    except Exception:
+        total = ""
+    whisper = "Dispatch is taking over the call to %s. Order %s%s." % (
+        (rest["name"] if rest else "the restaurant"), label, total)
+    import voice_api
+    out, status = voice_api._voice_ctl("/call/takeover", {"sid": sid, "whisper": whisper})
+    if not out.get("ok"):
+        return jsonify(out), status
+    db().execute("""INSERT INTO rest_messages(restaurant_id,sender,who,body,created_at,seen_by_rest,seen_by_dispatch)
+                    VALUES(?,?,?,?,?,0,0)""",
+                 (o["restaurant_id"], "dispatch", "AI voice line",
+                  "Dispatch took over the AI voice call. Order " + label + ".", now()))
+    db().execute("UPDATE orders SET rest_call_sid='' WHERE id=?", (o["id"],))
+    db().commit()
+    return jsonify({"ok": True})
 
 @app.post("/api/dispatch/manual-order")
 def api_manual_order():
