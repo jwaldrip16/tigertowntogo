@@ -449,7 +449,7 @@ def call_restaurant():
     from_number = TWILIO_FROM
     for var, val in os.environ.items():
         if var.startswith("VOICE_BRAND_") and val.strip().lower() == brand_name:
-            from_number = "+1" + var[len("VOICE_BRAND_"):]
+            from_number = "+" + var[len("VOICE_BRAND_"):]
             break
     r = requests.post("https://api.twilio.com/2010-04-01/Accounts/%s/Calls.json" % TWILIO_SID,
                       auth=(TWILIO_SID, TWILIO_TOKEN),
@@ -460,7 +460,11 @@ def call_restaurant():
                       timeout=25)
     if r.status_code >= 300:
         return {"ok": False, "error": "Twilio refused the call: " + (r.json().get("message") or r.text[:120])}, 400
-    return {"ok": True, "sid": r.json().get("sid")}
+    sid = r.json().get("sid")
+    if sid:
+        # remember the brand line so a take-over rings that brand's dispatch number
+        CALLS[sid] = {"brand_digits": from_number.lstrip("+")}
+    return {"ok": True, "sid": sid}
 
 
 
@@ -504,7 +508,11 @@ def call_takeover():
     whisper = (_body.get("whisper") or "").strip()[:400]
     if not sid:
         return {"ok": False, "error": "Say which call to take over."}, 400
-    dn = (os.environ.get("DISPATCH_NUMBER") or "").strip()
+    dn = ""
+    digits = (CALLS.get(sid) or {}).get("brand_digits") or ""
+    if digits:
+        dn = (os.environ.get("DISPATCH_NUMBER_" + digits) or "").strip()
+    dn = dn or (os.environ.get("DISPATCH_NUMBER") or "").strip()
     if not dn:
         return {"ok": False, "error": "Set DISPATCH_NUMBER on the voice service first."}, 400
     if not PUBLIC_URL:
