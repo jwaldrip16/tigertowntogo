@@ -761,6 +761,7 @@ def init_db():
     ensure_column(con, "orders", "primary_day", "TEXT")
     ensure_column(con, "orders", "auto_kitchen_at", "TEXT")   # when the region's automatic Send to kitchen fired
     ensure_column(con, "orders", "auto_kitchen_ready_at", "TEXT")  # when the order first qualified; the swap window counts from here
+    ensure_column(con, "orders", "manual_driver", "INTEGER")   # a dispatcher picked this driver by hand; auto dispatch leaves it alone
     con.execute("""CREATE TABLE IF NOT EXISTS order_swaps (
                      id INTEGER PRIMARY KEY AUTOINCREMENT,
                      order_id INTEGER NOT NULL,
@@ -2919,7 +2920,7 @@ def auto_assign():
                              WHERE driver_id=? AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
                           (d["id"],)).fetchone()["s"]
         con.execute("""UPDATE orders SET driver_id=?, dispatch_status='assigned',
-                       hold_reason=NULL, stack_seq=?, loc_stacked=? WHERE id=?""",
+                       hold_reason=NULL, manual_driver=0, stack_seq=?, loc_stacked=? WHERE id=?""",
                     (d["id"], seq, 1 if detour is not None else 0, o["id"]))
         if detour is None:
             con.execute("UPDATE drivers SET last_assigned_at=? WHERE id=?", (now(), d["id"]))
@@ -2949,6 +2950,7 @@ def rebalance_stacks():
                            WHERE o.dispatch_status='assigned' AND o.driver_id IS NOT NULL
                              AND COALESCE(o.placed_by,'') != 'driver'
                              AND COALESCE(o.loc_stacked,0) = 0
+                             AND COALESCE(o.manual_driver,0) = 0
                              AND EXISTS (SELECT 1 FROM orders x
                                          WHERE x.driver_id=o.driver_id AND x.id!=o.id
                                            AND x.dispatch_status NOT IN ('delivered','cancelled')
@@ -7378,8 +7380,8 @@ def api_assign():
         if bad:
             return bad
     if did in (None, "", 0, "0"):
-        db().execute("""UPDATE orders SET driver_id=NULL, stack_seq=NULL, dispatch_status='queued'
-                        WHERE id=?""", (oid,))
+        db().execute("""UPDATE orders SET driver_id=NULL, stack_seq=NULL, manual_driver=0,
+                        dispatch_status='queued' WHERE id=?""", (oid,))
     else:
         prev = db().execute("SELECT driver_id, dispatch_status FROM orders WHERE id=?",
                             (oid,)).fetchone()
@@ -7399,7 +7401,7 @@ def api_assign():
                             "error": "That order is already picked up and en route. "
                                      "Complete it or send it back to the queue first."}), 400
         db().execute("""UPDATE orders SET driver_id=?, dispatch_status='assigned', hold_reason=NULL,
-                        stack_seq=? WHERE id=?""", (did, seq, oid))
+                        manual_driver=1, stack_seq=? WHERE id=?""", (did, seq, oid))
         _c = db().execute("SELECT code FROM orders WHERE id=?", (oid,)).fetchone()
         if _c:
             push_driver(did, "New order " + _c["code"] + " was sent to you.", tag="assign-" + _c["code"])
@@ -12101,7 +12103,7 @@ def api_send_to_driver():
                               AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
                            (did,)).fetchone()["s"]
         db().execute("""UPDATE orders SET driver_id=?, dispatch_status='assigned', stack_seq=?,
-                        hold_reason=NULL WHERE id=?""", (did, seq, o["id"]))
+                        hold_reason=NULL, manual_driver=1 WHERE id=?""", (did, seq, o["id"]))
         db().commit()
         push_driver(did, "New order " + o["code"] + " was sent to you.", tag="assign-" + o["code"])
         log("send_to_driver", o["code"] + " -> " + d["name"])
