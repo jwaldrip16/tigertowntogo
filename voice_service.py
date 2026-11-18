@@ -676,6 +676,8 @@ def twilio_pay_result():
         if tries < 2:
             return Response('<Response><Redirect method="POST">/twilio/pay</Redirect>'
                             '</Response>', mimetype="text/xml")
+    if pay and pay.get("code"):
+        ff_call("/api/voice/pay-failed", {"code": pay.get("code")})
     if target:
         code = _clean_spoken(str(pay.get("code") or ""))[:20]
         brief = ("The card failed twice on the keypad for order " + code +

@@ -308,7 +308,9 @@ def voice_place():
                                  "Placed by the AI voice line. Take payment by phone or on "
                                  "delivery.") + ((" " + str(b.get("dispatch_note"))[:200])
                                                  if b.get("dispatch_note") else ""),
-               "tip_cents": b.get("tip_cents") or 0}
+               "tip_cents": b.get("tip_cents") or 0,
+               "via_voice": 1,
+               "pay_on_call": 1 if b.get("pay_on_call") else 0}
     with A.app.test_request_context("/checkout", method="POST", json=payload):
         resp = A.checkout()
         if isinstance(resp, tuple):
@@ -325,6 +327,20 @@ def voice_place():
                     "total_cents": o["total_cents"],
                     "hold_reason": o["hold_reason"] or "",
                     "pay_note": "Dispatch takes the payment by phone or on delivery."})
+
+
+@voice_bp.post("/api/voice/pay-failed")
+@voice_auth
+def voice_pay_failed():
+    """The keypad payment failed twice and the caller went to dispatch: show the order."""
+    b = request.get_json(force=True) or {}
+    code = (b.get("code") or "").strip()
+    o = A.db().execute("SELECT * FROM orders WHERE code=?", (code,)).fetchone() if code else None
+    if o and o["dispatch_status"] == "awaiting_payment" and (o["self_pay"] if "self_pay" in o.keys() else "") == "1":
+        A.db().execute("""UPDATE orders SET self_pay='', hold_reason=?
+                          WHERE id=?""", ("card failed on the call, dispatch takes it", o["id"]))
+        A.db().commit()
+    return jsonify({"ok": True})
 
 
 @voice_bp.post("/api/voice/cancel_order")

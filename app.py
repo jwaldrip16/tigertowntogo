@@ -672,6 +672,7 @@ def init_db():
         ensure_column(con, "orders", _c, _d)
     # Which PayPal keys took an order's payment: a brand's id, or 0 for the main keys.
     ensure_column(con, "orders", "pp_acct", "INTEGER")
+    ensure_column(con, "orders", "self_pay", "TEXT")   # the customer pays it themselves: PayPal on the web, keypad on the phone
     con.execute("UPDATE orders SET pp_acct=0 WHERE pp_acct IS NULL AND (pp_state IS NOT NULL OR pp_order_id IS NOT NULL)")
     ensure_column(con, "saved_cards", "pp_acct", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "gift_cards", "pp_acct", "INTEGER NOT NULL DEFAULT 0")
@@ -6059,10 +6060,19 @@ def checkout():
     else:
         # Card order: it waits off the kitchen screen and out of the driver queue until
         # dispatch runs the card on its own terminal and marks it paid.
+        # self_pay = the customer pays it themselves (PayPal buttons on the web, keypad on the
+        # phone line). Those orders stay off the dispatch board until the payment lands; orders
+        # dispatch has to collect itself (card on file, transfer) stay on the board.
+        sp = ""
+        if not sched:
+            if payload.get("via_voice"):
+                sp = "1" if payload.get("pay_on_call") else ""
+            elif placed_by == "customer" and use_pp:
+                sp = "1"
         db().execute("""UPDATE orders SET payment_status='unpaid', kitchen_status='waiting',
-                        dispatch_status='awaiting_payment', hold_reason=?
+                        dispatch_status='awaiting_payment', hold_reason=?, self_pay=?
                         WHERE id=?""", ("card on file, run it" if card else
-                                       ("waiting on Venmo/PayPal" if use_pp else "waiting on card"), oid))
+                                       ("waiting on Venmo/PayPal" if use_pp else "waiting on card"), sp, oid))
         db().commit()
         if card:
             store_card(oid, card)
@@ -7142,6 +7152,11 @@ def api_board():
         pass
     live = db().execute("""SELECT * FROM orders WHERE dispatch_status NOT IN ('delivered','cancelled','scheduled')
                            ORDER BY created_at ASC""").fetchall()
+    # Orders the customer is still paying themselves (PayPal on the web, keypad on the phone)
+    # stay off the board until the payment lands. Dispatch sees them the moment they are paid,
+    # or right away when a keypad payment failed and dispatch has to take the card.
+    live = [o for o in live if not (o["dispatch_status"] == "awaiting_payment"
+                                    and (o["self_pay"] if "self_pay" in o.keys() else "") == "1")]
     live_all = live          # every live order, before any region filter (drivers' stops come from here)
     _od = {}
     def od(o):
@@ -11234,7 +11249,7 @@ def api_delete_orders():
 
 @app.get("/api/dispatch/find-order")
 def api_find_order():
-    """Look up any order in any region by code, phone or customer name."""
+    """Look up any order in any region by code, restaurant number (TT01), phone or customer name."""
     if not dispatcher_required():
         return jsonify({"ok": False}), 403
     q = (request.args.get("q") or "").strip()
@@ -11242,10 +11257,15 @@ def api_find_order():
         return jsonify({"ok": True, "results": []})
     digits = "".join(c for c in q if c.isdigit())
     like = "%" + q.lower() + "%"
+    try:
+        seq = int(digits) if 1 <= len(digits) <= 4 else -1   # TT42 or 42 also finds TT0042
+    except ValueError:
+        seq = -1
     rows = db().execute("""SELECT * FROM orders WHERE lower(code) LIKE ? OR lower(COALESCE(customer_name,'')) LIKE ?
+                           OR lower(COALESCE(primary_no,'')) LIKE ? OR COALESCE(primary_seq,0) = ?
                            OR (? != '' AND length(?) >= 4 AND replace(replace(replace(replace(COALESCE(customer_phone,''),'-',''),' ',''),'(',''),')','') LIKE ?)
                            ORDER BY created_at DESC LIMIT 25""",
-                        (like, like, digits, digits, "%" + digits + "%")).fetchall()
+                        (like, like, like, seq, digits, digits, "%" + digits + "%")).fetchall()
     names = {r["id"]: r["name"] for r in all_regions()}
     myr = dispatcher_view_regions(session.get("dispatcher_id"))
     out = []
