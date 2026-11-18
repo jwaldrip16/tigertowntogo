@@ -12,7 +12,7 @@
     if (!OK || Notification.permission !== 'granted') return null;
     try {
       const n = new Notification(title, {body: body || '', tag: tag || 'ttg',
-                                         icon: '/static/icon-192.png', renotify: true});
+                                         icon: '/brand/icon-192.png', renotify: true});
       n.onclick = function(){ window.focus(); this.close(); };
       setTimeout(() => { try { n.close(); } catch(e){} }, 20000);
       return n;

@@ -21,8 +21,8 @@ self.addEventListener('push', e => {
   e.waitUntil(self.registration.showNotification(d.title || 'Fleet Foot Delivery', {
     body: d.body || '',
     tag: d.tag || 'ff',
-    icon: d.icon || '/static/icon-192.png',
-    badge: d.icon || '/static/icon-192.png',
+    icon: d.icon || '/brand/icon-192.png',
+    badge: d.icon || '/brand/icon-192.png',
     renotify: true,
     data: {url: d.url || '/'}
   }));
