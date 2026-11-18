@@ -13472,7 +13472,7 @@ def driver_login():
             return redirect(url_for("driver"))
         err = wrong_brand_msg(staff_brand_site(), "driver", home_brand_name_for(driver_site_ids(session["driver_id"])))   # switched to a brand they don't drive for
         session.pop("driver_id", None)
-    return render_template("driver_login.html", err=err)
+    return render_template("driver_login.html", err=err, logo=DEFAULT_LOGO)
 
 @app.route("/driver/logout")
 def driver_logout():
@@ -14119,7 +14119,7 @@ def rest_login():
         rs = site_of_region(r["region_id"]) if r is not None and r["region_id"] else None
         err = wrong_brand_msg(site, "restaurant", home_brand_name_for({int(rs["id"])} if rs is not None else set()))   # switched to another brand's company
         session.pop("restaurant_id", None)
-    return render_template("rest_login.html", err=err)
+    return render_template("rest_login.html", err=err, logo=DEFAULT_LOGO)
 
 
 @app.route("/kitchen/login", methods=["GET", "POST"])
@@ -16154,8 +16154,44 @@ def hub_pick(which):
                            manifest=manifest, logo=logo, off=not shown)
 
 
+def hub_abs(logo):
+    if logo.startswith("/") and has_request_context():
+        return request.host_url.rstrip("/") + logo
+    return logo
+
+
+def hub_main_entry():
+    """The main business itself as a picker entry, so a brand with no companies still opens."""
+    name = main_brand_name() or "Fleet Foot Delivery"
+    return {"name": name, "code": "", "url": request.host_url.rstrip("/"),
+            "brand": name, "logo": hub_abs(main_brand_logo()), "bs": "main"}
+
+
+def hub_brand_entries():
+    """Brands mode: the shared apps list the brands themselves, the main business first."""
+    out = [hub_main_entry()]
+    origin = request.host_url.rstrip("/")
+    for row in db().execute("SELECT * FROM sites ORDER BY sort, id").fetchall():
+        doms = [d for d in site_domains(row) if d]
+        url = ("https://" + doms[0]) if doms else origin
+        out.append({"name": row["name"] or "",
+                    "code": "".join(ch for ch in (row["name"] or "").lower() if ch.isalnum())[:40],
+                    "url": url, "brand": row["name"] or "", "logo": hub_abs(brand_logo(row)), "bs": row["id"]})
+    return out
+
+
 def hub_shown_companies():
-    """Companies offered on the shared driver and kitchen pick pages."""
+    """Companies offered on the shared driver and kitchen pick pages. Brands mode lists the brands
+    themselves, so the link is never a dead end just because no companies were saved."""
+    if brands_on():
+        ents = hub_brand_entries()
+        seen = {_norm_host(e["url"]) for e in ents if e["url"]}
+        for r in company_rows():
+            if (r.get("listed") if r.get("listed") is not None else 1) and not company_locked(r) \
+                    and _norm_host(r.get("url") or "") not in seen:
+                ents.append(hub_company(r))
+                seen.add(_norm_host(r.get("url") or ""))
+        return ents
     return [hub_company(r) for r in company_rows() if (r.get("listed") if r.get("listed") is not None else 1)
             and not company_locked(r)]   # locked brands stay hidden until unlocked
 
@@ -16169,6 +16205,11 @@ def api_hub_companies():
 def api_hub_find():
     code = (request.args.get("code") or "").strip().lower()
     r = db().execute("SELECT * FROM companies WHERE code=? AND COALESCE(active,1)=1", (code,)).fetchone()
+    if not r and brands_on():
+        short = "".join(ch for ch in code if ch.isalnum())
+        for e in hub_brand_entries():
+            if e["code"] and e["code"] == short:
+                return jsonify({"ok": True, "company": e})
     if not r:
         return jsonify({"ok": False, "error": "No company with that code. Check with your manager."}), 404
     if company_locked(dict(r)):
