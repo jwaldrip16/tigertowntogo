@@ -9624,7 +9624,7 @@ def dispatch_map():
 @app.route("/restaurant/account")
 def rest_account():
     if not session.get("restaurant_id"):
-        return redirect(url_for("rest_login"))
+        return redirect(url_for("kitchen_login"))
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (session["restaurant_id"],)).fetchone()
     return render_template("rest_account.html", r=r)
 
@@ -14072,6 +14072,8 @@ def export_gps():
 
 @app.route("/restaurant/login", methods=["GET", "POST"])
 def rest_login():
+    if request.method == "GET" and request.path == "/restaurant/login":
+        return redirect(url_for("kitchen_login"))  # the kitchen app's own address
     err = None
     if request.method == "POST":
         row = db().execute("SELECT * FROM restaurants WHERE slug=? AND pin=?",
@@ -14113,12 +14115,12 @@ def hub_kitchen_login():
 @app.route("/restaurant/logout")
 def rest_logout():
     session.pop("restaurant_id", None)
-    return redirect(url_for("rest_login"))
+    return redirect(url_for("kitchen_login"))
 
 @app.route("/restaurant")
 def rest_home():
     if not session.get("restaurant_id"):
-        return redirect(url_for("rest_login"))
+        return redirect(url_for("kitchen_login"))
     r = db().execute("SELECT * FROM restaurants WHERE id=?", (session["restaurant_id"],)).fetchone()
     _ph = dispatch_phone(r["region_id"])
     return render_template("rest.html", r=r, open=is_open(r), hours=hours_label(r),
@@ -14990,7 +14992,7 @@ APP_MANIFESTS = {
     "driver": {"name": "Fleet Foot Driver", "suffix": " Driver", "short": "FF Driver", "start": "/driver", "scope": "/driver",
                "orientation": "portrait", "bg": "#0f172a", "theme": "#0f172a",
                "desc": "Driver app: go online, accept deliveries, navigate and get paid."},
-    "kitchen": {"name": "Fleet Foot Restaurant", "suffix": " Kitchen", "short": "FF Restaurant", "start": "/restaurant", "scope": "/restaurant",
+    "kitchen": {"name": "Fleet Foot Restaurant", "suffix": " Kitchen", "short": "FF Restaurant", "start": "/restaurant", "scope": "/",
                 "orientation": "portrait", "bg": "#7c2d12", "theme": "#7c2d12",
                 "desc": "Restaurant app: receive delivery orders, mark them ready and chat with dispatch."},
     # the shared staff apps (one store listing for every client company)
@@ -15723,7 +15725,7 @@ def dispatch_invoice_view(iid):
 @app.get("/restaurant/invoices")
 def rest_invoices():
     if not session.get("restaurant_id"):
-        return redirect(url_for("rest_login"))
+        return redirect(url_for("kitchen_login"))
     invs = [inv_dict(r) for r in db().execute(
         "SELECT * FROM rest_invoices WHERE restaurant_id=? AND status<>'void' ORDER BY id DESC LIMIT 200",
         (session["restaurant_id"],)).fetchall()]
@@ -15733,7 +15735,7 @@ def rest_invoices():
 @app.get("/restaurant/invoices/<int:iid>")
 def rest_invoice_view(iid):
     if not session.get("restaurant_id"):
-        return redirect(url_for("rest_login"))
+        return redirect(url_for("kitchen_login"))
     r = db().execute("SELECT * FROM rest_invoices WHERE id=? AND restaurant_id=? AND status<>'void'",
                      (iid, session["restaurant_id"])).fetchone()
     if not r:
@@ -16054,7 +16056,7 @@ def keep_staff_in_their_company():
                 session.pop("restaurant_id", None)
                 resp = jsonify({"ok": False, "signed_out": True, "error": "Signed out: this kitchen belongs to another company."})
                 resp.status_code = 401
-                resp.headers["X-Signed-Out"] = "/restaurant/login"
+                resp.headers["X-Signed-Out"] = "/kitchen/login"
                 return resp
     except Exception:
         return None
@@ -17592,7 +17594,7 @@ def inject_portal():
 # the ordering site, and nobody sees a portal they do not belong to.
 PORTAL_PREFIXES = (("/dispatch", "dispatch"), ("/driver", "driver"), ("/restaurant", "kitchen"))
 PORTAL_HOME = {"dispatch": "/dispatch", "driver": "/driver", "kitchen": "/restaurant"}
-PORTAL_LOGIN = {"dispatch": "/dispatch/login", "driver": "/driver/login", "kitchen": "/restaurant/login"}
+PORTAL_LOGIN = {"dispatch": "/dispatch/login", "driver": "/driver/login", "kitchen": "/kitchen/login"}
 
 @app.before_request
 def guard_portals():
@@ -21394,7 +21396,7 @@ def api_dispatch_customer_reset_code():
 STAFF_RESET = {
     "dispatch":   {"title": "Dispatcher", "ask": "Username", "secret": "password", "login": "/dispatch/login"},
     "driver":     {"title": "Driver", "ask": "Mobile number", "secret": "PIN", "login": "/driver/login"},
-    "restaurant": {"title": "Restaurant", "ask": "Store code", "secret": "PIN", "login": "/restaurant/login"},
+    "restaurant": {"title": "Restaurant", "ask": "Store code", "secret": "PIN", "login": "/kitchen/login"},
 }
 
 def _staff_reset_table():

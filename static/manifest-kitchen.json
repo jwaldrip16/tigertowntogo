@@ -2,7 +2,7 @@
   "name": "Fleet Foot Delivery Kitchen",
   "short_name": "Kitchen",
   "start_url": "/restaurant",
-  "scope": "/restaurant",
+  "scope": "/",
   "display": "standalone",
   "orientation": "portrait",
   "background_color": "#7c2d12",

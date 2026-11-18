@@ -2,6 +2,11 @@
 // Nothing fires until the user hits Allow.
 (function(){
   const OK = ('Notification' in window);
+  // each app shows its own icon: driver app, kitchen (restaurant) app, brand icon everywhere else
+  const P = location.pathname || '/';
+  const ICON = P.indexOf('/driver') === 0 ? '/static/icons/driver-192.png'
+             : P.indexOf('/restaurant') === 0 ? '/static/icons/kitchen-192.png'
+             : '/brand/icon-192.png';
   function state(){ return OK ? Notification.permission : 'unsupported'; }
   function ask(){
     if (!OK) return Promise.resolve('unsupported');
@@ -12,7 +17,7 @@
     if (!OK || Notification.permission !== 'granted') return null;
     try {
       const n = new Notification(title, {body: body || '', tag: tag || 'ttg',
-                                         icon: '/brand/icon-192.png', renotify: true});
+                                         icon: ICON, renotify: true});
       n.onclick = function(){ window.focus(); this.close(); };
       setTimeout(() => { try { n.close(); } catch(e){} }, 20000);
       return n;

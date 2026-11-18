@@ -155,7 +155,7 @@ async function load(force){
   if (editing() && !force) return;
   const dd = (document.getElementById('doneDay')||{}).value || '';
   const res = await jget('/api/restaurant/orders' + (dd ? '?day=' + dd : ''));
-  if(!res.ok){ window.location='/restaurant/login'; return; }
+  if(!res.ok){ window.location='/kitchen/login'; return; }
   try { drawLate(res.late || [], 'rest'); } catch(e) {}
   try { chatCheck(res); } catch(e) { console.log('chat skipped', e); }
   document.getElementById('openpill').textContent =
