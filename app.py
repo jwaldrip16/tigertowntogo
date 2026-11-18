@@ -3445,9 +3445,9 @@ ORDSHOW_CHOICES = {"both": "Restaurant number first, system number small next to
                    "secondary": "System number only (FF number)"}
 
 def ordshow(screen):
-    """Which order number a screen shows: dispatch, rest (restaurant app) or driver."""
-    v = _ordset("ordshow_" + screen, "both")
-    return v if v in ORDSHOW_CHOICES else "both"
+    """Which order number a screen shows: dispatch, rest (restaurant app), driver or customer (the website)."""
+    v = _ordset("ordshow_" + screen, "primary" if screen == "customer" else "both")
+    return v if v in ORDSHOW_CHOICES else ("primary" if screen == "customer" else "both")
 
 
 def ord_label(primary_no, code, screen="dispatch"):
@@ -5115,7 +5115,7 @@ def pay_page(code):
     kind = "balance" if request.args.get("kind") == "balance" else "order"
     info = pp_info(o)
     amount = info["owed"] if kind == "balance" else money(o["total_cents"])
-    return render_template("pay.html", order=o, code=code, kind=kind, amount=amount, info=info,
+    return render_template("pay.html", order=o, code=code, kind=kind, amount=amount, info=info, nshow=ordshow("customer"),
                            rname=(o["pickup_name"] or (r["name"] if r else "")),
                            pp_ready=pp_enabled(pp_order_acct(o)), client_id=pp_client_id(pp_order_acct(o)),
                            is_dispatch=bool(dispatcher_required()))
@@ -6119,7 +6119,7 @@ def checkout():
     return jsonify({"pay_url": ("/pay/" + code) if (use_pp and not cash and not paid_by_credit) else "",
                     "credit": credit_note, "confirm_call": confirm,
                     "future_note": future_note, "ok": True, "cash": cash, "code": code, "order_id": oid,
-                    "primary_no": _primary, "total": money(total),
+                    "primary_no": _primary, "total": money(total), "num_show": ordshow("customer"),
                     "send_note": send_note,
                     "address_ok": bool(address_ok),
                     "message": (credit_note.get("message", "") + " " if credit_note.get("message") else "") + ("" if address_ok and cash else
@@ -6220,7 +6220,8 @@ def track(code):
         if _ts is not None:
             g._site_forced = _ts   # the order's brand logo, name and phone on its tracking page
     return render_template("track.html", order={"code": o["code"],
-                           "primary_no": (o["primary_no"] if "primary_no" in o.keys() else "") or ""}, code=code)
+                           "primary_no": (o["primary_no"] if "primary_no" in o.keys() else "") or ""}, code=code,
+                           nshow=ordshow("customer"))
 
 TRACK_FIELDS = ("code", "primary_no", "multi_group", "note", "credits", "dispatch_status", "kitchen_status", "restaurant", "restaurant_nav", "address",
                 "scheduled_label", "needs_address_approval", "timeline", "timer_seconds",
@@ -8378,7 +8379,8 @@ def ordnum_view():
             "sec_style": _ordset("secondary_style", "time"), "sec_digits": _ordset("secondary_digits", "6"),
             "styles": PRIMARY_STYLES, "sec_styles": SECONDARY_STYLES,
             "show_choices": ORDSHOW_CHOICES,
-            "show": {"dispatch": ordshow("dispatch"), "rest": ordshow("rest"), "driver": ordshow("driver")},
+            "show": {"dispatch": ordshow("dispatch"), "rest": ordshow("rest"), "driver": ordshow("driver"),
+                     "customer": ordshow("customer")},
             "brands": [{"field": "primary_prefix_main", "name": main + " (main business)",
                         "value": _ordset("primary_prefix_main", ""), "default": default_prefix(main),
                         "example": format_primary(brand_prefix(None, main), 1)}] +
@@ -12746,7 +12748,7 @@ def dispatch_settings():
                     "secondary_style": f.get("secondary_style") if f.get("secondary_style") in SECONDARY_STYLES else "time",
                     "secondary_digits": str(max(3, min(10, int(f.get("secondary_digits") or 6)))) if (f.get("secondary_digits") or "6").isdigit() else "6",
                     "primary_prefix_main": clean_prefix(f.get("primary_prefix_main"))}
-            for _scr in ("dispatch", "rest", "driver"):
+            for _scr in ("dispatch", "rest", "driver", "customer"):
                 _v = f.get("ordshow_" + _scr)
                 vals["ordshow_" + _scr] = _v if _v in ORDSHOW_CHOICES else "both"
             for x in db().execute("SELECT id FROM sites").fetchall():

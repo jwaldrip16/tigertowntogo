@@ -2,12 +2,12 @@
 {% if not order %}
 <h1>Order {{ code }}</h1><p>We could not find that order code.</p>
 {% elif not pp_ready %}
-{% if order.primary_no %}<h1>Pay for order {{ order.primary_no }}</h1>{% else %}<h1>Pay for order {{ code }}</h1>{% endif %}
+{% if order.primary_no and nshow != 'secondary' %}<h1>Pay for order {{ order.primary_no }}</h1>{% else %}<h1>Pay for order {{ code }}</h1>{% endif %}
 <p>Online payment is not turned on yet. Call dispatch to pay.</p>
 {% else %}
 <h1>{{ 'Pay the rest' if kind == 'balance' else 'Pay for your order' }}</h1>
 <div class="panel paybox">
-  <p class="muted">Order {{ order.primary_no or order.code }}{% if order.primary_no and order.primary_no != order.code %} (system {{ order.code }}){% endif %}{% if rname %} from {{ rname }}{% endif %}</p>
+  <p class="muted">{% if order.primary_no and nshow != 'secondary' %}Order {{ order.primary_no }}{% if nshow == 'both' %} (system {{ order.code }}){% endif %}{% else %}Order {{ order.code }}{% endif %}{% if rname %} from {{ rname }}{% endif %}</p>
   <div class="row total"><span>{{ 'Still owed' if kind == 'balance' else 'Total' }}</span><span>{{ amount }}</span></div>
   {% if kind == 'order' and not info.can_pay %}
     <p>This order is already paid. <a href="/track/{{ order.code }}">Track your order</a>.</p>
