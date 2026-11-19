@@ -1732,44 +1732,6 @@ setInterval(function(){
     el.textContent = durSince(a.age + (Date.now()-a.at)/1000);
   });
 }, 30000);
-function courierLine(o){
-  if (o.dispatch_status==='delivered' || o.dispatch_status==='cancelled') return '';
-  if (o.driver_id) return '';
-  const c = o.courier;
-  if (c && c.ref && c.status!=='cancelled'){
-    return '<div class="small" id="cour'+o.id+'" style="margin-top:2px">'+
-      '<span class="pill '+(c.demo?'grey':'blue')+'">'+esc(c.label)+(c.demo?' demo':'')+'</span> '+
-      '<span>'+esc(c.status_label)+'</span>'+
-      (c.fee ? ' <span class="muted small">'+c.fee+(c.eta_min ? ', about '+c.eta_min+' min' : '')+'</span>' : '')+
-      (c.track_url ? ' <a href="'+esc(c.track_url)+'" target="_blank">track</a>' : '')+
-      ' <button class="btn tiny" onclick="courierCancel('+o.id+')">Cancel courier</button></div>';
-  }
-  if (['awaiting_payment','waiting','scheduled'].indexOf(o.dispatch_status) >= 0) return '';
-  return '<div class="small" id="cour'+o.id+'" style="margin-top:2px">'+
-    '<span class="muted">No driver? Send by:</span> '+
-    '<button class="btn tiny" onclick="courierQuote('+o.id+',\'uber\')">Uber Direct</button> '+
-    '<button class="btn tiny" onclick="courierQuote('+o.id+',\'doordash\')">DoorDash</button>'+
-    (c && c.status==='cancelled' ? ' <span class="pill grey">courier cancelled</span>' : '')+'</div>';
-}
-async function courierQuote(oid, prov){
-  const r = await jpost('/api/dispatch/courier/quote', {order_id: oid, provider: prov});
-  if (!r.ok){ alert(r.error || 'Could not get a quote.'); return; }
-  const box = document.getElementById('cour'+oid); if (!box) return;
-  const name = prov==='uber' ? 'Uber Direct' : 'DoorDash';
-  box.innerHTML = '<span class="muted">'+name+':</span> '+r.fee+' fee, about '+r.eta_min+' min'+(r.demo?' (demo)':'')+
-    ' <button class="btn tiny primary" onclick="courierBook('+oid+',\''+prov+'\')">Book courier</button> '+
-    '<button class="btn tiny" onclick="board(true)">Re-quote</button>';
-}
-async function courierBook(oid, prov){
-  const r = await jpost('/api/dispatch/courier/book', {order_id: oid, provider: prov});
-  if (!r.ok){ alert(r.error || 'Could not book the courier.'); return; }
-  board(true);
-}
-async function courierCancel(oid){
-  const r = await jpost('/api/dispatch/courier/cancel', {order_id: oid});
-  if (!r.ok){ alert(r.error || 'Could not cancel the courier.'); return; }
-  board(true);
-}
 function orderCard(o, opts, drivers){
   const timer = (o.timer_seconds!==null && o.kitchen_status==='preparing')
     ? '<span class="pill amber">'+Math.max(0,Math.ceil(o.timer_seconds/60))+' min</span>' : '';
@@ -1792,7 +1754,6 @@ function orderCard(o, opts, drivers){
     redoLine(o)+
     (o.needs_address_approval ? '<div class="issuebar">Address not verified &middot; pending dispatch '+
       'approval. The kitchen has not seen this order yet.</div>' : '')+
-    courierLine(o)+
     '<div class="order-actions">'+
       OrderView.btn(o)+
       payButtons(o)+

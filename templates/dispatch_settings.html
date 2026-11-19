@@ -474,45 +474,7 @@ rsLoad();
   <p class="small muted">Off: no cash orders anywhere (website, dispatch orders, gift cards). Customers pay by card, PayPal, Venmo, gift card, or house account.</p>
   <button class="btn primary">Save</button>
 </form>
-{% if owner_view %}
-<form class="panel narrow" method="post" autocomplete="off">
-  <input type="hidden" name="courier_present" value="1">
-  <h2>Third-party delivery (Uber Direct, DoorDash)</h2>
-  <p class="small muted">Book an Uber Direct or DoorDash courier for an order straight from the board when no driver is free. Each delivery bills to the provider account you connect. Secrets are hidden after saving; leave a secret box empty to keep the saved one.</p>
-  <label style="display:flex;gap:8px;align-items:flex-start;margin:8px 0">
-    <input type="checkbox" name="courier_demo" value="1" {{ 'checked' if s.get('courier_demo','1') == '1' else '' }} style="width:auto;margin-top:3px">
-    <span><b>Demo mode</b><br><span class="muted small">Simulates both providers end to end (quotes, booking, status updates) so the flow can be tried with no accounts. Turn it off once real keys are saved.</span></span>
-  </label>
-  <h3 style="margin:14px 0 4px">Uber Direct</h3>
-  <label style="display:block;margin-bottom:6px"><input type="checkbox" name="uber_enabled" value="1" {{ 'checked' if s.get('uber_enabled','0') == '1' else '' }} style="width:auto"> Offer Uber Direct on the board</label>
-  <label>Customer ID</label>
-  <input name="uber_customer_id" value="{{ s.get('uber_customer_id','') }}" spellcheck="false" autocomplete="off">
-  <label>Client ID</label>
-  <input name="uber_client_id" value="{{ s.get('uber_client_id','') }}" spellcheck="false" autocomplete="off">
-  <label>Client secret</label>
-  <input name="uber_client_secret" type="password" value="" spellcheck="false" autocomplete="new-password"
-         placeholder="{{ 'Saved. Type a new one to replace it.' if s.get('uber_client_secret') else 'Not saved yet' }}">
-  {% if s.get('uber_client_id') or s.get('uber_client_secret') or s.get('uber_customer_id') %}<label style="display:flex;gap:6px;align-items:center;margin-top:4px"><input type="checkbox" name="uber_clear" value="1" style="width:auto"> Remove the Uber Direct keys</label>{% endif %}
-  <h3 style="margin:14px 0 4px">DoorDash Drive</h3>
-  <label style="display:block;margin-bottom:6px"><input type="checkbox" name="dd_enabled" value="1" {{ 'checked' if s.get('dd_enabled','0') == '1' else '' }} style="width:auto"> Offer DoorDash on the board</label>
-  <label>Developer ID</label>
-  <input name="dd_developer_id" value="{{ s.get('dd_developer_id','') }}" spellcheck="false" autocomplete="off">
-  <label>Key ID</label>
-  <input name="dd_key_id" value="{{ s.get('dd_key_id','') }}" spellcheck="false" autocomplete="off">
-  <label>Signing secret</label>
-  <input name="dd_signing_secret" type="password" value="" spellcheck="false" autocomplete="new-password"
-         placeholder="{{ 'Saved. Type a new one to replace it.' if s.get('dd_signing_secret') else 'Not saved yet' }}">
-  {% if s.get('dd_developer_id') or s.get('dd_signing_secret') or s.get('dd_key_id') %}<label style="display:flex;gap:6px;align-items:center;margin-top:4px"><input type="checkbox" name="dd_clear" value="1" style="width:auto"> Remove the DoorDash keys</label>{% endif %}
-  <h3 style="margin:14px 0 4px">Status updates (webhook)</h3>
-  <p class="small muted">Put these addresses in each provider's dashboard (Uber Direct: developer dashboard, webhooks; DoorDash: developer portal, webhooks) and their status changes will show on the board. The token on the link keeps strangers out.</p>
-  <label>Uber Direct webhook URL</label>
-  <input readonly value="{{ courier_hook }}/api/courier/webhook/uber?t={{ s.get('courier_webhook_token','') }}">
-  <label>DoorDash webhook URL</label>
-  <input readonly value="{{ courier_hook }}/api/courier/webhook/doordash?t={{ s.get('courier_webhook_token','') }}">
-  <label style="display:flex;gap:6px;align-items:center;margin-top:4px"><input type="checkbox" name="courier_regenerate" value="1" style="width:auto"> Generate a new webhook token (then update both links)</label>
-  <button class="btn primary">Save courier settings</button>
-</form>
-{% endif %}
+
 {% if owner_view %}
 <form class="panel narrow" method="post" autocomplete="off">
   <input type="hidden" name="pp_present" value="1">

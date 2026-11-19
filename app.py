@@ -27,7 +27,6 @@ def set_app_tz(name):
         time.tzset()
     return name
 
-import couriers
 import uuid
 APP_TZ = _pick_tz()
 set_app_tz(APP_TZ)
@@ -536,12 +535,6 @@ def init_db():
     ensure_column(con, "orders", "stripe_intent", "TEXT")
     ensure_column(con, "orders", "stripe_pm", "TEXT")
     ensure_column(con, "orders", "stripe_customer", "TEXT")
-    # Third-party couriers (Uber Direct, DoorDash Drive): one booked delivery per order.
-    for _cc, _cd in (("courier_provider", "TEXT"), ("courier_ref", "TEXT"),
-                     ("courier_status", "TEXT"), ("courier_fee_cents", "INTEGER"),
-                     ("courier_eta_min", "INTEGER"), ("courier_track_url", "TEXT"),
-                     ("courier_booked_at", "TEXT"), ("courier_demo", "INTEGER")):
-        ensure_column(con, "orders", _cc, _cd)
     ensure_column(con, "orders", "paid_cents", "INTEGER NOT NULL DEFAULT 0")
     ensure_column(con, "orders", "extra_charges", "TEXT")
     ensure_column(con, "orders", "refunded_cents", "INTEGER NOT NULL DEFAULT 0")
@@ -2279,7 +2272,7 @@ def rail_off(sid):
 
 
 RAIL_OPEN_PREFIXES = (SUSPEND_OPEN_PREFIXES + _STAFF_PREFIXES +
-                  ("/companies", "/api/chat/", "/api/push/", "/api/order/", "/api/courier/", "/api/regions"))
+                  ("/companies", "/api/chat/", "/api/push/", ))
 
 
 def rail_guard():
@@ -3747,7 +3740,6 @@ def order_dict(o):
         "line_parts": [line_parts(x) for x in _safe_items(o["items"]) if isinstance(x, dict)],
         "item_count": sum(int(x.get("qty", 1)) for x in json.loads(o["items"])),
         "timeline": order_timeline(o["id"]),
-        "courier": courier_view(o),
         "placed_time": clock(o["created_at"], _rv(o, "region_id")),
         "ready_time": clock(o["ready_at"], _rv(o, "region_id")),
         "delivered_time": clock(o["delivered_at"], _rv(o, "region_id")),
@@ -7151,7 +7143,6 @@ def api_board():
     credit_sweep()
     auto_kitchen_sweep()
     pp_sweep()      # charge delivered PayPal/Venmo orders once the tip window is over
-    couriers.demo_sweep(db(), dt.datetime.now(_zone(APP_TZ)))
     payout_sweep()  # update driver pay that is still going through PayPal
     auto_driver_pay_sweep()  # pay drivers for delivered trips when auto pay is on
     remind_unreceived()      # one automatic reminder only if a driver hasn't tapped Received in time
@@ -7378,243 +7369,7 @@ def api_pause_region():
     return jsonify({"ok": True, "paused": want, "region": r["name"]})
 
 
-# ------------------------------------------------ Third-party courier delivery
-
-COURIER_LABELS = {"uber": "Uber Direct", "doordash": "DoorDash"}
-
-
-def _courier_cfg():
-    def g(k):
-        try:
-            return (setting(k, str) or "").strip()
-        except Exception:
-            return ""
-    return {
-        "demo": g("courier_demo") == "1",
-        "uber_on": g("uber_enabled") == "1",
-        "uber_customer_id": g("uber_customer_id"),
-        "uber_client_id": g("uber_client_id"),
-        "uber_client_secret": g("uber_client_secret"),
-        "dd_on": g("dd_enabled") == "1",
-        "dd_developer_id": g("dd_developer_id"),
-        "dd_key_id": g("dd_key_id"),
-        "dd_signing_secret": g("dd_signing_secret"),
-        "webhook_token": g("courier_webhook_token"),
-    }
-
-
-def courier_hook_url():
-    """Public base the provider webhooks hang off (shown in Dispatch settings)."""
-    base = (os.environ.get("PUBLIC_URL") or "").strip()
-    rail = (os.environ.get("RAILWAY_PUBLIC_DOMAIN") or "").strip()
-    if not base and rail:
-        base = "https://" + rail
-    if not base:
-        try:
-            base = request.url_root.rstrip("/")
-        except Exception:
-            base = ""
-    return base.rstrip("/")
-
-
-def courier_view(o):
-    """Courier state for the board card (None when the order has no courier)."""
-    try:
-        keys = o.keys()
-        if "courier_provider" not in keys:
-            return None
-        prov = o["courier_provider"] or ""
-    except Exception:
-        return None
-    if not prov:
-        return None
-    st = o["courier_status"] or "booked"
-    return {
-        "provider": prov,
-        "label": COURIER_LABELS.get(prov, prov.title()),
-        "ref": o["courier_ref"] or "",
-        "status": st,
-        "status_label": couriers.status_label(st),
-        "fee_cents": int(o["courier_fee_cents"] or 0),
-        "fee": money(int(o["courier_fee_cents"] or 0)),
-        "eta_min": int(o["courier_eta_min"] or 0) or None,
-        "track_url": o["courier_track_url"] or "",
-        "demo": bool(o["courier_demo"]),
-    }
-
-
-def _courier_provider_ready(cfg, prov):
-    if cfg["demo"]:
-        return None
-    if prov == "uber":
-        if not cfg["uber_on"]:
-            return "Uber Direct is switched off in Dispatch settings."
-        if not (cfg["uber_customer_id"] and cfg["uber_client_id"] and cfg["uber_client_secret"]):
-            return "The Uber Direct keys are not saved yet (Dispatch settings)."
-    else:
-        if not cfg["dd_on"]:
-            return "DoorDash is switched off in Dispatch settings."
-        if not (cfg["dd_developer_id"] and cfg["dd_key_id"] and cfg["dd_signing_secret"]):
-            return "The DoorDash keys are not saved yet (Dispatch settings)."
-    return None
-
-
-def _courier_guard_order(o):
-    st = (o["dispatch_status"] or "")
-    if st in ("delivered", "cancelled"):
-        return "That order is already closed."
-    if o["driver_id"]:
-        return "This order already has a driver."
-    if st == "awaiting_payment":
-        return "Mark the card paid first."
-    if st == "waiting":
-        return "Send the order to the kitchen first."
-    return None
-
-
-def _courier_addr(o):
-    r = db().execute("SELECT * FROM restaurants WHERE id=?", (o["restaurant_id"],)).fetchone()
-    if r:
-        pu = pickup_of(o, r)
-    else:
-        pu = {"name": "", "address": "", "phone": ""}
-    return pu, (o["address"] or "")
-
-
-def _courier_items_note(o):
-    try:
-        its = json.loads(o["items"] or "[]")
-        return ", ".join(line_label(x) for x in its[:3])[:120]
-    except Exception:
-        return "Food order"
-
-
-@app.post("/api/dispatch/courier/quote")
-def api_courier_quote():
-    """Ask Uber Direct or DoorDash what a delivery for this order would cost."""
-    if not dispatcher_required():
-        return jsonify({"ok": False}), 403
-    d = request.get_json(force=True, silent=True) or {}
-    prov = (d.get("provider") or "").strip()
-    if prov not in COURIER_LABELS:
-        return jsonify({"ok": False, "error": "Unknown courier."})
-    o = db().execute("SELECT * FROM orders WHERE id=?", (d.get("order_id"),)).fetchone()
-    if not o:
-        return jsonify({"ok": False, "error": "Order not found."})
-    bad = _courier_guard_order(o)
-    if bad:
-        return jsonify({"ok": False, "error": bad})
-    cfg = _courier_cfg()
-    err = _courier_provider_ready(cfg, prov)
-    if err:
-        return jsonify({"ok": False, "error": err})
-    pu, drop = _courier_addr(o)
-    r = couriers.quote(cfg, prov, pu, drop)
-    if not r.get("ok"):
-        return jsonify({"ok": False, "error": r.get("error", "The courier gave no quote.")})
-    return jsonify({"ok": True, "fee": money(r["fee_cents"]), "eta_min": r["eta_min"],
-                    "demo": r.get("demo", False)})
-
-
-@app.post("/api/dispatch/courier/book")
-def api_courier_book():
-    """Book a courier delivery for the order and stamp it on the board."""
-    if not dispatcher_required():
-        return jsonify({"ok": False}), 403
-    d = request.get_json(force=True, silent=True) or {}
-    prov = (d.get("provider") or "").strip()
-    if prov not in COURIER_LABELS:
-        return jsonify({"ok": False, "error": "Unknown courier."})
-    o = db().execute("SELECT * FROM orders WHERE id=?", (d.get("order_id"),)).fetchone()
-    if not o:
-        return jsonify({"ok": False, "error": "Order not found."})
-    bad = _courier_guard_order(o)
-    if bad:
-        return jsonify({"ok": False, "error": bad})
-    if (o["courier_ref"] or "") and (o["courier_status"] or "") != "cancelled":
-        return jsonify({"ok": False, "error": "A courier is already booked on this order."})
-    cfg = _courier_cfg()
-    err = _courier_provider_ready(cfg, prov)
-    if err:
-        return jsonify({"ok": False, "error": err})
-    pu, drop = _courier_addr(o)
-    try:
-        total_c = int(o["total_cents"]) if "total_cents" in o.keys() else 0
-    except Exception:
-        total_c = 0
-    r = couriers.book(cfg, prov, pu, drop, items_note=_courier_items_note(o),
-                      customer_name=o["customer_name"] or "", customer_phone=o["customer_phone"] or "",
-                      ref_hint=o["primary_no"] or o["code"])
-    if not r.get("ok"):
-        return jsonify({"ok": False, "error": r.get("error", "The courier could not be booked.")})
-    db().execute("""UPDATE orders SET courier_provider=?, courier_ref=?, courier_status='booked',
-                    courier_fee_cents=?, courier_eta_min=?, courier_track_url=?, courier_booked_at=?,
-                    courier_demo=? WHERE id=?""",
-                 (prov, r["ref"], int(r.get("fee_cents") or 0), int(r.get("eta_min") or 0) or None,
-                  r.get("track_url") or "", dt.datetime.now(_zone(APP_TZ)).isoformat(),
-                  1 if r.get("demo") else 0, o["id"]))
-    db().commit()
-    return jsonify({"ok": True, "fee": money(int(r.get("fee_cents") or 0)), "eta_min": r.get("eta_min"),
-                    "demo": r.get("demo", False), "ref": r["ref"]})
-
-
-@app.post("/api/dispatch/courier/cancel")
-def api_courier_cancel():
-    if not dispatcher_required():
-        return jsonify({"ok": False}), 403
-    d = request.get_json(force=True, silent=True) or {}
-    o = db().execute("SELECT * FROM orders WHERE id=?", (d.get("order_id"),)).fetchone()
-    if not o:
-        return jsonify({"ok": False, "error": "Order not found."})
-    if not o["courier_ref"]:
-        return jsonify({"ok": False, "error": "No courier on this order."})
-    if (o["courier_status"] or "") in ("delivered", "cancelled"):
-        return jsonify({"ok": False, "error": "This delivery is already finished."})
-    r = couriers.cancel(_courier_cfg(), o["courier_provider"], o["courier_ref"])
-    if not r.get("ok"):
-        return jsonify({"ok": False, "error": r.get("error", "The courier refused the cancel.")})
-    db().execute("UPDATE orders SET courier_status='cancelled' WHERE id=?", (o["id"],))
-    db().commit()
-    return jsonify({"ok": True})
-
-
-def _courier_webhook(provider):
-    cfg = _courier_cfg()
-    if not cfg["webhook_token"]:
-        return jsonify({"ok": False, "error": "The courier webhook token is not set yet."}), 503
-    given = (request.args.get("t") or request.headers.get("X-Courier-Token") or "").strip()
-    if given != cfg["webhook_token"]:
-        return jsonify({"ok": False}), 401
-    payload = request.get_json(force=True, silent=True) or {}
-    hit = couriers.parse_webhook(provider, payload)
-    if not hit.get("ok"):
-        return jsonify({"ok": True, "ignored": True})
-    o = db().execute("SELECT * FROM orders WHERE courier_ref=?", (hit["ref"],)).fetchone()
-    if not o:
-        return jsonify({"ok": True, "ignored": True})
-    st = hit["status"]
-    sets = ["courier_status=?"]
-    args = [st]
-    if couriers.status_label(st) == "delivered" and (o["dispatch_status"] or "") not in ("delivered", "cancelled"):
-        sets += ["dispatch_status='delivered'", "delivered_at=?"]
-        args.append(dt.datetime.now(_zone(APP_TZ)).isoformat())
-    args.append(o["id"])
-    db().execute("UPDATE orders SET " + ",".join(sets) + " WHERE id=?", args)
-    db().commit()
-    return jsonify({"ok": True})
-
-
-@app.post("/api/courier/webhook/uber")
-def courier_webhook_uber():
-    return _courier_webhook("uber")
-
-
-@app.post("/api/courier/webhook/doordash")
-def courier_webhook_doordash():
-    return _courier_webhook("doordash")
-
-
-
+@app.post("/api/dispatch/pause-restaurant")
 def api_pause_restaurant():
     """Pause or resume a kitchen straight from the board."""
     if not dispatcher_required():
@@ -12819,28 +12574,7 @@ def dispatch_settings():
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('voice_rest_calls_off',?)",
                          ("1" if request.form.get("voice_rest_calls_off") else "0",))
             saved = True
-        if "courier_present" in request.form and _am_owner:
-            for _ck in ("uber_customer_id", "uber_client_id", "dd_developer_id", "dd_key_id"):
-                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
-                             (_ck, (request.form.get(_ck) or "").strip()))
-            for _ck in ("uber_client_secret", "dd_signing_secret"):
-                _v = (request.form.get(_ck) or "").strip()
-                if _v:
-                    db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)", (_ck, _v))
-            if request.form.get("uber_clear"):
-                db().execute("DELETE FROM settings WHERE key IN ('uber_client_id','uber_client_secret','uber_customer_id')")
-            if request.form.get("dd_clear"):
-                db().execute("DELETE FROM settings WHERE key IN ('dd_developer_id','dd_key_id','dd_signing_secret')")
-            for _ck in ("uber_enabled", "dd_enabled", "courier_demo"):
-                db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES(?,?)",
-                             (_ck, "1" if request.form.get(_ck) else "0"))
-            _cur_tok = (setting("courier_webhook_token", str) or "").strip()
-            _tok = (request.form.get("courier_webhook_token") or "").strip()
-            if request.form.get("courier_regenerate") or not _cur_tok:
-                _tok = uuid.uuid4().hex
-            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('courier_webhook_token',?)", (_tok,))
-            saved = True
-
+        if "automsg_present" in request.form and (_am_owner or _am_dev):
             for _k, _l, _h, _d in AUTO_MSGS:
                 if (_k in DEV_AUTO_MSGS and not _am_dev) or (_k not in DEV_AUTO_MSGS and not _am_owner):
                     continue
@@ -13339,7 +13073,7 @@ def dispatch_settings():
         if errs:
             db().commit()
             rows = db().execute("SELECT * FROM settings").fetchall()
-            return render_template("dispatch_settings.html", pp=pp_settings_view(), courier_hook=courier_hook_url(), pp_msgs=pp_msgs, br=br_settings_view(), br_msgs=br_msgs, br_sites=[dict(id=x["id"], name=x["name"]) for x in db().execute("SELECT id, name FROM sites ORDER BY name").fetchall()] if brands_on() else [], ss_main=sorted(main_business_site_ids()), sites=sites_view() if brands_on() else [], auto_msgs=AUTO_MSGS, am_on=auto_msg_on, dev_am=DEV_AUTO_MSGS, dev_view=is_dev(), tz_choices=TZ_CHOICES, owner_view=is_owner(session.get("dispatcher_id")), co=self_company_entry() if is_owner(session.get("dispatcher_id")) else None, site=site_text(raw=True), s={r["key"]: r["value"] for r in rows},
+            return render_template("dispatch_settings.html", pp=pp_settings_view(), pp_msgs=pp_msgs, br=br_settings_view(), br_msgs=br_msgs, br_sites=[dict(id=x["id"], name=x["name"]) for x in db().execute("SELECT id, name FROM sites ORDER BY name").fetchall()] if brands_on() else [], ss_main=sorted(main_business_site_ids()), sites=sites_view() if brands_on() else [], auto_msgs=AUTO_MSGS, am_on=auto_msg_on, dev_am=DEV_AUTO_MSGS, dev_view=is_dev(), tz_choices=TZ_CHOICES, owner_view=is_owner(session.get("dispatcher_id")), co=self_company_entry() if is_owner(session.get("dispatcher_id")) else None, site=site_text(raw=True), s={r["key"]: r["value"] for r in rows},
                                    saved=False, errors=errs, bh=business_hours_rows(),
                                    bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
         if "order_tokens" in request.form:
@@ -13348,7 +13082,7 @@ def dispatch_settings():
         db().commit()
         saved = True
     rows = db().execute("SELECT * FROM settings").fetchall()
-    return render_template("dispatch_settings.html", pp=pp_settings_view(), courier_hook=courier_hook_url(), pp_msgs=pp_msgs, br=br_settings_view(), br_msgs=br_msgs, br_sites=[dict(id=x["id"], name=x["name"]) for x in db().execute("SELECT id, name FROM sites ORDER BY name").fetchall()] if brands_on() else [], ss_main=sorted(main_business_site_ids()), sites=sites_view() if brands_on() else [], auto_msgs=AUTO_MSGS, am_on=auto_msg_on, dev_am=DEV_AUTO_MSGS, dev_view=is_dev(), tz_choices=TZ_CHOICES, owner_view=is_owner(session.get("dispatcher_id")), co=self_company_entry() if is_owner(session.get("dispatcher_id")) else None, site=site_text(raw=True), s={r["key"]: r["value"] for r in rows}, saved=saved,
+    return render_template("dispatch_settings.html", pp=pp_settings_view(), pp_msgs=pp_msgs, br=br_settings_view(), br_msgs=br_msgs, br_sites=[dict(id=x["id"], name=x["name"]) for x in db().execute("SELECT id, name FROM sites ORDER BY name").fetchall()] if brands_on() else [], ss_main=sorted(main_business_site_ids()), sites=sites_view() if brands_on() else [], auto_msgs=AUTO_MSGS, am_on=auto_msg_on, dev_am=DEV_AUTO_MSGS, dev_view=is_dev(), tz_choices=TZ_CHOICES, owner_view=is_owner(session.get("dispatcher_id")), co=self_company_entry() if is_owner(session.get("dispatcher_id")) else None, site=site_text(raw=True), s={r["key"]: r["value"] for r in rows}, saved=saved,
                            bh=business_hours_rows(), bh_on=bool(business_hours()), any_on=any_rest_on(), any_row=any_rest_row(), bh_days=BH_DAYS)
 
 # ---------------------------------------------------------------- chat
