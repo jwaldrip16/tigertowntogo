@@ -16460,9 +16460,25 @@ def hub_shown_companies():
                     and _norm_host(r.get("url") or "") not in seen:
                 ents.append(hub_company(r))
                 seen.add(_norm_host(r.get("url") or ""))
-        return ents
-    return [hub_company(r) for r in company_rows() if (r.get("listed") if r.get("listed") is not None else 1)
-            and not company_locked(r)]   # locked brands stay hidden until unlocked
+    else:
+        ents = [hub_company(r) for r in company_rows() if (r.get("listed") if r.get("listed") is not None else 1)
+                and not company_locked(r)]   # locked brands stay hidden until unlocked
+    # Each brand once: the same name twice (the main business plus its own brand row, or a brand
+    # saved twice) shows a single button. The copy with a company code wins, so sign-in by code
+    # keeps working.
+    out, at = [], {}
+    for e in ents:
+        k = (e.get("name") or "").strip().lower()
+        if not k:
+            out.append(e)
+            continue
+        i = at.get(k)
+        if i is None:
+            at[k] = len(out)
+            out.append(e)
+        elif not (out[i].get("code") or "").strip() and (e.get("code") or "").strip():
+            out[i] = e
+    return out
 
 
 @app.get("/api/hub/companies")

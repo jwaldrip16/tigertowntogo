@@ -78,10 +78,13 @@ button{font-size:16px;padding:12px 16px;border:0;border-radius:10px;background:{
         try{ localStorage.removeItem(KEY); }catch(e){} showPicker(); };
       // only open the saved company if it is still offered (its brand may have been locked)
       fetch('/api/hub/companies').then(function(r){return r.json();}).then(function(j){
-        var ok = ((j && j.companies) || []).some(function(c){ return c.code === saved.code; });
-        if (ok) { location.href = target(saved); }
+        var fresh = ((j && j.companies) || []).filter(function(c){ return c.code === saved.code; })[0];
+        if (fresh) { saved.url = fresh.url || saved.url; location.href = target(saved); }
         else { try{ localStorage.removeItem(KEY); }catch(e){} showPicker(); }
-      }).catch(function(){ location.href = target(saved); });
+      }).catch(function(){
+        var same = false; try{ same = new URL(saved.url).host === location.host; }catch(e){}
+        if (same) { location.href = target(saved); } else { showPicker(); }
+      });
     }
   }
   function draw(){
