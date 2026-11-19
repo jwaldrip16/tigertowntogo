@@ -101,7 +101,7 @@ def _demo_quote(pickup, dropoff):
 
 # ------------------------------------------------------------------ Uber Direct
 
-UBER_TOKEN_URL = "https://login.uber.com/oauth/v2/token"
+UBER_TOKEN_URL = "https://auth.uber.com/oauth/v2/token"
 UBER_API = "https://api.uber.com/v1/customers"
 
 
