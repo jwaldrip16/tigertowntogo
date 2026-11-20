@@ -12051,7 +12051,8 @@ def api_reorder():
 @app.post("/api/order/hold")
 def api_hold():
     """Hold sends the order back to the pending column. If a driver already had it,
-    it comes off their run, their remaining stops renumber, and they get a note."""
+    it comes off their run, their remaining stops renumber, and they get a note.
+    The driver stays remembered on the order so one click sends it back to them."""
     data = request.get_json(force=True)
     oid = data["order_id"]
     o = db().execute("SELECT * FROM orders WHERE id=?", (oid,)).fetchone()
@@ -12069,8 +12070,11 @@ def api_hold():
         db().execute("""UPDATE orders SET dispatch_status='awaiting_payment', kitchen_status='waiting',
                         driver_id=NULL, stack_seq=NULL WHERE id=?""", (oid,))
     else:
+        # The driver stays remembered on a held order (the app only lists live stops,
+        # so it is off their run either way): the board then shows a primary
+        # "Send order to assigned driver" button so dispatch can put it right back.
         db().execute("""UPDATE orders SET dispatch_status='held', kitchen_status='pending',
-                        hold_reason=?, driver_id=NULL, stack_seq=NULL WHERE id=?""",
+                        hold_reason=?, stack_seq=NULL WHERE id=?""",
                      (data.get("reason", "held by dispatch"), oid))
     if had:
         rest = db().execute("""SELECT id FROM orders WHERE driver_id=? AND dispatch_status
