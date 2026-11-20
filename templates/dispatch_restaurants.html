@@ -1,6 +1,10 @@
 {% extends "base.html" %}{% block body %}
 <div class="head"><h1>Restaurant settings</h1><div>{% if regions_on %}<a class="btn small" href="/dispatch/regions">Regions</a>{% endif %}
   {% if is_owner_view %}<a class="btn small" href="/dispatch/import-zuppler">Import from another site</a>{% endif %}
+  <a class="btn small" href="/dispatch/export/menus.json">Export menus</a>
+  <a class="btn small" href="/dispatch/export/menus.csv">Items CSV</a>
+  <button type="button" class="btn small" onclick="document.getElementById('menuImportFile').click()">Import menus</button>
+  <input type="file" id="menuImportFile" accept=".json,application/json" style="display:none" onchange="menuImport(this)">
   <a class="btn small" href="/dispatch">Back to board</a></div></div>
 {% if saved %}<p class="good">Hours saved.</p>{% endif %}
 {% if request.args.get('deleted') %}<p class="good">Restaurant removed.</p>{% endif %}
@@ -215,4 +219,19 @@ async function restGoogle(id, btn){
   finally { btn.disabled = false; btn.textContent = t; }
 }
 </script>
+
+async function menuImport(inp){
+  const f = inp.files && inp.files[0]; if(!f) return;
+  if (!confirm('Bring menus back from "' + f.name + '"?\nEach restaurant in the file replaces its whole menu with the file\'s version.')) { inp.value = ''; return; }
+  try {
+    const fd = new FormData(); fd.append('file', f);
+    const r = await fetch('/api/dispatch/import-menu', {method:'POST', body: fd});
+    const d = await r.json();
+    if (!d.ok) { alert(d.error || 'Could not import that file.'); return; }
+    alert('Menus imported: ' + d.updated + ' restaurant' + (d.updated === 1 ? '' : 's') + ' updated, '
+          + d.added + ' added, ' + d.items + ' items. Refreshing.');
+    location.reload();
+  } catch (e) { alert('Could not import that file. Check it is the menus JSON export and try again.'); }
+  finally { inp.value = ''; }
+}
 {% endblock %}

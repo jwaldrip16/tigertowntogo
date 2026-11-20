@@ -237,7 +237,10 @@ function designForm(id){
   document.getElementById('stForm').innerHTML =
     '<div class="schedrow"><strong>Design for '+e(s.name)+'</strong>'+
     '<div class="muted small">Only this brand\'s website changes. Anything left blank or unticked uses the main website\'s look and text. Staff pages keep the Fleet Foot look.</div>'+
-    '<h3>Colors</h3>'+col+
+    (RG.sites.length > 1 ? '<div class="small" style="margin:0 0 8px">Make this brand\'s site identical to another brand: '
+      + '<select id="dcFrom" style="max-width:240px">'
+      + RG.sites.filter(x=>x.id!==id).map(x=>'<option value="'+x.id+'">'+e(x.name)+'</option>').join('')
+      + '</select> <button type="button" class="btn tiny" onclick="designCopy('+id+')">Copy everything</button></div>' : '')+'<h3>Colors</h3>'+col+
     '<h3>Font and corners</h3><div class="row"><label class="small">Font <select id="dFont">'+fonts+'</select></label> <label class="small">Corners <select id="dCorners">'+cor+'</select></label></div>'+
     '<h3>Photos</h3>'+pic('hero_image','Big top photo')+pic('pocket_image','App section photo')+
     '<h3>Home page text</h3>'+DTEXT.slice(0,3).map(x=>txt(x[0],x[1],x[2])).join('')+
@@ -246,6 +249,12 @@ function designForm(id){
     '<a class="btn small" href="/?site='+id+'" target="_blank">Preview</a>'+
     '<button class="btn small" onclick="document.getElementById(\'stForm\').innerHTML=\'\';drawSites()">Close</button></div></div>';
   document.getElementById('stForm').scrollIntoView({behavior:'smooth'});
+}
+async function designCopy(id){
+  const from = document.getElementById('dcFrom'); if(!from) return;
+  const f = RG.sites.find(x=>x.id == from.value), s = RG.sites.find(x=>x.id === id);
+  if (!confirm('Copy the whole design of "'+(f?f.name:'')+'" onto "'+(s?s.name:'')+'"?\nIts colors, font, photos and text are all replaced with the other brand\'s.')) return;
+  if (await send({op:'copy_design', from: from.value, to: id})) designForm(id);
 }
 function dcPick(k){ const t = document.getElementById('dcu_'+k); if(t) t.checked = true; }
 async function saveDesign(id){

@@ -11037,6 +11037,17 @@ def sites_edit(b, con, who):
         con.commit()
         log("site", who + " changed the design of " + s["name"])
         return jsonify({"ok": True, **regions_payload()})
+    if op == "copy_design":
+        _src = site_by_id(b.get("from"))
+        _dst = site_by_id(b.get("to"))
+        if not _src or not _dst:
+            return jsonify({"ok": False, "error": "Pick both brands."}), 400
+        if _src["id"] == _dst["id"]:
+            return jsonify({"ok": False, "error": "Pick two different brands."}), 400
+        con.execute("UPDATE sites SET design=? WHERE id=?", (json.dumps(site_design(_src)), _dst["id"]))
+        con.commit()
+        log("site", who + " copied the whole design of " + _src["name"] + " onto " + _dst["name"])
+        return jsonify({"ok": True, **regions_payload()})
     if op == "delete_site":
         s = site_by_id(b.get("id"))
         if not s:
@@ -11592,7 +11603,7 @@ def api_regions_edit():
                 out.add(x)
         return out
 
-    if op in ("add_site", "edit_site", "delete_site", "set_region_site", "site_design", "site_lock"):
+    if op in ("add_site", "edit_site", "delete_site", "set_region_site", "site_design", "site_lock", "copy_design"):
         return sites_edit(b, con, who)
     if op in ("add_region", "rename_region"):
         name = " ".join(str(b.get("name") or "").split())[:40]
@@ -14045,6 +14056,204 @@ def export_all_data():
     name = (setting("business_name", str) or "data").replace(" ", "-")
     return send_file(buf, as_attachment=True, mimetype="application/zip",
                      download_name="%s-data-export-%s.zip" % (name, dt.date.today().isoformat()))
+
+# ---------------------------------------------------------------- menu export + import (developer round-trip)
+# A developer can take every menu out as one JSON file, and the same file can be
+# brought back in on any Fleet Foot server. Matches restaurants by id, then slug, then name.
+def _menu_export_rest(r):
+    """One restaurant's whole menu as plain data: hours, items, sections, prices, sizes and add-on groups."""
+    try:
+        _h = json.loads(r["hours"] or "{}")
+    except Exception:
+        _h = {}
+    hours = {}
+    for d in range(7):
+        x = _h.get(str(d))
+        hours[str(d)] = [str(x[0] or ""), str(x[1] or "")] if isinstance(x, (list, tuple)) and len(x) >= 2 else ["", ""]
+    reg = db().execute("SELECT name FROM regions WHERE id=?", (r["region_id"] or 0,)).fetchone() if (r["region_id"] or 0) else None
+    items = []
+    for it in db().execute("SELECT * FROM menu_items WHERE restaurant_id=? ORDER BY sort, id",
+                           (r["id"],)).fetchall():
+        items.append({"name": it["name"], "description": it["description"] or "",
+                      "price_cents": it["price_cents"], "price": money(it["price_cents"]),
+                      "section": (it["section"] or "").strip(), "tab": (it["menu_tab"] or "").strip(),
+                      "active": it["active"], "image": item_picture(it),
+                      "groups": [{"name": g["name"], "min": g["min"], "max": g["max"], "each": g["each"],
+                                  "options": [{"name": o["name"], "delta_cents": o["delta_cents"], "delta": o["delta"]}
+                                              for o in g["options"]]} for g in item_options(it["id"])]})
+    return {"name": r["name"], "slug": r["slug"], "cuisine": r["cuisine"] or "",
+            "address": r["address"] or "", "phone": r["phone"] or "",
+            "region": (reg["name"] if reg else ""), "prep_default": r["prep_default"] or 15,
+            "min_order_cents": r["min_order_cents"] or 0,
+            "lat": r["lat"], "lng": r["lng"], "hours": hours,
+            "image": media_url(r["image"]) if r["image"] else "",
+            "logo": media_url(r["logo"]) if r["logo"] else "", "items": items}
+
+
+@app.get("/dispatch/export/menu/<int:rid>.json")
+def export_menu_one(rid):
+    import csv, io
+    from flask import send_file
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    r = db().execute("SELECT * FROM restaurants WHERE id=?", (rid,)).fetchone()
+    if not r:
+        return "No such restaurant.", 404
+    buf = io.BytesIO(json.dumps(_menu_export_rest(r), indent=1, ensure_ascii=False).encode("utf-8"))
+    log("export", "%s exported the menu for %s" % (session.get("dispatcher_name") or "dispatch", r["name"]))
+    return send_file(buf, as_attachment=True, mimetype="application/json",
+                     download_name="menu-%s.json" % r["slug"])
+
+
+@app.get("/dispatch/export/menus.json")
+def export_menus_all():
+    import csv, io
+    from flask import send_file
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    data = {"business": setting("business_name", str) or "Fleet Foot Delivery",
+            "exported": dt.datetime.now(_zone(APP_TZ) or dt.timezone.utc).strftime("%Y-%m-%d %H:%M"),
+            "restaurants": [_menu_export_rest(r) for r in
+                            db().execute("SELECT * FROM restaurants ORDER BY name").fetchall()]}
+    buf = io.BytesIO(json.dumps(data, indent=1, ensure_ascii=False).encode("utf-8"))
+    log("export", "%s exported all menus (%d restaurants)" % (session.get("dispatcher_name") or "dispatch", len(data["restaurants"])))
+    return send_file(buf, as_attachment=True, mimetype="application/json",
+                     download_name="%s-menus.json" % (setting("business_name", str) or "data").replace(" ", "-"))
+
+
+@app.get("/dispatch/export/menus.csv")
+def export_menus_csv():
+    import csv, io
+    from flask import send_file
+    """Every item on one flat sheet: restaurant, section, item, price, and the sizes and add-ons written out."""
+    if not dispatcher_required():
+        return redirect(url_for("dispatch_login"))
+    out = io.StringIO()
+    w = csv.writer(out)
+    w.writerow(["restaurant", "section", "menu tab", "item", "description", "price", "active", "sizes and add-ons"])
+    n = 0
+    for r in db().execute("SELECT * FROM restaurants ORDER BY name").fetchall():
+        for it in db().execute("SELECT * FROM menu_items WHERE restaurant_id=? ORDER BY sort, id",
+                               (r["id"],)).fetchall():
+            gs = "; ".join("%s (pick %d-%d): %s" % (g["name"], g["min"], g["max"],
+                           ", ".join("%s%s" % (o["name"], (" +" + o["delta"]) if o["delta_cents"] else "")
+                                     for o in g["options"]))
+                           for g in item_options(it["id"]))
+            w.writerow([r["name"], (it["section"] or "").strip(), (it["menu_tab"] or "").strip(),
+                        it["name"], it["description"] or "", money(it["price_cents"]),
+                        "yes" if it["active"] else "no", gs])
+            n += 1
+    buf = io.BytesIO(("\ufeff" + out.getvalue()).encode("utf-8"))
+    log("export", "%s exported menus as CSV (%d items)" % (session.get("dispatcher_name") or "dispatch", n))
+    return send_file(buf, as_attachment=True, mimetype="text/csv", download_name="menus.csv")
+
+
+@app.post("/api/dispatch/import-menu")
+def api_import_menu():
+    """Menus back in from a menus.json this portal's Export menus button wrote.
+    Restaurants are matched by id, then slug, then name; ones not on file are added from the file's
+    details. Each restaurant's old menu is replaced by the file's, like the ordering-site import."""
+    if not dispatcher_required():
+        return jsonify({"ok": False}), 403
+    f = request.files.get("file")
+    raw = f.read() if f else (request.get_data(cache=False) or b"")
+    try:
+        data = json.loads(raw.decode("utf-8-sig", "replace"))
+    except Exception:
+        return jsonify({"ok": False,
+                        "error": "That file is not a menus export. Use the JSON file the Export menus button writes."})
+    if isinstance(data, dict):
+        rests = data.get("restaurants")
+        if rests is None:
+            rests = [data] if data.get("items") else None   # one restaurant's file
+    else:
+        rests = data
+    if not isinstance(rests, list) or not rests:
+        return jsonify({"ok": False, "error": "No restaurants in that file."})
+    con = db()
+    have = {}
+    for r in con.execute("SELECT * FROM restaurants").fetchall():
+        have["i%s" % r["id"]] = r
+        have["s" + (r["slug"] or "")] = r
+        have[_norm_name(r["name"])] = r
+    made = updated = items = 0
+    for z in rests:
+        if not isinstance(z, dict) or not (z.get("name") or "").strip():
+            continue
+        cur = (have.get("i%s" % z.get("id")) if z.get("id") else None) \
+            or have.get("s" + (z.get("slug") or "")) or have.get(_norm_name(z["name"]))
+        if cur:
+            rid = cur["id"]
+            updated += 1
+            # details from the file only fill blanks; the menu is what we bring back
+            con.execute("""UPDATE restaurants SET
+                           address=CASE WHEN address IS NULL OR address='' THEN ? ELSE address END,
+                           phone=CASE WHEN phone IS NULL OR phone='' THEN ? ELSE phone END,
+                           cuisine=CASE WHEN cuisine IS NULL OR cuisine='' THEN ? ELSE cuisine END
+                           WHERE id=?""",
+                        (z.get("address") or "", z.get("phone") or "", z.get("cuisine") or "", rid))
+        else:
+            base = "".join(ch if ch.isalnum() else "-" for ch in z["name"].lower()).strip("-")
+            base = "-".join(x for x in base.split("-") if x) or "restaurant"
+            slug, n2 = base, 2
+            while con.execute("SELECT 1 FROM restaurants WHERE slug=?", (slug,)).fetchone():
+                slug = "%s-%d" % (base, n2); n2 += 1
+            try:
+                _zh = z.get("hours") or {}
+                hours = {str(d): [(( _zh.get(str(d)) or ["", ""])[0] or ""), ((_zh.get(str(d)) or ["", ""])[1] or "")]
+                         for d in range(7)}
+            except Exception:
+                hours = {}
+            _img = (z.get("image") or "").strip()
+            _logo = (z.get("logo") or "").strip()
+            cur2 = con.execute("""INSERT INTO restaurants(name,slug,pin,address,phone,lat,lng,hours,prep_default,
+                                   image,logo,cuisine,min_order_cents)
+                                   VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                                (z["name"], slug, "%04d" % secrets.randbelow(10000), z.get("address") or "",
+                                 z.get("phone") or "", z.get("lat"), z.get("lng"), json.dumps(hours),
+                                 int(z.get("prep_default") or 15),
+                                 os.path.basename(_img) if _img else "", os.path.basename(_logo) if _logo else "",
+                                 z.get("cuisine") or "", z.get("min_order_cents") or None))
+            rid = cur2.lastrowid
+            made += 1
+        old = [x["id"] for x in con.execute("SELECT id FROM menu_items WHERE restaurant_id=?", (rid,)).fetchall()]
+        if old:
+            marks = ",".join("?" * len(old))
+            gids = [x["id"] for x in con.execute("SELECT id FROM option_groups WHERE item_id IN (%s)" % marks, old).fetchall()]
+            if gids:
+                con.execute("DELETE FROM options WHERE group_id IN (%s)" % ",".join("?" * len(gids)), gids)
+            con.execute("DELETE FROM option_groups WHERE item_id IN (%s)" % marks, old)
+            con.execute("DELETE FROM menu_items WHERE restaurant_id=?", (rid,))
+        for sorti, it in enumerate(z.get("items") or []):
+            nm = (it.get("name") or "").strip()
+            if not nm:
+                continue
+            img = (it.get("image") or "").strip()
+            if img.startswith("http") and not img.startswith("/"):
+                image, src = img, img
+            else:
+                image, src = (os.path.basename(img) if img else ""), ""
+            ci = con.execute("""INSERT INTO menu_items(restaurant_id,name,description,price_cents,active,section,sort,image,menu_tab,image_src)
+                                VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                             (rid, nm[:120], (it.get("description") or "")[:1000], int(it.get("price_cents") or 0),
+                              1 if it.get("active", 1) in (1, True, "1", "yes") else 0,
+                              (it.get("section") or "")[:80], sorti, image, (it.get("tab") or "")[:60], src))
+            iid = ci.lastrowid
+            items += 1
+            for gi, g in enumerate(it.get("groups") or []):
+                if not (g.get("name") or "").strip():
+                    continue
+                gc = con.execute("""INSERT INTO option_groups(item_id,name,min_select,max_select,max_each,sort) VALUES(?,?,?,?,?,?)""",
+                                 (iid, g["name"][:80], int(g.get("min") or 0), int(g.get("max") or 0),
+                                  max(1, int(g.get("each") or 1)), gi))
+                con.executemany("INSERT INTO options(group_id,name,price_delta_cents,sort) VALUES(?,?,?,?)",
+                                [(gc.lastrowid, (o.get("name") or "")[:80], int(o.get("delta_cents") or 0), oi)
+                                 for oi, o in enumerate(g.get("options") or []) if (o.get("name") or "").strip()])
+    con.commit()
+    log("import", "%s imported menus from an export: %d updated, %d added, %d items"
+        % (session.get("dispatcher_name") or "dispatch", updated, made, items))
+    return jsonify({"ok": True, "updated": updated, "added": made, "items": items})
+
 
 def _gps_rows(driver_id, f, t):
     sql = """SELECT l.*, d.name FROM driver_log l JOIN drivers d ON d.id=l.driver_id
