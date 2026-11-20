@@ -7403,7 +7403,10 @@ def api_assign():
         prev = db().execute("SELECT driver_id, dispatch_status FROM orders WHERE id=?",
                             (oid,)).fetchone()
         prev_did = prev["driver_id"] if prev else None
-        if prev_did and str(prev_did) == str(did):
+        # same driver again is only a no-op when the order is truly on their run;
+        # a parked order (held/queued) still carrying that driver must come out of
+        # the hold for real, or it stays parked and never reaches the driver app
+        if prev_did and str(prev_did) == str(did) and prev["dispatch_status"] in LIVE_STOP:
             return jsonify({"ok": True, "moved": False})
         orow = db().execute("SELECT region_id FROM orders WHERE id=?", (oid,)).fetchone()
         rc = region_conflict(int(did), orow["region_id"] if orow else None, oid)
@@ -12123,16 +12126,19 @@ def api_send_to_driver():
         rc = region_conflict(int(did), o["region_id"], o["id"])
         if rc:
             return jsonify({"ok": False, "error": rc}), 400
-    db().execute("""UPDATE orders SET dispatch_status='queued', hold_reason=NULL WHERE id=?""",
-                 (o["id"],))
-    db().commit()
-    if did:
+        # Validate the driver BEFORE clearing the hold: if the driver is offline,
+        # the order keeps its hold instead of silently dropping into the queue.
         d = db().execute("SELECT * FROM drivers WHERE id=?", (did,)).fetchone()
         if not d:
             return jsonify({"ok": False, "error": "Unknown driver."}), 404
         if d["status"] != "online":
             return jsonify({"ok": False,
                             "error": d["name"] + " is not on shift. Put them online first."}), 400
+    db().execute("""UPDATE orders SET dispatch_status='queued', hold_reason=NULL WHERE id=?""",
+                 (o["id"],))
+    db().commit()
+    if did:
+        d = db().execute("SELECT * FROM drivers WHERE id=?", (did,)).fetchone()
         seq = db().execute("""SELECT COALESCE(MAX(stack_seq),0)+1 s FROM orders WHERE driver_id=?
                               AND dispatch_status IN ('assigned','received','at_restaurant','enroute')""",
                            (did,)).fetchone()["s"]

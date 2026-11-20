@@ -1339,8 +1339,8 @@ async function board(force){
     !['at_restaurant','enroute'].includes(o.dispatch_status);
   res.orders.forEach(o=>{ if(offDriver(o)){ const dd=res.drivers.find(x=>x.id===o.driver_id);
     o.hold_reason = (dd?dd.name:'driver')+' is off shift, reassign'; } });
-  const allPending = res.orders.filter(o=>!o.driver_id || offDriver(o));
-  const allActive  = res.orders.filter(o=>o.driver_id && !offDriver(o));
+  const allPending = res.orders.filter(o=>!o.driver_id || offDriver(o) || parkedOrder(o));
+  const allActive  = res.orders.filter(o=>o.driver_id && !offDriver(o) && !parkedOrder(o));
   try { drawRgTabs(res, allPending, allActive); } catch(e) { console.log('region tabs skipped', e); }
   renderDrivers(rgDrivers(res.drivers));
   const pending = rgOrders(allPending);
@@ -1700,6 +1700,9 @@ function setToken(oid){
 }
 function fmtPhone(p){ const d = String(p||'').replace(/\D/g,'').replace(/^1(?=\d{10}$)/,'');
   return d.length===10 ? '('+d.slice(0,3)+') '+d.slice(3,6)+'-'+d.slice(6) : String(p||''); }
+function parkedOrder(o){
+  return ['held','queued','awaiting_payment'].includes(o.dispatch_status);
+}
 function esc(s){ return String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 // Ticking timer: how long each order has been in its current dispatch status.
 let ORDER_STATUS_AT = {};   // order id -> {age: seconds at render, at: Date.now() of that render}
@@ -1775,7 +1778,9 @@ function orderCard(o, opts, drivers){
       (canReorder(o) ? '<button class="btn tiny" onclick="newFromOrder('+o.id+')">New order from this</button>' : '')+
       (IS_OWNER ? '<button class="btn tiny danger" onclick="deleteOrders(['+o.id+'],\''+o.code+'\')">Delete</button>' : '')+
       '<select id="as'+o.id+'" onchange="assign('+o.id+',this.value)">'+opts+'</select>'+
-      (o.driver_id ?
+      (o.driver_id && parkedOrder(o) ?
+        '<button class="btn tiny primary" onclick="sendToDriver('+o.id+','+o.driver_id+')">Send order to assigned driver</button>' : '')+
+      (o.driver_id && !parkedOrder(o) ?
         '<button class="btn tiny" onclick="dstat('+o.id+',\'received\')">Received</button>'+
         '<button class="btn tiny" onclick="dstat('+o.id+',\'at_restaurant\')">At rest</button>'+
         '<button class="btn tiny" onclick="dstat('+o.id+',\'enroute\')">Enroute</button>'+
@@ -1894,10 +1899,12 @@ async function setAuto(){
   if(res.ok){ document.getElementById('autoLbl').textContent =
     res.auto ? 'Auto dispatch on' : 'Auto dispatch off, assign by hand'; board(true); }
 }
-async function sendToDriver(id){
-  const sel = document.getElementById('sd'+id);
-  const did = sel && sel.value ? +sel.value : null;
-  const res = await jpost('/api/order/send-to-driver', {order_id:id, driver_id:did});
+async function sendToDriver(id, did){
+  if(did === undefined){
+    const sel = document.getElementById('sd'+id);
+    did = sel && sel.value ? +sel.value : null;
+  }
+  const res = await jpost('/api/order/send-to-driver', {order_id:id, driver_id:did||null});
   if(!res.ok){ alert(res.error || 'Could not send that order.'); return; }
   if(res.queued) alert(res.error);
   board(true);
