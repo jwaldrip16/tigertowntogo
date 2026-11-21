@@ -12073,9 +12073,20 @@ def api_hold():
         # The driver stays remembered on a held order (the app only lists live stops,
         # so it is off their run either way): the board then shows a primary
         # "Send order to assigned driver" button so dispatch can put it right back.
-        db().execute("""UPDATE orders SET dispatch_status='held', kitchen_status='pending',
-                        hold_reason=?, stack_seq=NULL WHERE id=?""",
-                     (data.get("reason", "held by dispatch"), oid))
+        # When the kitchen already has the order (it was sent, or confirmed and
+        # cooking), hold leaves the kitchen state and the prep timer alone: the card
+        # keeps saying "sent to kitchen" and the timer keeps running. Only an order
+        # the kitchen never got goes back to pending so the card asks to order again.
+        sent = (o["kitchen_sent_at"] is not None
+                or o["kitchen_status"] in ("preparing", "ready"))
+        if sent:
+            db().execute("""UPDATE orders SET dispatch_status='held', hold_reason=?,
+                            stack_seq=NULL WHERE id=?""",
+                         (data.get("reason", "held by dispatch"), oid))
+        else:
+            db().execute("""UPDATE orders SET dispatch_status='held', kitchen_status='pending',
+                            hold_reason=?, stack_seq=NULL WHERE id=?""",
+                         (data.get("reason", "held by dispatch"), oid))
     if had:
         rest = db().execute("""SELECT id FROM orders WHERE driver_id=? AND dispatch_status
                                IN ('assigned','received','at_restaurant','enroute')
