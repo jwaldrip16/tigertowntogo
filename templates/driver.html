@@ -836,6 +836,13 @@ async function dstat(id, st){ await jpost('/api/order/status', {order_id:id, dis
 let DTAB = 'run';
 let CHAT_SEEN = null;      // highest message id the driver has actually looked at
 let CHAT_UNREAD = 0;
+let CHAT_LOOP = null;      // chimes every 5 seconds while a chat message sits unread
+function chatLoopStart(){
+  if (CHAT_LOOP) return;
+  try { if (!ffSound.enabled()) { ffSound.toggle(); soundNote(); } } catch(e) {}
+  CHAT_LOOP = setInterval(function(){ try { ffSound.play('message'); } catch(e){} }, 5000);
+}
+function chatLoopStop(){ if (CHAT_LOOP){ clearInterval(CHAT_LOOP); CHAT_LOOP = null; } }
 function dtab(which){
   DTAB = which;
   ['run','chat','sched','done','best'].forEach(function(k){
@@ -875,6 +882,7 @@ function bestShifts(){
 }
 function clearChatBadge(){
   CHAT_UNREAD = 0;
+  chatLoopStop();
   const b = document.getElementById('chatBadge');
   b.classList.add('hidden'); b.textContent = '';
   document.getElementById('chatAlert').classList.add('hidden');
@@ -905,6 +913,7 @@ async function chat(){
   al.classList.remove('hidden');
   document.title = '(' + CHAT_UNREAD + ') Driver app';
   try { ffSound.play('message'); } catch(e){}   // dispatch or system wrote to the driver
+  chatLoopStart();   // chime repeats every 5 seconds until the driver opens the chat
   try { ffNotify.show((last.who || 'Dispatch'), last.body, 'chat'); } catch(e){}
 }
 async function send(){

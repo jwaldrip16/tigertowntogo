@@ -260,6 +260,13 @@ async function menuBlock(id, block){
   renderMenu();
 }
 let CHAT_LAST = null;
+let CHAT_LOOP = null;      // chimes every 5 seconds while a chat message sits unread
+function chatLoopStart(){
+  if (CHAT_LOOP) return;
+  try { if (!ffSound.enabled()) { ffSound.toggle(); soundNote(); } } catch(e) {}
+  CHAT_LOOP = setInterval(function(){ try { ffSound.play('message'); } catch(e){} }, 5000);
+}
+function chatLoopStop(){ if (CHAT_LOOP){ clearInterval(CHAT_LOOP); CHAT_LOOP = null; } }
 function esc(s){ return String(s||'').replace(/[&<>"]/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c])); }
 async function loadChat(seen){
   const res = await jget('/api/restaurant/chat' + (seen ? '?seen=1' : ''));
@@ -281,10 +288,12 @@ async function sendChat(){
 function chatBadge(n){
   const b = document.getElementById('chatBadge');
   b.textContent = n ? n : ''; b.classList.toggle('hidden', !n);
+  if (n) chatLoopStart(); else chatLoopStop();   // chime repeats every 5 seconds until the chat is opened
 }
 function chatCheck(res){
   const n = res.chat_unread || 0, last = res.chat_last_id || 0;
   if (TAB === 'chat'){
+    chatLoopStop();
     if (last !== CHAT_LAST){
       const fresh = CHAT_LAST !== null && last > CHAT_LAST;
       loadChat(true).then(function(r){
