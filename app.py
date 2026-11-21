@@ -395,7 +395,7 @@ def init_db():
     topup_restaurants(con)
     for k, v in [("base_fee_cents", "399"), ("base_miles", "3"), ("per_mile_cents", "100"),
                  ("tax_rate_bp", "900"), ("service_fee_bp", "0"), ("business_open", "0"), ("future_lead_min", "45"), ("asap_due_min", "45"), ("kitchen_accept_min", "5"), ("driver_accept_min", "3"), ("late_sound_after_min", "3"), ("driver_done_cleared_at", ""), ("auto_assign", "1"), ("kitchen_hold", "1"), ("keep_awake_driver", "1"), ("keep_awake_kitchen", "1"), ("auto_driver_pay", "1"), ("auto_pay_cap_cents", "2500"), ("auto_pay_delay_min", "15"), ("max_stack_default", "3"), ("sched_lead_min", "60"), ("stack_by_location", "1"), ("stack_pickup_mi", "0.5"), ("stack_detour_mi", "2"),
-                 ("assign_on_pending", "0"), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
+                 ("assign_on_pending", "0"), ("long_prep_hold_min", ""), ("week_open_dow", "4"), ("week_open_date", ""), ("one_run_at_a_time", "0"),
                  ("tip_prompt", "1"), ("dispatch_phone", "3342092844"),
                  ("loyalty_on", "1"), ("points_per_dollar", "1"), ("reward_points", "100"),
                  ("reward_value_cents", "500"), ("confirm_call", "1"), ("gift_share_brands", "0"),
@@ -2872,6 +2872,26 @@ def short_staff_alert():
         print("busy alert skipped:", e)
 
 
+def long_prep_hold_on():
+    """Minutes of prep still on the clock below which an order may go to a driver.
+    Blank or 0 means the long-prep hold is off."""
+    try:
+        return int(str(setting("long_prep_hold_min") or "").strip() or 0)
+    except Exception:
+        return 0
+
+
+def long_prep_left_min(o):
+    """Minutes still left on a confirmed prep timer, or None when there is none."""
+    if o["kitchen_status"] != "preparing" or not o["prep_started"] or not o["prep_minutes"]:
+        return None
+    try:
+        end = dt.datetime.fromisoformat(o["prep_started"]) + dt.timedelta(minutes=o["prep_minutes"])
+        return (end - dt.datetime.now()).total_seconds() / 60.0
+    except Exception:
+        return None
+
+
 def auto_assign():
     try:
         stamp_regions()
@@ -2903,8 +2923,13 @@ def auto_assign():
                              AND (kitchen_status IN (""" + stages + """)
                                   OR (kitchen_status='pending' AND manual_state='ordering'))
                            ORDER BY created_at ASC""").fetchall()
+        hold_mins = long_prep_hold_on()
         pick = None
         for cand in waiting:
+            if hold_mins:
+                left = long_prep_left_min(cand)
+                if left is not None and left > hold_mins:
+                    continue
             m = stack_match(cand, shift_now)
             if m:
                 pick = (cand, m[0], m[1])
@@ -3791,9 +3816,10 @@ def order_dict(o):
         "miles": (o["miles"] if o["address_ok"] else None), "kitchen_status": o["kitchen_status"],
         "address_ok": bool(o["address_ok"]),
         "source": o["source"], "source_label": SOURCES.get(o["source"], "Web"),
+        "hold_reason": ("holding for the kitchen: driver goes when the prep timer is under " + str(long_prep_hold_on()) + " min") if (long_prep_hold_on() and o["dispatch_status"] in ("queued", "held") and not (o["hold_reason"] or "").strip() and (long_prep_left_min(o) or -1) > long_prep_hold_on()) else None,
         "token": (o["token"] or ""),
         "needs_address_approval": not o["address_ok"],
-        "dispatch_status": o["dispatch_status"], "hold_reason": ("customer must call to confirm" if (confirm_needed(o) and o["dispatch_status"] in ("held", "queued", "awaiting_payment")) else None) or called_in_words(o, ("tap Send to kitchen" if ("kitchen_go" in o.keys() and o["kitchen_go"] == 0 and o["kitchen_status"] == "waiting" and o["dispatch_status"] in ("held", "queued") and o["address_ok"]) else o["hold_reason"])),
+        "dispatch_status": o["dispatch_status"], "hold_reason": ("customer must call to confirm" if (confirm_needed(o) and o["dispatch_status"] in ("held", "queued", "awaiting_payment")) else None) or ("holding for the kitchen: driver goes when the prep timer is under " + str(long_prep_hold_on()) + " min" if (long_prep_hold_on() and o["dispatch_status"] in ("queued", "held") and not (o["hold_reason"] or "").strip() and (long_prep_left_min(o) or -1) > long_prep_hold_on()) else None) or called_in_words(o, ("tap Send to kitchen" if ("kitchen_go" in o.keys() and o["kitchen_go"] == 0 and o["kitchen_status"] == "waiting" and o["dispatch_status"] in ("held", "queued") and o["address_ok"]) else o["hold_reason"])),
         "issue": o["issue"] or "", "issue_note": o["issue_note"] or "",
         "cloned_from": o["cloned_from"] or "",
         "drop_style": clean_drop_style(_rv(o, "drop_style")),
@@ -12972,6 +12998,13 @@ def dispatch_settings():
         if "assign_on_pending" in request.form:
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('assign_on_pending',?)",
                          ("1" if str(request.form.get("assign_on_pending")).strip() == "1" else "0",))
+        if "long_prep_hold_min" in request.form:
+            _raw = str(request.form.get("long_prep_hold_min") or "").strip()
+            try:
+                _v = max(0, int(float(_raw))) if _raw else 0
+            except ValueError:
+                _v = 0
+            db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('long_prep_hold_min',?)", (str(_v),))
         if "stack_by_location" in request.form:
             db().execute("INSERT OR REPLACE INTO settings(key,value) VALUES('stack_by_location',?)",
                          ("1" if str(request.form.get("stack_by_location")).strip() == "1" else "0",))
@@ -18562,6 +18595,22 @@ if os.environ.get("AUTO_BUSINESS", "1") != "0":
     threading.Thread(target=_auto_business_worker, daemon=True).start()
 
 threading.Thread(target=_confirm_chase_worker, daemon=True).start()
+
+
+def _driver_hold_worker():
+    """Re-run auto dispatch as prep timers count down, so an order held back for a
+    long prep time goes to a driver the moment the timer crosses the line."""
+    while True:
+        time.sleep(60)
+        try:
+            with app.app_context():
+                if long_prep_hold_on():
+                    auto_assign()
+        except Exception as e:
+            print("driver hold tick skipped:", e)
+
+
+threading.Thread(target=_driver_hold_worker, daemon=True).start()
 
 
 @app.post("/api/dispatch/auto-business")

@@ -347,6 +347,9 @@ rsLoad();
   <input name="assign_on_pending" value="{{ s['assign_on_pending'] if s['assign_on_pending'] is defined and s['assign_on_pending'] != None else '0' }}">
   <div class="muted small">On: auto dispatch hands the order to a driver the moment you tap Send to kitchen, so they head over while the food cooks.
     Off: the driver is assigned once the kitchen accepts and sets a prep time (or you mark a called-in order Ordering in process).</div>
+  <label>Hold long-prep orders from drivers until the prep timer is under (minutes, blank = off)</label>
+  <input name="long_prep_hold_min" value="{{ s['long_prep_hold_min'] or '' }}">
+  <div class="muted small">When set, auto dispatch keeps an order off the drivers while the kitchen's confirmed prep timer still has more than this many minutes left, then hands it over as the timer counts down. Orders the kitchen has not confirmed yet, and orders you send to a driver by hand, are not affected.</div>
   <label>Keep the driver app screen awake by default (1 on, 0 off)</label>
   <input name="keep_awake_driver" value="{{ s['keep_awake_driver'] if s['keep_awake_driver'] is defined and s['keep_awake_driver'] != None else '1' }}">
   <label>Keep the restaurant app screen awake by default (1 on, 0 off)</label>
